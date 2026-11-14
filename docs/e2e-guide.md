@@ -45,6 +45,15 @@ node -e "const l=require('fs').readFileSync('e2e.log','utf8').split(/\r?\n/).fin
 - **根因**：工作区有**未提交的进行中改动**（当天 `renderer/app.js`、`runtime/{graph,policy,state}.js` 在 e2e 运行期间被另一会话连续修改），e2e 打包/加载的是半成品代码。`runtime/lib/renderer/main.js` 任何未预期的改动都会让 e2e 结果失效。
 - **修法**：跑 e2e 前先 `git status --short` + `git log -1` 确认基线；如果存在非预期改动，先和改动方对齐（等它完成或基于最后一个绿色 commit 跑），**不要**在别人改代码时跑 e2e，也不要随意 `git checkout` 丢弃别人的进行中工作。
 
+## userData 统一路径与旧打包版数据迁移
+
+- **背景**：开发版（`npx electron .`）userData = `%APPDATA%/dsh-desktop`，打包版（productName "DSH Desktop"）默认 = `%APPDATA%/DSH Desktop`，两套存储分裂会让打包版首次启动看不到开发版历史（用户感知「聊天记录不保存」）。`main.js` 现已强制统一：无 `--user-data-dir=` 参数时一律用 `%APPDATA%/dsh-desktop`（决策纯函数在 `lib/user-data.js`）。**显式 `--user-data-dir=` 仍优先级最高**，e2e/探针的隔离测试不受影响。
+- **时序**：`app.setPath` 在 `requestSingleInstanceLock` 之前——单实例锁按 userData 隔离，必须先统一路径再拿锁（详见 `main.js` 顶部注释）。启动日志固定打一行 `[boot] userData = <生效路径>`，排查路径问题时先看它。
+- **旧打包版数据迁移**（自动检测，不自动复制）：启动时若统一目录还不存在、而 `%APPDATA%/DSH Desktop` 带有 `Local Storage` 目录，日志会提示「发现旧打包版数据，可手动迁移」。手动迁移方法：
+  1. 完全退出应用（托盘也退出，避免 leveldb 被占用）；
+  2. 把 `%APPDATA%/DSH Desktop/Local Storage` **整个目录**拷贝到 `%APPDATA%/dsh-desktop/Local Storage`（目标已有同名目录时先改名备份再覆盖）；
+  3. 不要在应用运行中复制：leveldb 运行时被复制/合并容易损坏，这也是主进程不自动迁移的原因。
+
 ## 排错速查表
 
 | 症状 | 原因 | 修法 |

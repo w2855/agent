@@ -15,6 +15,7 @@ const localTools = require('./lib/tools');
 const mcpModule = require('./lib/mcp');
 const skillsModule = require('./lib/skills');
 const backup = require('./lib/backup');
+const userDataPaths = require('./lib/user-data');
 const runtimeModule = require('./runtime');
 
 // 测试模式（--script/--shot）禁用硬件加速：本机 GPU 驱动间歇性导致渲染进程启动即崩
@@ -24,17 +25,33 @@ if (process.argv.includes('--script') || process.argv.includes('--shot')) {
   app.disableHardwareAcceleration();
 }
 
-// 允许用 --user-data-dir 隔离测试数据；正常启动仍使用系统默认目录
-const userDataArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
-if (userDataArg) {
-  const dir = path.resolve(userDataArg.slice('--user-data-dir='.length));
+// userData 路径统一（决策逻辑见 lib/user-data.js 的 resolveUserDataDir）：
+// - 显式 --user-data-dir=X 优先级最高：e2e/探针的隔离测试路径原样生效（沿用原行为）。
+// - 无隔离参数时，开发版与打包版强制统一到 %APPDATA%/dsh-desktop，历史/设置/密钥共用一份
+//   （打包版 productName "DSH Desktop" 默认落 %APPDATA%/DSH Desktop，两套存储会分裂）。
+// 时序关键：下面的 app.setPath 必须先于 requestSingleInstanceLock —— 单实例锁按 userData
+// 隔离，先统一路径再拿锁，开发版与打包版才会竞争同一把锁；反过来先拿锁再改路径，
+// 两个版本各持一把锁还能同时写同一目录，双开就撞 LevelDB 缓存锁。
+const userDataDecision = userDataPaths.resolveUserDataDir(process.argv, app.getPath('appData'));
+if (userDataDecision.source === 'flag') {
+  // 测试隔离路径：沿用原逻辑，先建目录再指过去
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    app.setPath('userData', dir);
+    fs.mkdirSync(userDataDecision.dir, { recursive: true });
+    app.setPath('userData', userDataDecision.dir);
   } catch (err) {
     console.log('[boot] 无法设置 userData 目录：', err?.message || err);
   }
+} else {
+  // 统一路径：目录由 Electron 按需创建，这里不主动 mkdir
+  app.setPath('userData', userDataDecision.dir);
+  if (userDataDecision.source === 'legacy') {
+    // 只提示、不自动复制：leveldb 在应用运行中被复制容易损坏；手动迁移方法见 docs/e2e-guide.md
+    console.log(`[boot] 发现旧打包版数据（${userDataDecision.legacyDir}），可手动迁移：`
+      + '关闭应用后把其 Local Storage 目录整体拷贝到统一目录下（见 docs/e2e-guide.md）');
+  }
 }
+// 固定打印生效路径（取 getPath 而非决策值：flag 建目录失败时如实反映回退结果）
+console.log('[boot] userData =', app.getPath('userData'));
 
 // 浅色是默认外观；窗口底色跟主题一致，避免启动瞬间白闪。
 nativeTheme.themeSource = 'light';
