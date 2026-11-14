@@ -63,6 +63,11 @@ function writeStorage(key, value) {
 
 const validModel = (m) => typeof m === 'string' && MODEL_RE.test(m.trim());
 
+/* 主进程回传的掩码 key（sk-****末4位，见 lib/secret-mask.js）：只用于表单显示，
+   绝不能当作用户输入的明文回写存储；真实 key 由主进程按 profileId 注入请求。 */
+const MASKED_KEY_PREFIX = 'sk-****';
+const isMaskedKey = (k) => typeof k === 'string' && k.startsWith(MASKED_KEY_PREFIX);
+
 function freshSessions(source) {
   if (source === 'preview') return structuredClone(window.DEMO.sessions);
   return [{
@@ -89,6 +94,9 @@ function retrySetting() {
   const n = Number(readStorage('dsh.retries', '3'));
   return RETRY_CHOICES.includes(n) ? n : 3;
 }
+
+/* 「关闭时最小化到托盘」：localStorage 持有开关（默认关），启动时经 tray:state 同步给主进程 */
+const closeToTraySetting = () => readStorage('dsh.tray', 'off') === 'on';
 
 const state = {
   connection: normalizeConnection(readJson('dsh.conn', null)),
@@ -246,12 +254,16 @@ const apiCfg = () => ({
   baseUrl: $('#apiBaseUrl').value.trim(),
   key: $('#apiKey').value.trim(),
   model: formModel(),
+  /* 密钥主进程化：cfg 带上编辑中的连接 id，主进程优先用它注入真实 key；
+     表单指向的连接（formProfileId）优先于活动连接——新建连接探活时两者不同，
+     用 activeProfileId 会把旧连接的 key 配到新地址上。cfg.key 原值保留（向后兼容）。 */
+  profileId: state.formProfileId || state.activeProfileId || undefined,
   retry: retryConfig(),
 });
 const cfgSig = (cfg) => [cfg?.baseUrl, cfg?.key, cfg?.model].map((v) => String(v ?? '').trim()).join('|');
 const active = () => state.sessions.find((s) => s.id === state.activeId) || state.sessions[0];
 
-function validateBaseAndKey(cfg) {
+function validateBaseAndKey(cfg, opts = {}) {
   const raw = String(cfg?.baseUrl ?? '').trim();
   if (!raw) return '请填写 API 地址';
   if (/\s/.test(raw)) return 'API 地址不能包含空格';
@@ -262,12 +274,14 @@ function validateBaseAndKey(cfg) {
   catch { return 'API 地址不是合法 URL'; }
   if (!['http:', 'https:'].includes(u.protocol)) return 'API 地址只支持 http/https';
   if (!u.hostname || !/^[a-z0-9.\-:\[\]]+$/i.test(u.hostname)) return 'API 地址主机名不合法';
-  if (!String(cfg.key ?? '').trim()) return '请填写 API Key';
+  // 密钥主进程化后，渲染层拿到的 key 可能为空（只存在凭据库里）：
+  // cfg 带 profileId 时主进程会注入真实 key，渲染层不再强制要求明文
+  if (!String(cfg.key ?? '').trim() && !opts.allowVaultKey) return '请填写 API Key';
   return null;
 }
 
-function validateApiInput(cfg) {
-  const baseErr = validateBaseAndKey(cfg);
+function validateApiInput(cfg, opts = {}) {
+  const baseErr = validateBaseAndKey(cfg, opts);
   if (baseErr) return baseErr;
   if (!validModel(cfg?.model)) return '请选择或填写合法模型名';
   return null;
@@ -824,6 +838,7 @@ function renderChat() {
     inner.appendChild(node);
   }
   scrollToBottom(true);
+  refreshFindHitsIfOpen(); // 切会话等整段重绘后，旧 Range 已失效，补一次重建
 }
 
 let stickBottom = true;
@@ -1114,14 +1129,18 @@ async function runTurn(rawText) {
 
   const ctx = { s, draft, node, prose, toolsBox, summary };
   if (sourceOf() === 'model') {
-    const cfgErr = validateApiInput(state.connection.api);
+    /* 密钥主进程化：对话请求带 profileId，主进程优先用它注入真实 key；
+       渲染层不再持有明文（key 可能为空或掩码），cfg.key 原值保留以兼容旧主进程。 */
+    const cfg = { ...state.connection.api, retry: retryConfig() };
+    if (state.activeProfileId) cfg.profileId = state.activeProfileId;
+    const cfgErr = validateApiInput(cfg, { allowVaultKey: Boolean(cfg.profileId) });
     if (cfgErr || !window.dsh?.model) {
       const msg = cfgErr || '当前不在桌面外壳里运行，无法发起请求';
       return runApiTurn(ctx, { immediateError: msg });
     }
     await prepareTools();
     return runApiTurn(ctx, {
-      cfg: { ...state.connection.api, retry: retryConfig() },
+      cfg,
       messages: buildApiMessages(s, text + suffix, draft, userMsg),
     });
   }
@@ -1838,6 +1857,12 @@ function askToolApproval(ctx, tool, runtimeApproval) {
     $('.slot-approval', node).innerHTML = approvalCard(draft.approval);
     if (s) { s.state = 'pending'; renderSessions(); }
     scrollToBottom(true);
+    // 应用在后台时发系统通知把用户拉回来：去重键带上工具目标，不同审批互不吞
+    osNotify(
+      '等待你的确认',
+      `${s?.title || '当前会话'}：${tool.verb} ${tool.target}`.slice(0, 200),
+      'approval:' + (s?.id || '') + ':' + tool.target,
+    );
     return new Promise((resolve) => {
       approvalWaiters.set(draft, { resolve, node });
     });
@@ -1972,6 +1997,8 @@ function runApiTurn(ctx, opts) {
       draft.body = `**API 调用失败**\n\n\`\`\`\n${err}\n\`\`\``;
       prose.innerHTML = markdown(draft.body);
       toast('API 调用失败');
+      // 发送失败同步一条系统通知；tag 与 finish() 相同，两条路径只会发一条 toast
+      osNotify('回合失败', `${s.title}：API 调用失败，回来看看原因`, 'turn:' + s.id);
       finish(draft, node, s, false, '调用失败');
     } else {
       draft.body = body || '（模型未返回内容）';
@@ -2519,6 +2546,8 @@ async function runPreviewTurn(text, ctx) {
     if (!a.outcome) {
       s.state = 'pending';
       renderSessions();
+      // 预览回合同样要等审批：后台时发系统通知（与 API 路径同一套去重规则）
+      osNotify('等待你的确认', `${s.title}：${a.command || a.text || ''}`.slice(0, 200), 'approval:' + s.id + ':' + (a.command || ''));
       await new Promise((resolve) => approvalWaiters.set(draft, { resolve, node }));
       s.state = 'running';
       renderSessions();
@@ -2590,10 +2619,21 @@ function finish(draft, node, session, stopped, overrideLabel) {
   saveSessions();
   // 应用在后台时结束的回合标为未读，切回来点一下会话即清除
   if (document.hidden) session.unread = true;
+  // 后台结束的回合发系统通知（前台不打扰）；用户主动中断（stopped）不发
+  if (document.hidden && !stopped) {
+    const failed = Boolean(draft.error || draft.validationFailed);
+    osNotify(
+      failed ? '回合失败' : '回合完成',
+      `${session.title}：${failed ? '本轮调用失败，回来看看原因' : '本轮已完成，点按查看结果'}`,
+      'turn:' + session.id,
+    );
+  }
   renderHeader();
   renderSessions();
   updateSendState();
   scrollToBottom();
+  // 查找条开着时：活跃回合刚结束，正文已定稿，补一次命中重建（流式期间不重算）
+  refreshFindHitsIfOpen();
 
   // 插话 / 立即发送优先；队列只在正常结束（非中断、非失败）时自动继续
   if (state.pendingTurn) {
@@ -3375,6 +3415,15 @@ async function openSkillsDir() {
   }
 }
 
+/* 系统通知（主进程 Windows toast）：只在应用后台时触发，前台不打扰。
+   去重键 = tag，相同 tag 30s 内主进程只发一条；不支持通知的系统静默跳过。 */
+function osNotify(title, body, tag) {
+  if (!document.hidden) return;
+  try {
+    window.dsh?.notify?.show({ title: String(title), body: String(body).slice(0, 200), tag })?.catch?.(() => { /* 通知失败静默 */ });
+  } catch { /* 通知失败静默 */ }
+}
+
 /* Toast 队列：依次展示，互相不覆盖——旧实现单槽会把重要告警（如存储失败）顶掉 */
 const toastQueue = [];
 let toastBusy = false;
@@ -3428,8 +3477,10 @@ function renderAgentModelPickers() {
 
 async function refreshAgentModelList() {
   renderAgentModelPickers();
-  const cfg = agentModelConfigFor($('#agentModelProfile')?.value);
+  const pickedProfileId = $('#agentModelProfile')?.value || '';
+  const cfg = agentModelConfigFor(pickedProfileId);
   if (!cfg || !window.dsh?.model?.list) return;
+  if (pickedProfileId) cfg.profileId = pickedProfileId; // 主进程按 profileId 注入真实 key
   try {
     const r = await window.dsh.model.list({ ...cfg, model: $('#agentModel')?.value || '' });
     if (r?.ok && Array.isArray(r.models) && r.models.length) {
@@ -4340,7 +4391,8 @@ function loadModelCache() {
 function saveModelCache(cfg = state.connection.api) {
   writeStorage(MODEL_CACHE_KEY, JSON.stringify({
     baseUrl: cfg.baseUrl,
-    key: cfg.key,
+    // 掩码 key 不落盘：缓存里存空值，命中比对退化为准（大不了多拉一次列表）
+    key: isMaskedKey(cfg.key) ? '' : cfg.key,
     at: state.modelsAt,
     models: state.models,
   }));
@@ -4407,6 +4459,8 @@ async function fetchModels(options = {}) {
     baseUrl: (profile?.baseUrl || $('#apiBaseUrl').value).trim(),
     key: (profile?.key || $('#apiKey').value).trim(),
     model: formModel(),
+    // 拉取的是「编辑中连接」的列表：带 profileId 让主进程注入该连接的真实 key
+    profileId: profile?.id || state.formProfileId || undefined,
   };
   const err = validateBaseAndKey(cfg);
   if (err) {
@@ -4527,7 +4581,10 @@ function applyModelChoice() {
     saveProfiles();
     renderProfiles();
   }
-  writeStorage('dsh.conn', JSON.stringify(state.connection));
+  // 与 persistConn 同规则：凭据库可用时 dsh.conn 不落 key（明文与掩码都不写）
+  writeStorage('dsh.conn', JSON.stringify(state.vaultOk
+    ? { ...state.connection, api: { ...state.connection.api, key: '' } }
+    : state.connection));
   renderHeader();
   renderHost();
   renderApiModelRow();
@@ -4606,6 +4663,8 @@ function normalizeProfiles(rawProfiles) {
         baseUrl: typeof p.baseUrl === 'string' ? p.baseUrl : '',
         key: typeof p.key === 'string' ? p.key : '',
         model: validModel(p.model) ? p.model : DEFAULT_API.model,
+        // 主进程掩码视图附带 hasKey/profileId；保留 hasKey 供「无明文但有密钥」的判断
+        hasKey: p.hasKey === true || (typeof p.key === 'string' && p.key !== '' && !isMaskedKey(p.key)),
       }))
     : [];
 }
@@ -4614,6 +4673,9 @@ function loadProfiles(persist = true) {
   const raw = readJson(PROFILES_KEY, null);
   const api = state.connection.api || DEFAULT_API;
   const profiles = normalizeProfiles(raw?.profiles);
+  // localStorage 不应存掩码（保存前已脱敏）；万一有旧数据残留，落库前清掉，
+  // 真实 key 随后由凭据库回填流程接回
+  for (const p of profiles) if (isMaskedKey(p.key)) p.key = '';
 
   let current = profiles.find((p) => p.id === raw?.active)
     || profiles.find((p) => p.baseUrl === api.baseUrl && (!api.key || p.key === api.key));
@@ -4634,13 +4696,22 @@ function loadProfiles(persist = true) {
   if (persist) saveProfiles();
 }
 
+/** localStorage 持久化视图：掩码 key 只用于表单显示，绝不能写进本地存储（探针直接断言本函数）。 */
+function profilesForLocalStorage(active) {
+  return {
+    profiles: state.profiles.map((p) => ({ ...p, key: isMaskedKey(p.key) ? '' : p.key })),
+    active,
+  };
+}
+
 function saveProfiles() {
   const active = state.activeProfileId;
+  // 发给 setProfiles 的掩码主进程会用自己持有的真实 key 还原（迁移期设计），原样传即可
   const stripped = () => JSON.stringify({
     profiles: state.profiles.map(({ key, ...rest }) => rest),
     active,
   });
-  const full = () => JSON.stringify({ profiles: state.profiles, active });
+  const full = () => JSON.stringify(profilesForLocalStorage(active));
   writeStorage(PROFILES_KEY, state.vaultOk ? stripped() : full());
   if (!window.dsh?.secrets?.setProfiles) return;
   window.dsh.secrets.setProfiles({ profiles: state.profiles, active }).then((r) => {
@@ -4661,7 +4732,15 @@ async function hydrateProfilesFromVault() {
     const vaultProfiles = normalizeProfiles(v.data?.profiles);
     if (vaultProfiles.length) {
       const byId = new Map(state.profiles.map((p) => [p.id, p]));
-      for (const vp of vaultProfiles) byId.set(vp.id, { ...(byId.get(vp.id) || {}), ...vp });
+      for (const vp of vaultProfiles) {
+        const old = byId.get(vp.id) || {};
+        const merged = { ...old, ...vp };
+        // 回传的 key 是掩码（sk-****末4位），只用于表单显示：
+        // 本地已有明文时不让掩码降级覆盖；hasKey=false 且本地未编辑时同样不回写覆盖
+        if (isMaskedKey(merged.key) && old.key && !isMaskedKey(old.key)) merged.key = old.key;
+        if (vp.hasKey === false && !(old.key && !isMaskedKey(old.key))) merged.key = old.key || '';
+        byId.set(vp.id, merged);
+      }
       state.profiles = [...byId.values()];
       const wanted = v.data.active || state.activeProfileId;
       state.activeProfileId = state.profiles.some((p) => p.id === wanted) ? wanted : state.profiles[0].id;
@@ -4765,7 +4844,13 @@ function saveConnection() {
   }
 
   const cfg = apiCfg();
-  const err = validateApiInput(cfg);
+  // 表单里的 key 可能是主进程回显的掩码（sk-****末4位）：掩码只是显示不是用户输入，
+  // 不回写存储——本地留有明文就沿用，否则留空交给主进程按 profileId 注入
+  if (isMaskedKey(cfg.key)) {
+    const prior = state.profiles.find((p) => p.id === state.formProfileId);
+    cfg.key = prior && !isMaskedKey(prior.key) ? prior.key : '';
+  }
+  const err = validateApiInput(cfg, { allowVaultKey: Boolean(cfg.profileId && state.vaultOk) });
   if (err) { toast(err); return; }
   const old = state.connection.api;
   const sameSaved = old && old.baseUrl === cfg.baseUrl && old.key === cfg.key && old.model === cfg.model;
@@ -4782,7 +4867,9 @@ function saveConnection() {
   const name = ((nameInput?.value || '').trim() || defaultProfileName(cfg)).slice(0, 40);
   let profile = state.profiles.find((p) => p.id === state.formProfileId);
   if (!profile) { profile = makeProfile(cfg); state.profiles.push(profile); }
-  Object.assign(profile, { name, baseUrl: cfg.baseUrl, key: cfg.key, model: cfg.model });
+  // key 为空（掩码路径、明文只在主进程）时不覆盖 profile 原值：掩码发给 setProfiles
+  // 会被主进程还原成真实 key，写空反而会把它从 key 表里清掉
+  Object.assign(profile, { name, baseUrl: cfg.baseUrl, key: cfg.key || profile.key || '', model: cfg.model });
   state.activeProfileId = profile.id;
   state.formProfileId = profile.id;
   if (nameInput) nameInput.value = name;
@@ -4845,7 +4932,8 @@ async function probe(options = {}) {
   const { silent = false } = options;
   if (state.probeBusy) return { ok: false, error: '正在测试连接，请稍候' };
   const cfg = apiCfg();
-  const err = validateApiInput(cfg);
+  // 探活把表单原样发主进程：掩码 key 由主进程按 profileId/掩码反查还原成真实 key
+  const err = validateApiInput(cfg, { allowVaultKey: Boolean(cfg.profileId && state.vaultOk) });
   if (err) { if (!silent) showProbe(false, '配置校验失败：' + err); return { ok: false, error: err }; }
   if (!window.dsh?.model) {
     const msg = '当前不在桌面外壳里运行，无法发起跨域请求';
@@ -5000,7 +5088,201 @@ function startRename() {
   };
 }
 
+/* ───────── 会话内查找（Ctrl+F，CSS Custom Highlight API，参考 ZCode session-find 思路） ─────────
+   命中定位基于「消息 id + 消息内命中序号」：会话流式重绘只换文本节点，不增删消息，
+   计数与跳转因此不漂移。仅在打开/关键词变化/回合结束时重建 Range，流式期间不实时重算。 */
+const FIND_HL = 'find-highlight';
+const FIND_HL_ACTIVE = 'find-highlight-active';
+/* 非正文区：收集命中时跳过工具行、审批卡、指标等包裹层 */
+const FIND_SKIP = '.tools, .approval, .tool-detail, .metrics, .files, .tasks-card, .msg-actions, .resume-row';
+const findState = { open: false, query: '', lastQuery: '', hits: [], idx: 0, inputTimer: 0 };
+
+function findHighlightSupported() {
+  /* Custom Highlight API：注册表在 CSS.highlights，构造器是全局 Highlight（不是 CSS.Highlight） */
+  return typeof CSS !== 'undefined' && !!CSS.highlights && typeof Highlight === 'function';
+}
+
+function clearFindHighlights() {
+  if (!findHighlightSupported()) return;
+  CSS.highlights.delete(FIND_HL);
+  CSS.highlights.delete(FIND_HL_ACTIVE);
+}
+
+function registerFindHighlights() {
+  if (!findHighlightSupported()) return;
+  clearFindHighlights();
+  try {
+    const ranges = findState.hits.map((h) => h.range);
+    // Highlight 构造器收变参 Range，不是数组；注册失败只影响高亮显示，不拖垮计数
+    if (ranges.length) CSS.highlights.set(FIND_HL, new Highlight(...ranges));
+    const activeRange = findState.hits[findState.idx]?.range;
+    if (activeRange) CSS.highlights.set(FIND_HL_ACTIVE, new Highlight(activeRange));
+  } catch (err) {
+    console.warn('[find] 高亮注册失败', err);
+  }
+}
+
+/* 在一个正文容器内收集文本节点命中；.tools/.approval 等由 FIND_SKIP 拒绝 */
+function collectFindMatches(root, needle, msgId, counter) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!node.nodeValue || !node.nodeValue.toLowerCase().includes(needle)) return NodeFilter.FILTER_REJECT;
+      return node.parentElement?.closest?.(FIND_SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = node.nodeValue.toLowerCase();
+    let at = text.indexOf(needle);
+    while (at !== -1) {
+      const range = document.createRange();
+      range.setStart(node, at);
+      range.setEnd(node, at + needle.length);
+      findState.hits.push({ msgId, nth: counter.n++, range });
+      at = text.indexOf(needle, at + needle.length);
+    }
+  }
+}
+
+function rebuildFindHits() {
+  findState.hits = [];
+  findState.idx = 0;
+  const needle = findState.query.trim().toLowerCase();
+  if (!findState.open || !needle) { clearFindHighlights(); updateFindCount(); return; }
+  const session = active();
+  if (!session) { updateFindCount(); return; }
+  // 搜索范围：active() 会话的消息正文（user 的 .bubble / assistant 的 .prose），按 DOM 顺序
+  const known = new Set(session.messages.map((m) => m.id));
+  const counter = { n: 0 };
+  for (const node of $$('#chat .msg')) {
+    if (!node.dataset.msgId || !known.has(node.dataset.msgId)) continue;
+    for (const root of $$('.bubble, .prose', node)) collectFindMatches(root, needle, node.dataset.msgId, counter);
+  }
+  registerFindHighlights();
+  updateFindCount();
+  if (findState.hits.length) scrollToFindHit(); // 打开/换词即定位第一处
+}
+
+function updateFindCount() {
+  const el = $('#findCount');
+  if (el) el.textContent = findState.hits.length ? `${findState.idx + 1}/${findState.hits.length}` : '0/0';
+}
+
+function scrollToFindHit() {
+  const range = findState.hits[findState.idx]?.range;
+  if (!range || !range.startContainer.isConnected) return;
+  const el = range.startContainer.nodeType === Node.TEXT_NODE
+    ? range.startContainer.parentElement
+    : range.startContainer;
+  const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  el?.scrollIntoView({ block: 'center', behavior: smooth ? 'smooth' : 'auto' });
+}
+
+function stepFindHit(dir) {
+  const n = findState.hits.length;
+  if (!n) return;
+  findState.idx = (findState.idx + dir + n) % n;
+  registerFindHighlights();
+  updateFindCount();
+  scrollToFindHit();
+}
+
+function openFindBar() {
+  // 只在聊天视图响应：设置页 / 项目架构页打开时不接管 Ctrl+F
+  if (state.projectOpen || !$('#settingsPage')?.hidden) return;
+  findState.open = true;
+  const bar = $('#findBar');
+  if (!bar) return;
+  bar.classList.remove('is-closing'); // 可能正播出场动画，取消它
+  bar.hidden = false;
+  const input = $('#findInput');
+  if (findState.lastQuery) input.value = findState.lastQuery;
+  input.focus();
+  input.select();
+  findState.query = input.value;
+  rebuildFindHits();
+}
+
+function closeFindBar() {
+  if (!findState.open) return;
+  findState.open = false;
+  findState.lastQuery = findState.query;
+  animateOut($('#findBar'), 130);
+  clearFindHighlights(); // 关闭即清掉正文高亮
+}
+
+/* 活跃回合结束（finish）或整段重绘（renderChat）后补一次重建 */
+function refreshFindHitsIfOpen() {
+  if (findState.open) rebuildFindHits();
+}
+
+/* ───────── 选区浮动操作菜单（复制 / 追问） ───────── */
+
+const selectionMenuState = { timer: 0, text: '' };
+
+function hideSelectionMenu() {
+  const menu = $('#selectionMenu');
+  if (!menu || menu.hidden) return;
+  selectionMenuState.text = '';
+  animateOut(menu, 130);
+}
+
+function showSelectionMenu(range, text) {
+  const menu = $('#selectionMenu');
+  if (!menu) return;
+  selectionMenuState.text = text;
+  menu.classList.remove('is-closing'); // 可能正播出场动画，取消它
+  menu.hidden = false;
+  const rect = range.getBoundingClientRect();
+  const w = menu.offsetWidth || 132;
+  const h = menu.offsetHeight || 40;
+  // 选区上方 8px 居中，12px 视口 clamp；顶上放不下时退到选区下方
+  let left = clamp(rect.left + rect.width / 2 - w / 2, 12, window.innerWidth - w - 12);
+  let top = rect.top - h - 8;
+  if (top < 12) top = Math.min(rect.bottom + 8, window.innerHeight - h - 12);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${Math.max(12, top)}px`;
+}
+
+/* selectionchange 的 150ms 节流落点：选区非空且完全落在一条 .msg 内才显示 */
+function handleSelectionSettled() {
+  const sel = getSelection();
+  const text = sel ? String(sel.toString()) : '';
+  if (!text.trim() || !sel || sel.rangeCount !== 1 || sel.isCollapsed) { hideSelectionMenu(); return; }
+  const range = sel.getRangeAt(0);
+  // 文本节点取父元素，元素节点取自身
+  const toEl = (n) => (n.nodeType === Node.TEXT_NODE ? n.parentElement : n);
+  const anchor = toEl(range.commonAncestorContainer);
+  // 两个端点必须同属一条消息（代码块内同样支持；工具/审批区在 .msg 内但由 closest 限定正文无妨）
+  const msg = anchor?.closest?.('#chat .msg');
+  if (!msg || msg !== toEl(range.startContainer)?.closest?.('#chat .msg')) { hideSelectionMenu(); return; }
+  showSelectionMenu(range, text);
+}
+
 /* ───────── 事件绑定 ───────── */
+
+/* ───────── 会话导出（paneChat「会话数据」卡）：序列化在 preload 侧 lib/session-export.js ───────── */
+
+async function exportCurrentSession(format) {
+  const s = active();
+  if (!s || !(s.messages || []).length) { toast('当前会话还没有可导出的消息'); return; }
+  const exp = window.dsh?.export;
+  if (typeof exp?.session !== 'function') { toast('当前桌面外壳不支持导出'); return; }
+  const btn = format === 'json' ? $('#exportSessionJson') : $('#exportSessionMd');
+  btn?.setAttribute('disabled', '');
+  try {
+    const serialize = format === 'json' ? exp.serializeSessionJson : exp.serializeSessionMd;
+    const content = typeof serialize === 'function' ? serialize(s) : '';
+    if (!content) { toast('会话序列化失败，未能导出'); return; }
+    const r = await exp.session({ defaultName: `${s.title || '会话'}.${format}`, content, format });
+    if (r?.canceled) return;
+    if (!r?.ok) { toast(r?.error || '导出失败'); return; }
+    toast(`已导出到 ${r.path}`);
+  } catch (err) {
+    toast(`导出失败：${err?.message || err}`);
+  } finally {
+    btn?.removeAttribute('disabled');
+  }
+}
 
 function bind() {
   const win = window.dsh?.win;
@@ -5009,6 +5291,12 @@ function bind() {
   $('#winClose').addEventListener('click', () => win?.close());
   win?.onMaximized((max) => {
     $('#winMax').innerHTML = `<svg class="ico"><use href="#${max ? 'i-restore' : 'i-max'}"/></svg>`;
+  });
+
+  // 托盘「新对话」：主进程右键菜单触发；设置页开着时先收掉再新建
+  window.dsh?.tray?.onNewChat?.(() => {
+    if (typeof closeSheets === 'function') closeSheets();
+    newChat();
   });
 
   $('#collapseBtn').addEventListener('click', () => {
@@ -5253,6 +5541,22 @@ function bind() {
   });
   syncRetrySeg();
 
+  /* 关闭到托盘（外观页）：localStorage 持有开关，改动即时同步主进程内存态 */
+  const syncTraySeg = () => {
+    const on = closeToTraySetting();
+    $$('#traySeg button').forEach((b) => b.classList.toggle('is-active', (b.dataset.tray === 'on') === on));
+  };
+  $('#traySeg').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    const on = b.dataset.tray === 'on';
+    writeStorage('dsh.tray', on ? 'on' : 'off');
+    syncTraySeg();
+    try { window.dsh?.tray?.setCloseToTray?.(on)?.catch?.(() => {}); } catch { /* 外壳不支持时静默 */ }
+    toast(on ? '已开启：点关闭按钮将最小化到托盘' : '已关闭：点关闭按钮直接退出');
+  });
+  syncTraySeg();
+
   $('#hostBtn').addEventListener('click', openConnect);
   $('#openConnect').addEventListener('click', () => { closeSheets(); openConnect(); });
   $('#sourceSeg').addEventListener('click', (e) => {
@@ -5334,6 +5638,10 @@ function bind() {
   $('#tintRange').addEventListener('input', (e) => applyTint(e.target.value));
   $('#veilRange').addEventListener('input', (e) => applyVeil(e.target.value));
 
+  /* 会话导出（对话设置页「会话数据」卡） */
+  $('#exportSessionMd').addEventListener('click', () => exportCurrentSession('md'));
+  $('#exportSessionJson').addEventListener('click', () => exportCurrentSession('json'));
+
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.menu') && !e.target.closest('#modeBtn') && !e.target.closest('#permBtn') && !e.target.closest('#todoBtn')) hideMenus();
   });
@@ -5344,14 +5652,73 @@ function bind() {
       $('#searchInput').focus();
       $('#searchInput').select();
     }
+    // 会话内查找：聊天视图（非设置页/架构页）接管 Ctrl+F；已打开时重复按只重新聚焦
+    if (mod && e.key.toLowerCase() === 'f') {
+      e.preventDefault();
+      if (findState.open) { $('#findInput').focus(); $('#findInput').select(); }
+      else openFindBar();
+    }
     if (mod && e.key.toLowerCase() === 'n') { e.preventDefault(); newChat(); }
     if (e.key === 'Escape') {
+      closeFindBar(); // 查找条开着时 Esc 先关它并清高亮
       hideMenus();
       // 有浮层开着时只关浮层（模型列表叠在设置页上时 Esc 先关列表，不动设置页）
       const sheetOpen = $$('.sheet').some((s) => !s.hidden);
       closeSheets();
       if (!sheetOpen) closeSettings();
       if (state.projectOpen && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName || '')) closeArchPage();
+    }
+  });
+
+  /* 会话内查找条 */
+  $('#findInput').addEventListener('input', () => {
+    clearTimeout(findState.inputTimer);
+    findState.inputTimer = setTimeout(() => {
+      findState.query = $('#findInput').value;
+      rebuildFindHits();
+    }, 120);
+  });
+  $('#findInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); stepFindHit(e.shiftKey ? -1 : 1); }
+    else if (e.key === 'Escape') { e.stopPropagation(); closeFindBar(); }
+  });
+  $('#findPrev').addEventListener('click', () => stepFindHit(-1));
+  $('#findNext').addEventListener('click', () => stepFindHit(1));
+  $('#findClose').addEventListener('click', closeFindBar);
+
+  /* 选区浮动操作菜单：document 级 selectionchange 节流 150ms */
+  document.addEventListener('selectionchange', () => {
+    clearTimeout(selectionMenuState.timer);
+    selectionMenuState.timer = setTimeout(handleSelectionSettled, 150);
+  });
+  // 点菜单按钮不让浏览器丢选区（打勾/追问后内容仍可见）
+  $('#selectionMenu').addEventListener('mousedown', (e) => e.preventDefault());
+  $('#selectionMenu').addEventListener('click', (e) => {
+    const btn = e.target.closest('.menu-item');
+    if (!btn || !selectionMenuState.text) return;
+    const text = selectionMenuState.text;
+    if (btn.dataset.selCopy !== undefined) {
+      navigator.clipboard.writeText(text).then(() => {
+        // 成功打勾 1.2s 还原（与 msg-actions 的 is-copied 模式一致）
+        btn.classList.add('is-copied');
+        btn.innerHTML = '<svg class="ico tiny"><use href="#i-check"/></svg><span>已复制</span>';
+        setTimeout(() => {
+          btn.classList.remove('is-copied');
+          btn.innerHTML = '<span>复制</span>';
+        }, 1200);
+      }).catch(() => toast('复制失败'));
+      return;
+    }
+    if (btn.dataset.selAsk !== undefined) {
+      // 追问：只预填不发送，用户补全后自己发
+      const plain = text.replace(/\s+/g, ' ').trim();
+      const brief = plain.slice(0, 60);
+      $('#input').value = `关于「${brief}${plain.length > 60 ? '…' : ''}」，`;
+      hideSelectionMenu();
+      autoGrow();
+      updateSendState();
+      updateSlash();
+      $('#input').focus();
     }
   });
 
@@ -5424,6 +5791,7 @@ function bind() {
     stickBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80;
     const jump = $('#jumpBottom');
     if (jump) jump.hidden = stickBottom; // 上滚离开底部时给一个「回到底部」入口
+    hideSelectionMenu(); // 滚动即消失：菜单锚定的选区矩形已失效
   });
 
   $('#jumpBottom')?.addEventListener('click', () => scrollToBottom(true));
@@ -5458,6 +5826,8 @@ function boot() {
   applyAccent(state.accent);
   renderPerm();
   renderAboutSystem();
+  // 启动时把「关闭到托盘」开关同步给主进程（localStorage 渲染层持有，主进程只存内存态）
+  try { window.dsh?.tray?.setCloseToTray?.(closeToTraySetting())?.catch?.(() => {}); } catch { /* 外壳不支持时静默 */ }
   loadProfiles(false);
   loadProfile(state.activeProfileId);
   hydrateProfilesFromVault();

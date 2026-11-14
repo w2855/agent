@@ -2781,3 +2781,99 @@ input.tint-range::-webkit-slider-thumb {
   .mcp-dot.is-connected, .mcp-dot.is-starting { animation: none; }
 }
 
+
+/* ───────── 会话内查找条 + 选区浮动菜单（2026-11 增补 g3） ─────────
+   查找条挂在 chat 顶部；正文高亮用 CSS Custom Highlight API（::highlight），
+   不改 DOM 结构，流式重绘不会被高亮标记污染。 */
+
+.find-bar {
+  position: absolute;
+  top: 66px; /* 顶栏（58px）之下，悬浮在对话区顶部 */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: 12px;
+  background: var(--menu-bg);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow-menu);
+  animation: findIn 160ms cubic-bezier(.2, .9, .3, 1);
+}
+/* display:flex 会压过 hidden 的 UA 样式，需显式关掉 */
+.find-bar[hidden] { display: none; }
+.find-bar.is-closing { animation: findOut 130ms ease both; pointer-events: none; }
+.find-bar > .ico { color: var(--text-4); flex: none; }
+.find-bar input {
+  width: 190px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.4px;
+  caret-color: var(--accent);
+}
+.find-bar input::placeholder { color: var(--text-4); }
+.find-count {
+  flex: none;
+  min-width: 30px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.find-bar .icon-btn { width: 24px; height: 24px; flex: none; }
+@keyframes findIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  to { opacity: 1; transform: translateX(-50%); }
+}
+@keyframes findOut {
+  from { opacity: 1; transform: translateX(-50%); }
+  to { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+}
+
+/* 命中高亮：蓝系（跟随强调色）；当前项反色更醒目。
+   Custom Highlight 只画文字层属性，不参与布局，不会顶乱行高。 */
+::highlight(find-highlight) {
+  background-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: inherit;
+}
+::highlight(find-highlight-active) {
+  background-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* 选区浮动操作菜单：单例浮层，样式对齐 .menu，横向排布 */
+.selection-menu {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 4px;
+  /* 与其它菜单差异化：scale .96→1 上浮 130ms（menuIn 是从上往下沉） */
+  animation: selMenuIn 130ms cubic-bezier(.2, .9, .3, 1);
+}
+.selection-menu[hidden] { display: none; }
+.selection-menu .menu-item {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.selection-menu .menu-item.is-copied { color: var(--ok); }
+@keyframes selMenuIn {
+  from { opacity: 0; transform: translateY(3px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .find-bar, .selection-menu { animation-duration: 1ms; }
+  .find-bar.is-closing { animation-duration: 1ms; }
+}

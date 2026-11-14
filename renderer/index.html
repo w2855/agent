@@ -158,6 +158,17 @@
     </header>
 
     <div class="chat" id="chat" tabindex="-1"></div>
+
+    <!-- 会话内查找条（Ctrl+F）：chat 顶部浮层，CSS Custom Highlight 负责正文高亮 -->
+    <div class="find-bar" id="findBar" hidden>
+      <svg class="ico"><use href="#i-search"/></svg>
+      <input id="findInput" placeholder="在会话中查找" spellcheck="false" />
+      <span class="find-count" id="findCount">0/0</span>
+      <button class="icon-btn" id="findPrev" title="上一个（Shift+Enter）"><svg class="ico tiny"><use href="#i-arrow-up"/></svg></button>
+      <button class="icon-btn" id="findNext" title="下一个（Enter）"><svg class="ico tiny"><use href="#i-arrow-down"/></svg></button>
+      <button class="icon-btn" id="findClose" title="关闭（Esc）"><svg class="ico tiny"><use href="#i-close"/></svg></button>
+    </div>
+
     <button class="jump-bottom" id="jumpBottom" hidden title="回到底部"><svg class="ico"><use href="#i-arrow-down"/></svg></button>
 
     <aside class="inspector" id="inspector" hidden>
@@ -395,6 +406,20 @@
           </div>
           <p class="fine">面板厚度同时控制侧栏、输入条与对话底板：越薄视频越清楚，越厚越容易读。全程只做纯色叠加与文字描边，不做任何模糊；两项都拖到 0% 时视频完全不被遮挡。</p>
         </div>
+
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="sp-row-main">
+              <b>关闭时最小化到托盘</b>
+              <small>开启后点关闭按钮仅隐藏到系统托盘，回合在后台继续；右键托盘图标「退出」才真正关闭。</small>
+            </div>
+            <div class="seg" id="traySeg">
+              <button data-tray="off" class="is-active">关闭</button>
+              <button data-tray="on">开启</button>
+            </div>
+          </div>
+          <p class="fine">默认关闭，保持点关闭即退出的习惯；开关存本机 localStorage，下次启动自动生效。</p>
+        </div>
       </div>
 
       <!-- 对话 -->
@@ -428,6 +453,15 @@
               <button data-retries="5">5 次</button>
             </div>
           </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">会话数据</div>
+          <div class="wall-row">
+            <button class="btn ghost" id="exportSessionMd"><svg class="ico tiny"><use href="#i-file"/></svg><span>导出 Markdown</span></button>
+            <button class="btn ghost" id="exportSessionJson"><svg class="ico tiny"><use href="#i-package"/></svg><span>导出 JSON</span></button>
+          </div>
+          <p class="fine">把当前会话保存为文件：包含标题与全部消息正文，工具调用清单与审批记录一并保留，可选 Markdown 或 JSON 两种格式。</p>
         </div>
       </div>
 
@@ -729,6 +763,13 @@
 </section>
 
 <div class="deleg-approvals" id="delegApprovals" hidden></div>
+
+<!-- 选区浮动操作菜单：单例浮层挂 body，选中文本落在消息内时出现在选区上方 -->
+<div class="menu selection-menu" id="selectionMenu" hidden>
+  <button class="menu-item" data-sel-copy title="复制选中文本"><span>复制</span></button>
+  <button class="menu-item" data-sel-ask title="引用选中文本，填入输入框补全后发送"><span>追问</span></button>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="demo.js"></script>
