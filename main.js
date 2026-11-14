@@ -174,6 +174,65 @@ let mcpConfigs = [];
     任何发回渲染层的路径都只允许掩码：get 转掩码视图，chat/test/list 用这张表还原 key。 */
 let profileKeyById = new Map();
 
+/** F2 修复：委派链用的完整连接配置表（profileId → { baseUrl, key }）。
+    跨接入点委派时 runtime 需要按 profileId 拿到 baseUrl + key 两者，
+    单独一张 key 表不够；与 profileKeyById 同源同生命周期（get/set/懒加载时重建）。 */
+let profileCfgById = new Map();
+/** 加密凭据库是否已在本次进程内解密过（懒加载只做一次，set 时刷新表并置位）。 */
+let vaultLoadedOnce = false;
+
+/** 从 vault 明文 profiles 重建两张内存表；只传 null/undefined 时仅清空。 */
+function refreshProfileMaps(profiles) {
+  profileKeyById = secretMask.buildProfileKeyMap(profiles || []);
+  const cfgMap = new Map();
+  if (Array.isArray(profiles)) {
+    for (const p of profiles) {
+      if (!p || typeof p !== 'object') continue;
+      const id = typeof p.id === 'string' ? p.id.trim() : '';
+      const key = typeof p.key === 'string' ? p.key : '';
+      const baseUrl = typeof p.baseUrl === 'string' ? p.baseUrl.trim() : '';
+      // 掩码值与空 key 不入库（与 buildProfileKeyMap 口径一致）
+      if (!id || !key || secretMask.isMaskedKey(key) || !baseUrl) continue;
+      cfgMap.set(id, { baseUrl, key });
+    }
+  }
+  profileCfgById = cfgMap;
+}
+
+/** 懒加载加密凭据库：profileKeyById 未填充（渲染层尚未触发 secrets:profiles:get）时
+    解密一次并缓存，保证委派在任何时刻发生都能解析到明文 key。进程内只解一次。 */
+async function ensureVaultProfilesLoaded() {
+  if (vaultLoadedOnce) return true;
+  try {
+    const encrypted = fs.readFileSync(vaultPath());
+    const { result } = await safeStorage.decryptStringAsync(encrypted);
+    const data = JSON.parse(result);
+    if (data && Array.isArray(data.profiles)) refreshProfileMaps(data.profiles);
+    vaultLoadedOnce = true;
+    return true;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') console.log('[vault] 懒加载失败：', err?.message || err);
+    vaultLoadedOnce = true; // ENOENT（尚无凭据库）与解密失败都置位，避免每次委派重复解密
+    return false;
+  }
+}
+
+/**
+ * F2 修复：注入给 runtime 的密钥解析器。
+ * 按 profileId 返回完整连接配置 { baseUrl, key }；解析不到返回 null。
+ * 先查内存表（secrets:profiles:get/set 维护），未命中时懒加载解密 vault 再查一次。
+ */
+async function resolveSecretKey(profileId) {
+  const id = String(profileId || '').trim();
+  if (!id) return null;
+  let cfg = profileCfgById.get(id) || null;
+  if (!cfg && !vaultLoadedOnce) {
+    await ensureVaultProfilesLoaded();
+    cfg = profileCfgById.get(id) || null;
+  }
+  return cfg;
+}
+
 /* ---------------- 系统通知 / 托盘（模块级状态） ---------------- */
 
 /** 通知去重器：相同 tag 在 30s 内只发一次（后台回合/审批提醒可能由两条路径先后触发）。 */
@@ -491,6 +550,9 @@ app.whenReady().then(() => {
       workspacePath: app.getPath('documents'),
       executeTool: (name, args, opts) => localTools.executeTool(name, args, opts),
       modelRequest: delegationModelRequest,
+      // F2 修复：委派链密钥/连接解析器 —— 渲染层 profiles 只剩掩码，
+      // runtime 按 profileId 换取明文（含跨接入点委派所需的 baseUrl）
+      resolveSecretKey,
     });
     runtimeSvc.init();
     runtimeSvc.subscribe((event) => {
@@ -775,7 +837,7 @@ ipcMain.handle('secrets:profiles:get', async () => {
     const data = JSON.parse(result);
     if (!data || !Array.isArray(data.profiles)) return { ok: true, data: null };
     // 明文只留在主进程内存；发往渲染层前统一转掩码视图，任何路径都不回传明文 key
-    profileKeyById = secretMask.buildProfileKeyMap(data.profiles);
+    refreshProfileMaps(data.profiles);
     return { ok: true, data: secretMask.maskProfilesData(data) };
   } catch (err) {
     if (err?.code === 'ENOENT') return { ok: true, data: null };
@@ -794,7 +856,8 @@ ipcMain.handle('secrets:profiles:set', async (_event, payload) => {
       // 迁移期渲染层可能把 get 返回的掩码值原样传回：先用内存里的真实 key 还原，
       // 避免掩码覆盖凭据库里的明文；然后据此刷新主进程持有的真实 key 表。
       incoming.profiles = secretMask.restoreMaskedProfileKeys(incoming.profiles, profileKeyById);
-      profileKeyById = secretMask.buildProfileKeyMap(incoming.profiles);
+      refreshProfileMaps(incoming.profiles);
+      vaultLoadedOnce = true; // 表已按最新保存数据重建，无需再懒加载 vault
     }
     const json = JSON.stringify(incoming);
     if (json.length > 1024 * 1024) return { ok: false, error: { code: 'TOO_LARGE', message: '凭据数据过大' } };

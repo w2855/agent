@@ -346,8 +346,11 @@ class DelegationService {
 
     /* 持久预算降级（在第二层父子预算通过后仍生效）：委派记录的 model 字段就是
        子运行实际使用的模型（agent-runner 读取 delegation.model），在此替换即可，
-       不改动目标 Agent 版本本身；fallback 名非法（不可替换）时保持原模型。 */
-    const childModel = budgetFallback || (targetVersion.model?.model || parentRun.model);
+       不改动目标 Agent 版本本身；fallback 名非法（不可替换）时保持原模型。
+       F2：args.model 是「该连接下的模型名」，跨接入点委派（args.profileId 指定
+       其他连接）时必须优先于目标 Agent 旧版本里记录的模型（那是旧连接下的名字）。 */
+    const childModel = budgetFallback
+      || (String(args.model || '').trim() || targetVersion.model?.model || parentRun.model);
     const budgetWarning = budgetFallback
       ? `持久成本预算超限（${budgetExceededDesc} 窗口），委派模型已降级为 ${budgetFallback}`
       : (budgetExceededDesc ? `持久成本预算超限（${budgetExceededDesc} 窗口），fallback 模型名非法，保持原模型` : '');
@@ -409,6 +412,9 @@ class DelegationService {
       requestedByToolCallId: toolCall.id,
       providerId: parentRun.providerId,
       model: childModel,
+      // F2 跨接入点委派：记录子 Agent 实际使用的连接（profileId）。
+      // key/baseUrl 不落盘（安全）：每次请求时由 runtime 经主进程解析器现取现用。
+      profileId: String(args.profileId || '').trim() || undefined,
       contextRefPaths: refs.map((r) => r.path),
       autoCreated: Boolean(autoCreated),
       ...(budgetWarning ? { budgetWarning } : {}),

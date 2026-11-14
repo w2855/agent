@@ -14,6 +14,7 @@ const policy = require('./policy');
 const registry = require('./tool-registry');
 const model = require('./model');
 const ids = require('./ids');
+const { isMaskedKey } = require('../lib/secret-mask');
 
 const API_VERSION = '0.1';
 const RUNTIME_VERSION = '0.2.0';
@@ -27,7 +28,7 @@ function fail(code, err) {
 }
 
 class Runtime {
-  constructor({ dir, workspacePath, workspaceId, executeTool, modelRequest } = {}) {
+  constructor({ dir, workspacePath, workspaceId, executeTool, modelRequest, resolveSecretKey } = {}) {
     this.dir = dir;
     this.workspacePath = workspacePath || process.cwd();
     this.store = new EventStore({ dir, workspaceId });
@@ -36,6 +37,9 @@ class Runtime {
     this.executor = null;
     this.executeToolImpl = executeTool || null;
     this.modelRequest = typeof modelRequest === 'function' ? modelRequest : null;
+    // F2 修复：主进程注入的密钥解析器（profileId → { baseUrl, key } | null）。
+    // 未注入（单测 / 旧调用方）时视为 no-op：解析步骤直接跳过，保持旧行为。
+    this.resolveSecretKey = typeof resolveSecretKey === 'function' ? resolveSecretKey : null;
     this.providerConfigs = new Map();
     this.delegations = null;
     this.projects = null;
@@ -545,15 +549,58 @@ class Runtime {
     const baseUrl = String(cfg.baseUrl || '').trim();
     const key = String(cfg.key || '').trim();
     const model = String(cfg.model || '').trim();
-    if (!/^https?:\/\//i.test(baseUrl) || !key || !model) return null;
-    return { baseUrl, key, model, retry: cfg.retry };
+    // profileId 透传：F2 修复依赖它把掩码/空 key 换回明文（不参与齐全校验）
+    const profileId = typeof cfg.profileId === 'string' ? cfg.profileId.trim() : '';
+    if (!/^https?:\/\//i.test(baseUrl) || !model) return null;
+    // key 为空仅在带 profileId 时放行（交给主进程解析器换真钥）；
+    // 无 profileId 时维持「key 必填」的旧校验，现有失败行为不变。
+    if (!key && !profileId) return null;
+    const out = { baseUrl, key, model, retry: cfg.retry };
+    if (profileId) out.profileId = profileId;
+    return out;
   }
 
-  _providerConfigForRun(run, supplied) {
-    const cfg = this._normalizeProviderConfig(supplied)
+  /**
+   * F2 修复：按 profileId 向主进程解析真实连接配置。
+   * 返回 { baseUrl, key } | null；解析器未注入或调用失败一律按 null 处理（保留原值 + warn）。
+   */
+  async _resolveProfileSecret(profileId) {
+    if (!profileId || typeof this.resolveSecretKey !== 'function') return null;
+    try {
+      const resolved = await this.resolveSecretKey(profileId);
+      if (resolved && typeof resolved === 'object' && typeof resolved.key === 'string' && resolved.key) {
+        return { baseUrl: String(resolved.baseUrl || '').trim(), key: resolved.key };
+      }
+      return null;
+    } catch (err) {
+      console.warn('[runtime] 按 profileId 解析 API Key 失败：', err?.message || err);
+      return null;
+    }
+  }
+
+  async _providerConfigForRun(run, supplied) {
+    const normalized = this._normalizeProviderConfig(supplied)
       || (run?.providerId ? this.providerConfigs.get(run.providerId) : null)
       || null;
-    if (cfg && run?.providerId) this.providerConfigs.set(run.providerId, cfg);
+    if (!normalized) return null;
+    // F2 修复：掩码/空 key 换真钥。R7-secrets 迁移后渲染层 profiles 只剩掩码，
+    // 委派链把掩码直接发上游必然 401；cfg 带 profileId 且 key 是掩码（或为空）时，
+    // 用主进程注入的解析器换回明文。解析失败保留原值并警告，不中断委派创建。
+    let cfg = normalized;
+    if (cfg.profileId && (!cfg.key || isMaskedKey(cfg.key))) {
+      const resolved = await this._resolveProfileSecret(cfg.profileId);
+      if (resolved) {
+        cfg = {
+          ...cfg,
+          key: resolved.key,
+          // 解析器给出 baseUrl 时以 profile 为准（跨接入点委派场景）
+          baseUrl: resolved.baseUrl || cfg.baseUrl,
+        };
+      } else {
+        console.warn(`[runtime] profile ${cfg.profileId} 的 API Key 解析失败，保留原值（可能是掩码）`);
+      }
+    }
+    if (run?.providerId) this.providerConfigs.set(run.providerId, cfg);
     return cfg;
   }
 
@@ -693,7 +740,31 @@ class Runtime {
       payload: { toolCallId: call.id, name: call.name, idempotencyKey: call.idempotencyKey },
     });
 
-    const cfg = this._providerConfigForRun(run, input.providerConfig);
+    let cfg = await this._providerConfigForRun(run, input.providerConfig);
+    // 跨接入点委派：delegate_task args.profileId 指定目标连接时，
+    // baseUrl + key 都从主进程按该 profile 解析（key 明文，不落盘、不回传渲染层）；
+    // 模型名取 delegation.model（delegation.js 已按 args.model 记录）。
+    // 解析失败直接拒绝本次委派——把父会话的 key 发到错误端点比失败更糟。
+    const argProfileId = typeof call.args?.profileId === 'string' ? call.args.profileId.trim() : '';
+    if (argProfileId) {
+      const resolved = await this._resolveProfileSecret(argProfileId);
+      if (!resolved || !resolved.baseUrl) {
+        const message = `指定的连接不可用（profileId=${argProfileId}），无法启动子 Agent`;
+        this.stateStore.setToolCallStatus(call.id, 'failed', { failureCode: 'PROFILE_UNRESOLVED', failureMessage: message });
+        this.store.append({
+          type: 'tool.failed', taskId: call.taskId, runId: call.runId, stepId: call.stepId,
+          payload: { toolCallId: call.id, code: 'PROFILE_UNRESOLVED', message, retryable: false },
+        });
+        return { ok: false, code: 'PROFILE_UNRESOLVED', message };
+      }
+      cfg = {
+        ...(cfg || {}),
+        baseUrl: resolved.baseUrl,
+        key: resolved.key,
+        // 模型优先沿用已有 cfg，其次 delegate_task 的 args.model（该连接下的模型名）
+        model: cfg?.model || String(call.args?.model || '').trim(),
+      };
+    }
     if (!cfg) {
       this.stateStore.setToolCallStatus(call.id, 'failed', { failureCode: 'PROVIDER_CONFIG_MISSING', failureMessage: '缺少模型连接配置' });
       this.store.append({
