@@ -2313,3 +2313,65 @@ input.tint-range::-webkit-slider-thumb {
 @media (prefers-reduced-motion: reduce) {
   .msg-actions, .jump-bottom { transition: none; }
 }
+
+/* ───────── R3 UX：工具行扫光 / 会话删除 / 代码块复制 ───────── */
+.tool.is-running { position: relative; overflow: hidden; }
+.tool.is-running::after {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 14%, transparent), transparent);
+  animation: toolScan 1.2s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes toolScan { from { transform: translateX(-110%); } to { transform: translateX(360%); } }
+
+.session { position: relative; }
+.session .s-del {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-4);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 130ms ease, background 130ms ease;
+}
+.session:hover .s-del, .session .s-del.is-armed { opacity: 1; }
+.session .s-del:hover { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+.session .s-del.is-armed { width: auto; padding: 0 7px; font-size: 11px; color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+
+.prose pre { position: relative; }
+.prose pre .code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--menu-bg);
+  color: var(--text-3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: .75;
+  transition: opacity 130ms ease, color 130ms ease;
+}
+.prose pre:hover .code-copy { opacity: 1; }
+.prose pre .code-copy:hover { color: var(--accent); }
+.prose pre .code-copy.is-copied { color: var(--ok, #34c77b); border-color: color-mix(in srgb, var(--ok, #34c77b) 45%, transparent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .tool.is-running::after { animation: none; content: none; }
+  .session .s-del, .prose pre .code-copy { transition: none; }
+}

@@ -356,13 +356,49 @@ function renderSessions() {
         <div class="session ${s.id === state.activeId ? 'is-active' : ''}" data-id="${esc(s.id)}">
           ${running ? '<span class="s-spin"></span>' : pending ? '<span class="s-badge"></span>' : s.unread ? '<span class="s-unread"></span>' : '<span class="s-empty"></span>'}
           <span class="s-title">${esc(s.title)}</span>
+          <button class="s-del ${deleteArmed.has(s.id) ? 'is-armed' : ''}" data-del="${esc(s.id)}" title="删除会话">${deleteArmed.has(s.id) ? '确认?' : '×'}</button>
         </div>`;
     }
   }
   box.innerHTML = html;
-  $$('.session', box).forEach((node) =>
-    node.addEventListener('click', () => selectSession(node.dataset.id))
-  );
+}
+
+/* 会话删除：两段确认（3 秒内再点一次），运行中的会话不可删 */
+const deleteArmed = new Set();
+function deleteSession(id) {
+  const s = state.sessions.find((x) => x.id === id);
+  if (!s) return;
+  if (s.state === 'running' || s.state === 'pending') { toast('该会话正在运行，结束后才能删除'); return; }
+  if (s.id === state.activeId && state.busy) { toast('生成中不能删除当前会话'); return; }
+  if (!deleteArmed.has(id)) {
+    deleteArmed.add(id);
+    setTimeout(() => { if (deleteArmed.delete(id)) renderSessions(); }, 3000);
+    renderSessions();
+    toast('再点一次确认删除');
+    return;
+  }
+  deleteArmed.delete(id);
+  state.sessions = state.sessions.filter((x) => x.id !== id);
+  if (!state.sessions.length) {
+    // 全删光时兜底留一个空会话，与启动时的初始状态一致
+    state.sessions.unshift({
+      id: (sourceOf() === 'model' ? 'm-' : 'p-') + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+      title: '新对话', group: '今天', state: 'idle', messages: [],
+    });
+  }
+  const wasActive = state.activeId === id;
+  if (wasActive) state.activeId = state.sessions[0].id;
+  pruneMsgStore();
+  saveSessions();
+  renderSessions();
+  if (wasActive) {
+    resetComposer();
+    restoreDraft();
+    renderHeader();
+    renderTodoPanel();
+    renderChat();
+  }
+  toast('已删除会话');
 }
 
 function renderHeader() {
@@ -768,6 +804,46 @@ function resetComposer() {
   hideMenus();
 }
 
+/* ───────── 草稿按会话持久化：切会话/重启不丢（localStorage dsh.drafts，单条上限 5000 字符防体积失控） ───────── */
+let draftTimer = null;
+function saveDraftSoon() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    try {
+      const s = active();
+      if (!s) return;
+      const drafts = JSON.parse(readStorage('dsh.drafts', '{}')) || {};
+      const text = $('#input').value;
+      if (text && text.length <= 5000) drafts[s.id] = text;
+      else delete drafts[s.id];
+      writeStorage('dsh.drafts', JSON.stringify(drafts));
+    } catch { /* 草稿保存失败不影响输入 */ }
+  }, 400);
+}
+function clearDraft() {
+  clearTimeout(draftTimer);
+  try {
+    const s = active();
+    if (!s) return;
+    const drafts = JSON.parse(readStorage('dsh.drafts', '{}')) || {};
+    if (drafts[s.id] !== undefined) {
+      delete drafts[s.id];
+      writeStorage('dsh.drafts', JSON.stringify(drafts));
+    }
+  } catch { /* 同上 */ }
+}
+function restoreDraft() {
+  let text = '';
+  try {
+    const s = active();
+    const drafts = s ? (JSON.parse(readStorage('dsh.drafts', '{}')) || {}) : {};
+    text = s ? (drafts[s.id] || '') : '';
+  } catch { text = ''; }
+  $('#input').value = text;
+  autoGrow();
+  updateSendState();
+}
+
 function selectSession(id) {
   if (state.busy) { toast('请先结束当前回合再切换会话'); return; }
   if (!state.sessions.some((s) => s.id === id)) return;
@@ -780,6 +856,7 @@ function selectSession(id) {
   state.attachments = [];
   renderAttachments();
   resetComposer();
+  restoreDraft(); // 切回会话时恢复未发送的草稿
   renderSessions();
   renderHeader();
   renderTodoPanel();
@@ -2603,6 +2680,7 @@ function send() {
   updateSendState();
   hideMenus();
   recordInputHistory(text);
+  clearDraft();
   runTurn(text);
 }
 
@@ -4528,7 +4606,7 @@ function bind() {
   });
 
   const ta = $('#input');
-  ta.addEventListener('input', () => { autoGrow(); updateSendState(); updateSlash(); });
+  ta.addEventListener('input', () => { autoGrow(); updateSendState(); updateSlash(); saveDraftSoon(); });
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     if (e.key === 'Escape') hideMenus();
@@ -4784,6 +4862,21 @@ function bind() {
       }).catch(() => toast('复制失败'));
       return;
     }
+    const codeBtn = e.target.closest('.code-copy');
+    if (codeBtn) {
+      const pre = codeBtn.closest('pre');
+      const text = pre?.querySelector('code')?.textContent || pre?.textContent || '';
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(() => {
+        codeBtn.classList.add('is-copied');
+        codeBtn.innerHTML = '<svg class="ico tiny"><use href="#i-check"/></svg>';
+        setTimeout(() => {
+          codeBtn.classList.remove('is-copied');
+          codeBtn.innerHTML = '<svg class="ico tiny"><use href="#i-copy"/></svg>';
+        }, 1200);
+      }).catch(() => toast('复制失败'));
+      return;
+    }
     const node = e.target.closest('.msg');
     if (!node) return;
     const msg = msgStore.get(node.dataset.msgId);
@@ -4813,6 +4906,22 @@ function bind() {
 
   $('#jumpBottom')?.addEventListener('click', () => scrollToBottom(true));
 
+  // 会话列表事件委托：renderSessions 每次重建 DOM，不再逐行挂监听
+  $('#sessions').addEventListener('click', (e) => {
+    const del = e.target.closest('[data-del]');
+    if (del) { e.stopPropagation(); deleteSession(del.dataset.del); return; }
+    const row = e.target.closest('.session');
+    if (row) selectSession(row.dataset.id);
+  });
+
+  // 代码块复制：悬停时注入角落按钮（流式重绘会冲掉按钮，悬停即补）
+  $('#chat').addEventListener('mouseover', (e) => {
+    const pre = e.target.closest('.prose pre');
+    if (pre && !pre.querySelector(':scope > .code-copy')) {
+      pre.insertAdjacentHTML('beforeend', '<button class="code-copy" title="复制代码"><svg class="ico tiny"><use href="#i-copy"/></svg></button>');
+    }
+  });
+
   window.addEventListener('focus', () => {
     const s = active();
     if (s?.unread) { s.unread = false; renderSessions(); }
@@ -4836,6 +4945,7 @@ function boot() {
   renderHost();
   renderChat();
   bind();
+  restoreDraft(); // 启动时恢复当前会话的未发送草稿
   autoGrow();
   updateSendState();
   renderAttachments();
