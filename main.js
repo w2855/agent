@@ -10,6 +10,7 @@ const { pathToFileURL } = require('node:url');
 const retry = require('./lib/retry');
 const secretMask = require('./lib/secret-mask');
 const notifyDedupe = require('./lib/notify-dedupe');
+const guard = require('./lib/instance-guard');
 const localTools = require('./lib/tools');
 const mcpModule = require('./lib/mcp');
 const skillsModule = require('./lib/skills');
@@ -36,6 +37,38 @@ if (userDataArg) {
 
 // 浅色是默认外观；窗口底色跟主题一致，避免启动瞬间白闪。
 nativeTheme.themeSource = 'light';
+
+/* ---------------- P2 稳定性守护（启动期） ----------------
+ * 1) 软渲染标记：上次运行渲染进程 60s 内连续崩溃满 3 次时写入 userData/soft-render.flag，
+ *    本次启动在 ready 之前禁用硬件加速（该 API 只在 ready 前调用才生效）；
+ *    删除标记文件即可恢复 GPU。本机 GPU 驱动间歇崩溃见 docs/e2e-guide.md。
+ * 2) 单实例锁：双开会同时占用同一份 userData（LevelDB 缓存锁冲突，docs/e2e-guide.md 坑 2），
+ *    拿不到锁的第二实例直接退出，既有实例经 second-instance 事件把窗口拉到前台。
+ */
+let hwAccelDisabledAtBoot = false;
+try {
+  const softRenderFlag = path.join(app.getPath('userData'), 'soft-render.flag');
+  if (fs.existsSync(softRenderFlag)) {
+    app.disableHardwareAcceleration();
+    hwAccelDisabledAtBoot = true;
+    console.log('[boot] 检测到软渲染标记，本次启动已禁用硬件加速');
+  }
+} catch (err) {
+  console.log('[boot] 软渲染标记检查失败：', err?.message || err);
+}
+
+const lockResult = guard.getLockResult(app.requestSingleInstanceLock());
+let secondInstanceCount = 0;
+if (!lockResult.isPrimary) {
+  console.log('[boot] 已有 DSH 实例运行');
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    secondInstanceCount += 1;
+    // 双开唤起：复用托盘的 showMainWindow（restore + show + focus），窗口不存在时静默跳过
+    showMainWindow();
+  });
+}
 
 // Windows toast 通知要求应用声明 AppUserModelID，否则 new Notification() 在 Windows 上
 // 直接触发 failed 事件（toast 不显示）。打包后用 electron-builder 的 appId；
@@ -94,6 +127,15 @@ let trayHintShown = false;
 /** app.quit() 途中 close 事件也会触发： quitting 时不再拦截，否则永远退不出去。 */
 let quitting = false;
 
+/* ---------------- P2 稳定性守护（运行期状态） ---------------- */
+
+/** 渲染进程崩溃计数：60s 窗口满 3 次标记软渲染，判定逻辑在 lib/instance-guard.js（可 node 单测）。 */
+const crashTracker = new guard.CrashTracker();
+/** render-process-gone 监听是否已挂上（createWindow 里置位，供 guard:state 诊断通道自检）。 */
+let crashListenerAttached = false;
+/** whenReady 完成时刻；首次 did-finish-load 时用它算 boot 耗时写入 crash-log.jsonl。 */
+let bootReadyAt = 0;
+
 /* MCP 工具与内置工具合流：executeTool 按 mcp_ 前缀路由到管理器。
    审批与 policy 不做任何特殊放行——MCP 工具一律按 run_command 同档
    （ask 需审批、readonly 拒绝），见 lib/tools.js 的 executeMcpTool。 */
@@ -101,6 +143,49 @@ localTools.setMcpBridge({
   resolve: (fullName) => mcpModule.findTool(mcpManager.status(), fullName),
   call: (serverId, toolName, args) => mcpManager.callTool(serverId, toolName, args),
 });
+
+/* ---------------- P2 启动时长 / 崩溃日志 ----------------
+ * crash-log.jsonl 放在 userData：每行一条 JSON（boot 记录启动耗时，render-crash 记录崩溃），
+ * 超过 50 行环形裁剪（裁剪与解析的纯逻辑在 lib/instance-guard.js）。写入失败只打日志，不碰主流程。
+ */
+
+function crashLogPath() {
+  return path.join(app.getPath('userData'), 'crash-log.jsonl');
+}
+
+/** 追加一条 JSON 记录（环形裁剪到 50 行后整体重写；文件只有几十行，开销可忽略）。 */
+function appendCrashLog(entry) {
+  try {
+    let raw = '';
+    try { raw = fs.readFileSync(crashLogPath(), 'utf8'); } catch { /* 首次写入前文件不存在 */ }
+    fs.mkdirSync(path.dirname(crashLogPath()), { recursive: true });
+    fs.writeFileSync(crashLogPath(), guard.appendJsonlEntry(raw, entry), 'utf8');
+  } catch (err) {
+    console.log('[crash-log] 写入失败：', err?.message || err);
+  }
+}
+
+/** 概要统计（guard:state 诊断通道用）：文件是否存在、行数、最后一条记录的 type。 */
+function crashLogSummary() {
+  try {
+    const raw = fs.readFileSync(crashLogPath(), 'utf8');
+    return { exists: true, ...guard.summarizeCrashLog(raw) };
+  } catch {
+    return { exists: false, lines: 0, lastType: null };
+  }
+}
+
+/** 连续崩溃满阈值：写软渲染标记，下次启动生效（ready 之后调用 disableHardwareAcceleration 无效）。 */
+function markSoftRenderNextBoot() {
+  try {
+    const flagPath = path.join(app.getPath('userData'), 'soft-render.flag');
+    fs.mkdirSync(path.dirname(flagPath), { recursive: true });
+    fs.writeFileSync(flagPath, String(Date.now()), 'utf8');
+    console.log('[crash] 已标记下次启动使用软渲染（删除 userData/soft-render.flag 可恢复硬件加速）');
+  } catch (err) {
+    console.log('[crash] 软渲染标记写入失败：', err?.message || err);
+  }
+}
 
 /* ---------------- 窗口 ---------------- */
 
@@ -154,6 +239,46 @@ function createWindow() {
   win.webContents.on('will-redirect', (event, url) => {
     event.preventDefault();
     if (/^https?:/i.test(url)) shell.openExternal(url);
+  });
+
+  // P2 渲染进程崩溃恢复：本机 GPU 驱动间歇崩溃（docs/e2e-guide.md）时自动拉起；
+  // 60s 窗口内连续满 3 次则写软渲染标记，下次启动转软件渲染。
+  crashListenerAttached = true;
+  win.webContents.on('render-process-gone', (_event, details) => {
+    const reason = String(details?.reason || 'unknown');
+    const exitCode = Number(details?.exitCode);
+    appendCrashLog({
+      type: 'render-crash',
+      reason,
+      exitCode: Number.isFinite(exitCode) ? exitCode : null,
+      at: Date.now(),
+    });
+    const verdict = crashTracker.record(Date.now());
+    console.log('[crash] 渲染进程异常退出：', reason, 'exitCode', exitCode, `（60s 窗口内第 ${verdict.count} 次）`);
+    if (verdict.shouldMarkSoftRender) markSoftRenderNextBoot();
+    if (quitting) return; // 正在退出：不再弹框 / 重载
+    if (process.argv.includes('--script') || process.argv.includes('--shot')) {
+      // 脚本 / 截图模式无头运行，弹框会卡死自检：静默重载让 did-finish-load 的自检回调接得上；
+      // 阈值已满（第 3 次）就不再重载，避免无限崩溃循环。
+      if (verdict.count < verdict.threshold && win && !win.isDestroyed()) win.webContents.reload();
+      return;
+    }
+    dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
+      type: 'warning',
+      title: 'DSH',
+      message: '界面进程异常退出，是否重新加载？',
+      detail: `渲染进程异常退出（${reason}）。若连续多次崩溃，下次启动将自动改用软渲染。`,
+      buttons: ['重新加载', '暂不'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0 && win && !win.isDestroyed()) win.webContents.reload();
+    }).catch(() => { /* 对话框失败即放弃，不打断主流程 */ });
+  });
+
+  // P2 启动时长：whenReady → 首次 did-finish-load，每次启动写一条 boot 记录
+  win.webContents.once('did-finish-load', () => {
+    if (bootReadyAt > 0) appendCrashLog({ type: 'boot', bootMs: Date.now() - bootReadyAt, at: Date.now() });
   });
 
   const emitMax = () => { if (win && !win.isDestroyed()) win.webContents.send('win:maximized', win.isMaximized()); };
@@ -218,6 +343,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (!lockResult.isPrimary) return; // 第二实例已请求退出，不再初始化任何服务
+  bootReadyAt = Date.now();
   try {
     runtimeSvc = runtimeModule.createRuntime({
       dir: path.join(app.getPath('userData'), 'runtime'),
@@ -359,6 +486,20 @@ ipcMain.handle('tray:state:set', (_event, payload) => {
   closeToTray = !!(payload && payload.closeToTray === true);
   return { ok: true, closeToTray };
 });
+
+/* ---------------- P2 稳定性守护（诊断通道） ----------------
+ * 供设置页「关于」与探针自检：单实例锁状态、崩溃监听、软渲染标记、crash-log 概要。
+ */
+
+ipcMain.handle('guard:state', () => ({
+  ok: true,
+  isPrimary: lockResult.isPrimary,
+  secondInstanceCount,
+  hwAccelDisabledAtBoot,
+  softRenderMarked: crashTracker.isSoftRenderMarked(),
+  crashListenerAttached,
+  crashLog: crashLogSummary(),
+}));
 
 /* ---------------- Runtime（Phase 1 基础） ---------------- */
 

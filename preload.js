@@ -37,6 +37,10 @@ contextBridge.exposeInMainWorld('dsh', {
       return () => ipcRenderer.removeListener('tray:new-chat', handler);
     },
   },
+  /* 稳定性守护（P2）：单实例锁 / 崩溃恢复 / 启动日志的诊断状态（设置页「关于」后续可用） */
+  guard: {
+    getState: () => ipcRenderer.invoke('guard:state'),
+  },
   /* 会话导出：保存走主进程对话框；序列化是纯函数，这里透传给页面复用 */
   export: {
     session: (p) => ipcRenderer.invoke('export:session', p),
