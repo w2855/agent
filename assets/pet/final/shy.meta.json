@@ -1,10 +1,10 @@
 {
  "action": "shy",
  "fps": 60,
- "frames": 120,
+ "frames": 8,
+ "holdTicks": 15,
  "durationSec": 2.0,
- "gifDelayMs": 20,
- "canvas": 512,
- "keyframes": 8,
- "pngSeq": "E:\\dsh-desktop\\assets\\pet\\final\\shy.frames"
+ "poseMs": 250,
+ "mode": "straight",
+ "canvas": 512
 }

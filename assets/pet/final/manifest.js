@@ -1,22 +1,22 @@
 window.PET_MANIFEST = {
  "wave": {
-  "frames": 120,
+  "frames": 8,
   "fps": 60
  },
  "happy": {
-  "frames": 120,
+  "frames": 8,
   "fps": 60
  },
  "sleepy": {
-  "frames": 144,
+  "frames": 8,
   "fps": 60
  },
  "confused": {
-  "frames": 120,
+  "frames": 8,
   "fps": 60
  },
  "shy": {
-  "frames": 120,
+  "frames": 8,
   "fps": 60
  }
 };

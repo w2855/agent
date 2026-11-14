@@ -1,10 +1,10 @@
 {
  "action": "sleepy",
  "fps": 60,
- "frames": 144,
- "durationSec": 2.4,
- "gifDelayMs": 20,
- "canvas": 512,
- "keyframes": 8,
- "pngSeq": "E:\\dsh-desktop\\assets\\pet\\final\\sleepy.frames"
+ "frames": 8,
+ "holdTicks": 18,
+ "durationSec": 2.5,
+ "poseMs": 310,
+ "mode": "straight",
+ "canvas": 512
 }

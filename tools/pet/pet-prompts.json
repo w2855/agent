@@ -23,14 +23,14 @@
       "name": "普通待机",
       "duration": 2,
       "poses": [
-        "Standing naturally relaxed, arms at sides, neutral gentle expression, eyes open",
-        "Slightly taller posture, chest rising a little in a breath, shoulders slightly lifted",
-        "Peak of gentle breath: chest and shoulders raised, hair slightly swaying",
-        "Breathing out, posture easing back down, hair settling",
-        "Standing naturally, eyes starting a soft blink",
-        "Eyes closed in a gentle blink, head level",
-        "Eyes opening again, posture settling to neutral",
-        "Identical to keyframe 1: natural standing idle pose"
+        "Standing naturally with a soft smile, eyes open, hair settling",
+        "Weight shifting to the right leg: body visibly tilting right, long hair swaying to the left with the motion",
+        "Head tilting slightly right with a brighter smile, hair still drifting, one hand starting to move",
+        "Both hands clasping lightly in front of the body, head bobbing a little, cheerful eyes",
+        "Weight shifting to the left leg: body tilting left, hair swaying to the right, hands unclasping",
+        "Head tilting slightly left, hair flowing, shoulders bobbing once playfully",
+        "Body returning toward center, hair settling around the shoulders, hands coming to rest",
+        "Identical to keyframe 1: natural standing idle pose, soft smile, eyes open"
       ]
     },
     {

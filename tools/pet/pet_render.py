@@ -18,7 +18,7 @@ FINAL = os.path.join(ROOT, 'assets', 'pet', 'final')
 PROMPTS = os.path.join(ROOT, 'tools', 'pet', 'pet-prompts.json')
 CANVAS = 512
 BODY_RATIO = 0.78  # 角色身高占画布比例
-GIF_DELAY = 2      # 1/100 秒单位，GIF 容器 50fps 标称；DSH 播放器用 PNG 序列按真 60fps 播放
+GIF_DELAY = 2      # GIF 容器统一 20ms（GIF 无法表达 16.67ms，浏览器会钳制 10ms 帧）；真 60fps 由播放器 PNG 序列实现
 
 
 def normalize_frame(img):
@@ -96,48 +96,36 @@ def inbetween(a, b, steps):
 
 
 def render_action(meta, action):
+    """直出模式：只播放真实生成的关键帧，不加任何插值/变形/特效。
+    8 关键帧在 60fps 时间轴上均匀直切（anime on-8s 节奏），无缝循环。"""
     aid = action['id']
     frames = load_keyframes(aid)
     if len(frames) < 4:
         return False, f'关键帧不足: {len(frames)}'
-    total = int(round(action['duration'] * meta['fps']))  # 60fps 总帧数
-    gaps = len(frames)
-    per_gap = max(2, total // gaps)
-    total = per_gap * gaps  # 整除化
-    seq = []
-    for i in range(gaps):
-        a = frames[i]
-        b = frames[(i + 1) % gaps]  # 循环闭合：最后一帧流回第一帧
-        seq.append(a)
-        seq.extend(inbetween(a, b, per_gap - 1))
-
-    fdir = os.path.join(FINAL, aid + '.frames')
-    os.makedirs(fdir, exist_ok=True)
-    names = []
-    for i, fr in enumerate(seq):
-        name = f'f-{i + 1:04d}.png'
-        Image.fromarray(fr).save(os.path.join(fdir, name), optimize=True)
-        names.append(name)
-
-    # GIF（Pillow 逐帧调色板，delay=2 → 容器 50fps；播放器按 PNG 序列跑真 60fps）
+    n = len(frames)
+    total_ticks = int(round(action['duration'] * meta['fps']))   # 60fps 时间轴总格数
+    hold = total_ticks // n                                      # 每张关键帧停留格数
+    # GIF：8 张关键帧，逐帧延迟 = 停留时长（无任何添加帧）
     gif_path = os.path.join(FINAL, aid + '.gif')
-    pil_frames = [Image.fromarray(f) for f in seq]
-    pal = []
-    for f in pil_frames:
-        pal.append(f.convert('P', palette=Image.ADAPTIVE, colors=255))
-    # 逐帧延迟 [20,20,10]ms 循环：均值 16.67ms/帧 = 真 60fps（GIF 精度问题的数学解）
-    durations = [20, 20, 10] * (len(pal) // 3 + 1)
-    durations = durations[:len(pal)]
+    per_pose_ms = round(total_ticks / n * (1000 / meta['fps']) / 10) * 10  # 取整到 10ms
+    durations = [per_pose_ms] * n
+    pil_frames = [Image.fromarray(f) for f in frames]
+    pal = [f.convert('P', palette=Image.ADAPTIVE, colors=255) for f in pil_frames]
     pal[0].save(gif_path, save_all=True, append_images=pal[1:], loop=0,
                 duration=durations, transparency=255, disposal=2)
-
-    json.dump({'action': aid, 'fps': meta['fps'], 'frames': len(seq),
-               'durationSec': round(len(seq) / meta['fps'], 2),
-               'gifDelayMs': GIF_DELAY * 10, 'canvas': CANVAS,
-               'keyframes': len(frames), 'pngSeq': fdir},
+    # 播放器帧目录：直出关键帧（pet.js 按帧数在 60fps 时钟上均匀直切）
+    fdir = os.path.join(FINAL, aid + '.frames')
+    os.makedirs(fdir, exist_ok=True)
+    for old_f in glob.glob(os.path.join(fdir, 'f-*.png')):
+        os.remove(old_f)
+    for i, fr in enumerate(frames):
+        Image.fromarray(fr).save(os.path.join(fdir, f'f-{i + 1:04d}.png'), optimize=True)
+    json.dump({'action': aid, 'fps': meta['fps'], 'frames': n,
+               'holdTicks': hold, 'durationSec': round(total_ticks / meta['fps'], 2),
+               'poseMs': per_pose_ms, 'mode': 'straight', 'canvas': CANVAS},
               open(os.path.join(FINAL, aid + '.meta.json'), 'w', encoding='utf-8'),
               ensure_ascii=False, indent=1)
-    return True, (aid, len(seq))
+    return True, (aid, n)
 
 
 def write_manifest(results):
