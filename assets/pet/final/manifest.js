@@ -1,8 +1,4 @@
 window.PET_MANIFEST = {
- "idle": {
-  "frames": 120,
-  "fps": 60
- },
  "wave": {
   "frames": 120,
   "fps": 60

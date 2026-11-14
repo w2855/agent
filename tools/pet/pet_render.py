@@ -66,7 +66,9 @@ def warp_by_flow(img, flow):
 
 
 def inbetween(a, b, steps):
-    """A→B 之间光流插帧，返回 steps 张中间帧（不含 A、B 本身）。"""
+    """A→B 之间光流插帧，返回 steps 张中间帧（不含 A、B 本身）。
+    alpha 感知合成：各自 warp 后按「对方透明区归我、重叠区按覆盖率过渡」合成，
+    避免线性 RGBA 混合产生的半透明重影。"""
     a_f = a.astype(np.float32)
     b_f = b.astype(np.float32)
     # Farneback 要求单通道灰度输入
@@ -76,10 +78,20 @@ def inbetween(a, b, steps):
     out = []
     for i in range(1, steps + 1):
         t = i / (steps + 1)
-        wa = warp_by_flow(a_f, flow * t)
-        wb = warp_by_flow(b_f, flow * (t - 1.0))
-        blended = np.clip(wa * (1 - t) + wb * t, 0, 255).astype(np.uint8)
-        out.append(blended)
+        wa = warp_by_flow(a_f, flow * t)          # A 向 B 移动 t
+        wb = warp_by_flow(b_f, flow * (t - 1.0))  # B 向 A 回退 (1-t)
+        alpha_a = (wa[:, :, 3:4] / 255.0)
+        alpha_b = (wb[:, :, 3:4] / 255.0)
+        # 覆盖率权重：A 独占区→A，B 独占区→B，重叠区按 t 过渡
+        w_a = alpha_a * (1 - alpha_b) + alpha_a * alpha_b * (1 - t)
+        w_b = alpha_b * (1 - alpha_a) + alpha_a * alpha_b * t
+        denom = w_a + w_b
+        denom[denom < 1e-4] = 1.0
+        rgb = (wa[:, :, :3] * (w_a / denom) + wb[:, :, :3] * (w_b / denom))
+        # 透明度用覆盖率（任一来源不透明即为不透明），而不是混合权重——否则重叠区人物内部会半透明
+        alpha = np.clip(np.maximum(alpha_a, alpha_b) * 255.0, 0, 255)
+        frame = np.concatenate([rgb.astype(np.uint8), alpha.astype(np.uint8)], axis=2)
+        out.append(frame)
     return out
 
 
@@ -113,8 +125,11 @@ def render_action(meta, action):
     pal = []
     for f in pil_frames:
         pal.append(f.convert('P', palette=Image.ADAPTIVE, colors=255))
+    # 逐帧延迟 [20,20,10]ms 循环：均值 16.67ms/帧 = 真 60fps（GIF 精度问题的数学解）
+    durations = [20, 20, 10] * (len(pal) // 3 + 1)
+    durations = durations[:len(pal)]
     pal[0].save(gif_path, save_all=True, append_images=pal[1:], loop=0,
-                duration=GIF_DELAY, transparency=255, disposal=2)
+                duration=durations, transparency=255, disposal=2)
 
     json.dump({'action': aid, 'fps': meta['fps'], 'frames': len(seq),
                'durationSec': round(len(seq) / meta['fps'], 2),

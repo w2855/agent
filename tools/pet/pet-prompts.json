@@ -13,395 +13,535 @@
       "size": "1024x1024",
       "background": "transparent",
       "timeout": 300,
-      "retries": 2,
+      "retries": 4,
       "concurrency": 3
     }
   },
   "actions": [
     {
-      "id": "idle", "name": "普通待机", "duration": 2,
-      "poses": ["Standing naturally relaxed, arms at sides, neutral gentle expression, eyes open",
+      "id": "idle",
+      "name": "普通待机",
+      "duration": 2,
+      "poses": [
+        "Standing naturally relaxed, arms at sides, neutral gentle expression, eyes open",
         "Slightly taller posture, chest rising a little in a breath, shoulders slightly lifted",
         "Peak of gentle breath: chest and shoulders raised, hair slightly swaying",
         "Breathing out, posture easing back down, hair settling",
         "Standing naturally, eyes starting a soft blink",
         "Eyes closed in a gentle blink, head level",
         "Eyes opening again, posture settling to neutral",
-        "Identical to keyframe 1: natural standing idle pose"]
+        "Identical to keyframe 1: natural standing idle pose"
+      ]
     },
     {
-      "id": "wave", "name": "开心挥手", "duration": 2,
-      "poses": ["Standing with right arm lowered at side, smiling",
+      "id": "wave",
+      "name": "开心挥手",
+      "duration": 2,
+      "poses": [
+        "Standing with right arm lowered at side, smiling",
         "Right arm rising up beside the face, palm starting to open",
         "Right hand up next to the face, waving to the right, big smile",
         "Right hand waving to the left, elbow bent, cheerful eyes",
         "Right hand waving to the right again, cheeks slightly blushed",
         "Waving hand slowing, still smiling",
         "Hand lowering back down, happy smile remaining",
-        "Returning to neutral standing pose, gentle smile"]
+        "Returning to neutral standing pose, gentle smile"
+      ]
     },
     {
-      "id": "happy", "name": "开心蹦跳", "duration": 2,
-      "poses": ["Standing neutral, about to jump, knees slightly bent",
+      "id": "happy",
+      "name": "开心蹦跳",
+      "duration": 2,
+      "poses": [
+        "Standing neutral, about to jump, knees slightly bent",
         "Pushing off ground, feet just leaving floor, arms rising",
         "Airborne: feet well off ground, arms up happily, big smile",
         "Highest point of jump, body stretched upward, joyful closed eyes",
         "Descending, feet coming down, arms lowering",
         "Landing softly with knees slightly bent, bounce absorbed",
         "Standing upright again, happy smile, small after-bounce",
-        "Settled back to neutral standing, cheerful expression"]
+        "Settled back to neutral standing, cheerful expression"
+      ]
     },
     {
-      "id": "sleepy", "name": "困倦打瞌睡", "duration": 2.5,
-      "poses": ["Standing but eyelids half closed, sleepy expression, head straight",
+      "id": "sleepy",
+      "name": "困倦打瞌睡",
+      "duration": 2.5,
+      "poses": [
+        "Standing but eyelids half closed, sleepy expression, head straight",
         "Eyelids heavier, head starting to tilt slightly forward",
         "Head nodding forward noticeably, eyes nearly closed",
         "Head at lowest nod point, eyes closed, sleeping briefly",
         "Head starting to lift back up, eyes still closed",
         "Head rising, eyes fluttering half open",
         "Head almost level, eyes opening, still drowsy",
-        "Back to standing with drowsy half-lidded eyes, ready to nod again"]
+        "Back to standing with drowsy half-lidded eyes, ready to nod again"
+      ]
     },
     {
-      "id": "confused", "name": "歪头疑惑", "duration": 2,
-      "poses": ["Standing neutral, neutral expression, head straight",
+      "id": "confused",
+      "name": "歪头疑惑",
+      "duration": 2,
+      "poses": [
+        "Standing neutral, neutral expression, head straight",
         "Head beginning to tilt to the right, eyes widening slightly",
         "Head tilted right at 15 degrees, eyebrows raised, small question expression with mouth slightly open",
         "Maximum head tilt right, big curious eyes, one hand slightly raised in puzzlement",
         "Holding the tilted head pose, blinking once",
         "Head starting to straighten, curious expression softening",
         "Head nearly level, small relieved smile forming",
-        "Back to neutral standing, calm expression"]
+        "Back to neutral standing, calm expression"
+      ]
     },
     {
-      "id": "shy", "name": "害羞脸红", "duration": 2,
-      "poses": ["Standing neutral, hands starting to move toward chest",
+      "id": "shy",
+      "name": "害羞脸红",
+      "duration": 2,
+      "poses": [
+        "Standing neutral, hands starting to move toward chest",
         "Both hands clasped in front of chest, cheeks starting to blush",
         "Hands clasped, strong pink blush on cheeks, eyes glancing to the side",
         "Peeking to the side with big blushing eyes, head slightly lowered",
         "Head lowering a bit more, eyes glancing down, deep blush",
         "Small shy smile appearing while still blushing",
         "Head lifting slightly, shy smile growing, still blushing",
-        "Back to standing with gentle blush and soft shy smile"]
+        "Back to standing with gentle blush and soft shy smile"
+      ]
     },
     {
-      "id": "thinking", "name": "思考", "duration": 3,
-      "poses": ["Standing, one hand rising toward chin, eyes starting to look up",
+      "id": "thinking",
+      "name": "思考",
+      "duration": 3,
+      "poses": [
+        "Standing, one hand rising toward chin, eyes starting to look up",
         "Hand at chin, thinking pose, eyes looking up-right thoughtfully",
         "Deeper thinking: finger tapping chin, eyes up, head slightly tilted",
         "Thinking intensely: eyes narrowed slightly in focus, other arm crossed under",
         "Idea spark: eyes suddenly widening, head lifting, mouth small o",
         "Eyes bright with realization, hand lowering from chin",
         "Settling: hand returning, thoughtful smile forming",
-        "Neutral standing with a confident small smile, ready to act"]
+        "Neutral standing with a confident small smile, ready to act"
+      ]
     },
     {
-      "id": "typing", "name": "敲键盘", "duration": 2,
-      "poses": ["Both hands forward in typing position, fingers on invisible keys, focused eyes",
+      "id": "typing",
+      "name": "敲键盘",
+      "duration": 2,
+      "poses": [
+        "Both hands forward in typing position, fingers on invisible keys, focused eyes",
         "Left hand fingers pressing down, right hand raised slightly",
         "Right hand fingers pressing down, left hand raised slightly",
         "Both hands pressing, eyes scanning down, focused",
         "Fast typing blur: hands up, one eye slightly squinting",
         "Both hands pressing alternating, mouth slightly concentrated",
         "Typing slowing, hands rising a little off keys",
-        "Hands easing down, small satisfied expression, returning to typing rest"]
+        "Hands easing down, small satisfied expression, returning to typing rest"
+      ]
     },
     {
-      "id": "working", "name": "认真工作", "duration": 3,
-      "poses": ["Standing focused, hands making small precise gestures in front, eyes on task",
+      "id": "working",
+      "name": "认真工作",
+      "duration": 3,
+      "poses": [
+        "Standing focused, hands making small precise gestures in front, eyes on task",
         "Hands adjusting something small and delicate, close attention in eyes",
         "Slight lean forward while working, brows gently concentrated",
         "Hands pausing briefly, one small blink, still focused",
         "Hands resuming small careful movements",
         "Small satisfied nod while continuing to work",
         "Hands finishing a fine adjustment, eyes bright",
-        "Working calmly at steady rhythm, returning to start posture"]
+        "Working calmly at steady rhythm, returning to start posture"
+      ]
     },
     {
-      "id": "reading", "name": "阅读", "duration": 3,
-      "poses": ["Holding a small open book with both hands at chest, looking down at pages",
+      "id": "reading",
+      "name": "阅读",
+      "duration": 3,
+      "poses": [
+        "Holding a small open book with both hands at chest, looking down at pages",
         "Eyes scanning left page, head still",
         "Eyes moving to right page, slight head turn",
         "Turning a page with one hand, eyes following",
         "Reading new page, eyebrows slightly interested",
         "Eyes scanning down the page, calm expression",
         "Small nod of understanding, page held steady",
-        "Eyes finishing the page, returning to initial reading pose"]
+        "Eyes finishing the page, returning to initial reading pose"
+      ]
     },
     {
-      "id": "searching", "name": "搜索资料", "duration": 2.5,
-      "poses": ["Eyes looking left, scanning, head slightly turned left",
+      "id": "searching",
+      "name": "搜索资料",
+      "duration": 2.5,
+      "poses": [
+        "Eyes looking left, scanning, head slightly turned left",
         "Eyes scanning further left, hand shading eyes like searching",
         "Eyes sweeping to center, alert expression",
         "Eyes sweeping to the right, scanning environment",
         "Eyes suddenly stopping: something found, eyes widening",
         "Discovery: eyes bright, mouth small smile, pointing gesture starting",
         "Happy found-it expression, small nod",
-        "Calming down, returning to neutral scanning posture"]
+        "Calming down, returning to neutral scanning posture"
+      ]
     },
     {
-      "id": "waiting", "name": "等待", "duration": 2.5,
-      "poses": ["Standing patiently, hands relaxed in front, calm eyes",
+      "id": "waiting",
+      "name": "等待",
+      "duration": 2.5,
+      "poses": [
+        "Standing patiently, hands relaxed in front, calm eyes",
         "Gentle breath, shoulders rising slightly, patient face",
         "Small blink, standing still, patient",
         "Weight shifting slightly to one leg, relaxed",
         "Gentle breath again, eyes soft",
         "Small blink, head steady, waiting calmly",
         "Shoulders easing, slight patient smile",
-        "Identical to keyframe 1: patient standing pose"]
+        "Identical to keyframe 1: patient standing pose"
+      ]
     },
     {
-      "id": "processing", "name": "处理中", "duration": 3,
-      "poses": ["Standing with hands making rhythmic small circles in front, focused",
+      "id": "processing",
+      "name": "处理中",
+      "duration": 3,
+      "poses": [
+        "Standing with hands making rhythmic small circles in front, focused",
         "Hands continuing circles, body swaying slightly left",
         "Body swaying slightly right, hands still rhythmic",
         "Hands pausing at top of rhythm, eyes steady",
         "Rhythm resuming, small sway left again",
         "Sway right, breathing in rhythm with motion",
         "Hands slowing, sway settling toward center",
-        "Returning to start rhythm pose, calm focused face"]
+        "Returning to start rhythm pose, calm focused face"
+      ]
     },
     {
-      "id": "answering", "name": "回答问题", "duration": 3,
-      "poses": ["Facing viewer, mouth open speaking, one hand slightly raised in explanation",
+      "id": "answering",
+      "name": "回答问题",
+      "duration": 3,
+      "poses": [
+        "Facing viewer, mouth open speaking, one hand slightly raised in explanation",
         "Mouth mid-speech, hand making small emphasizing motion",
         "Head nodding slightly while talking, friendly eyes",
         "Hand open palm up in explaining gesture, mouth speaking",
         "Mouth closing briefly for a pause, eyes warm",
         "Speaking again with both hands gesturing naturally",
         "Finishing the sentence, mouth closing into smile",
-        "Settled friendly smile, hands returning to sides"]
+        "Settled friendly smile, hands returning to sides"
+      ]
     },
     {
-      "id": "clicked", "name": "被点击", "duration": 1.5,
-      "poses": ["Neutral standing, unaware",
+      "id": "clicked",
+      "name": "被点击",
+      "duration": 1.5,
+      "poses": [
+        "Neutral standing, unaware",
         "Surprised reaction starting: eyes widening, small jump beginning",
         "Peak surprise: body bounced up slightly, eyes big, mouth open in delight",
         "Bouncing down, delighted expression, cheeks blushing a little",
         "Settling from the bounce, smiling",
         "Easing back to standing, pleasant surprised-afterglow",
         "Almost neutral, small residual smile",
-        "Back to the exact neutral pose of keyframe 1"]
+        "Back to the exact neutral pose of keyframe 1"
+      ]
     },
     {
-      "id": "patted", "name": "被摸头", "duration": 1.5,
-      "poses": ["Neutral standing, about to feel a pat",
+      "id": "patted",
+      "name": "被摸头",
+      "duration": 1.5,
+      "poses": [
+        "Neutral standing, about to feel a pat",
         "Head starting to lower slightly under the pat, eyes closing contentedly",
         "Head lowered, eyes closed, happy blush, hair slightly pressed",
         "Head gently pressed down, deepest content expression, smiling",
         "Head lifting slightly, eyes still closed, blissful",
         "Eyes opening halfway, happy smile, hair springing back",
         "Head nearly level, bright happy eyes",
-        "Back to neutral standing with a pleased smile"]
+        "Back to neutral standing with a pleased smile"
+      ]
     },
     {
-      "id": "dragging", "name": "拖动", "duration": 1.5,
-      "poses": ["Body leaning slightly right as if moved that way, hair drifting left",
+      "id": "dragging",
+      "name": "拖动",
+      "duration": 1.5,
+      "poses": [
+        "Body leaning slightly right as if moved that way, hair drifting left",
         "Body swinging back through center, hair following",
         "Body leaning slightly left, hair drifting right, surprised wide eyes",
         "Swinging back toward center, body relaxing",
         "Small residual sway to right, hair settling",
         "Small residual sway to left, gentler",
         "Motion damping out, body nearly level",
-        "Back to neutral standing pose, calm face"]
+        "Back to neutral standing pose, calm face"
+      ]
     },
     {
-      "id": "awakened", "name": "被唤醒", "duration": 2,
-      "poses": ["Head lowered, eyes fully closed, sleepy posture",
+      "id": "awakened",
+      "name": "被唤醒",
+      "duration": 2,
+      "poses": [
+        "Head lowered, eyes fully closed, sleepy posture",
         "Eyes still closed, head starting to rise",
         "Head rising further, first tiny eye crack open",
         "Eyes half open, drowsy but waking, head nearly level",
         "Eyes opening wider, waking expression, small stretch of shoulders",
         "Eyes fully open, brightening, posture straightening",
         "Fully awake: upright, alert happy eyes, small shake of head",
-        "Awake and settled, neutral standing with fresh expression"]
+        "Awake and settled, neutral standing with fresh expression"
+      ]
     },
     {
-      "id": "message", "name": "收到消息", "duration": 1.5,
-      "poses": ["Neutral standing, calm expression",
+      "id": "message",
+      "name": "收到消息",
+      "duration": 1.5,
+      "poses": [
+        "Neutral standing, calm expression",
         "Attention caught: head lifting slightly, eyes beginning to widen",
         "Eyes wide, mouth small o, curious and excited, small upward bounce",
         "Peak curiosity: big sparkling eyes looking up, hands clasped",
         "Delighted expression, small nod of acknowledgement",
         "Excitement softening into a smile",
         "Warm smile, hands lowering",
-        "Back to neutral standing, gentle expression"]
+        "Back to neutral standing, gentle expression"
+      ]
     },
     {
-      "id": "welcome", "name": "欢迎用户", "duration": 2,
-      "poses": ["Standing with warm smile, right hand beginning to rise",
+      "id": "welcome",
+      "name": "欢迎用户",
+      "duration": 2,
+      "poses": [
+        "Standing with warm smile, right hand beginning to rise",
         "Right hand up beside face starting to wave, bright smile",
         "Waving right, welcoming sparkling eyes",
         "Waving left with a slight welcoming bow of head",
         "Waving right again, cheerful blush",
         "Wave slowing, warm smile held",
         "Hand lowering with a small welcoming nod",
-        "Back to neutral standing, friendly smile"]
+        "Back to neutral standing, friendly smile"
+      ]
     },
     {
-      "id": "greeting", "name": "打招呼", "duration": 2,
-      "poses": ["Standing straight, neutral friendly face",
+      "id": "greeting",
+      "name": "打招呼",
+      "duration": 2,
+      "poses": [
+        "Standing straight, neutral friendly face",
         "Upper body beginning a small bow, hands folding in front",
         "Bow at 15 degrees, hands folded politely, eyes closed politely",
         "Deepest bow point, polite smile, hair falling forward slightly",
         "Rising from the bow, head lifting, eyes opening",
         "Nearly upright, hands unfolding, friendly smile",
         "Fully upright with a bright smile and small wave of one hand",
-        "Back to neutral standing, warm friendly expression"]
+        "Back to neutral standing, warm friendly expression"
+      ]
     },
     {
-      "id": "success", "name": "任务成功", "duration": 2,
-      "poses": ["Standing with growing happy smile, arms starting to rise",
+      "id": "success",
+      "name": "任务成功",
+      "duration": 2,
+      "poses": [
+        "Standing with growing happy smile, arms starting to rise",
         "Arms rising, eyes bright, small bounce beginning",
         "Small bounce up with both hands raised in victory, big smile",
         "Victory pose at top: fists lightly up, sparkling eyes",
         "Landing from bounce, arms lowering slightly, still beaming",
         "Second tiny happy bounce, arms rising again",
         "Arms lowering, satisfied proud smile",
-        "Back to neutral standing, confident happy expression"]
+        "Back to neutral standing, confident happy expression"
+      ]
     },
     {
-      "id": "error", "name": "任务失败", "duration": 2,
-      "poses": ["Neutral standing, expression starting to fall",
+      "id": "error",
+      "name": "任务失败",
+      "duration": 2,
+      "poses": [
+        "Neutral standing, expression starting to fall",
         "Eyes lowering, mouth turning down slightly, shoulders dropping",
         "Sad expression with hands slightly clasped in front, small apologetic lean",
         "Deepest apologetic pose: head slightly bowed, sorry eyes",
         "Holding apologetic pose with a small apologetic mouth",
         "Starting to recover: head lifting a little, determined spark",
         "Recovering: straightening up, small resolute smile",
-        "Back to neutral standing, calm recovered expression"]
+        "Back to neutral standing, calm recovered expression"
+      ]
     },
     {
-      "id": "completed", "name": "任务完成", "duration": 2,
-      "poses": ["Standing, task in hands conceptually, focused look",
+      "id": "completed",
+      "name": "任务完成",
+      "duration": 2,
+      "poses": [
+        "Standing, task in hands conceptually, focused look",
         "Closing the task: hands finishing motion, small nod starting",
         "Nodding in confirmation, satisfied smile forming",
         "Deeper satisfied nod, eyes gently closed, content",
         "Eyes opening with a warm completed smile",
         "Small proud chest lift, hands folding happily",
         "Bright completed smile with tiny nod",
-        "Back to neutral standing, calm satisfied expression"]
+        "Back to neutral standing, calm satisfied expression"
+      ]
     },
     {
-      "id": "issue_found", "name": "发现问题", "duration": 1.5,
-      "poses": ["Working calmly, neutral",
+      "id": "issue_found",
+      "name": "发现问题",
+      "duration": 1.5,
+      "poses": [
+        "Working calmly, neutral",
         "Eyes snapping to the side, noticing something, slight startle",
         "Eyes wide at the problem, mouth small o, body tensing slightly",
         "Leaning in to inspect: brow focused, eyes narrowed in examination",
         "Examining intently with one hand raised toward the issue",
         "Nodding at the finding, serious expression",
         "Turning attention forward with determination",
-        "Back to alert neutral standing, ready to act"]
+        "Back to alert neutral standing, ready to act"
+      ]
     },
     {
-      "id": "surprised", "name": "惊讶", "duration": 1.5,
-      "poses": ["Neutral standing, unaware",
+      "id": "surprised",
+      "name": "惊讶",
+      "duration": 1.5,
+      "poses": [
+        "Neutral standing, unaware",
         "Sudden surprise: eyes fully wide, mouth open, small backward hop starting",
         "Peak surprise: body arched slightly back, hands rising, huge eyes",
         "Holding surprised pose, hands up near chest, blinking once",
         "Surprise easing, mouth closing, hands starting to lower",
         "Recovering: small relieved smile forming, body relaxing",
         "Almost calm, tiny residual wide eyes",
-        "Back to neutral standing, calm expression"]
+        "Back to neutral standing, calm expression"
+      ]
     },
     {
-      "id": "celebrating", "name": "庆祝", "duration": 3,
-      "poses": ["Standing with excited smile, arms rising",
+      "id": "celebrating",
+      "name": "庆祝",
+      "duration": 3,
+      "poses": [
+        "Standing with excited smile, arms rising",
         "First celebratory bounce: feet leaving ground, arms up high",
         "Airborne, arms at highest, eyes sparkling, mouth open in joy",
         "Landing with knees soft, big happy smile, arms mid",
         "Second bounce beginning, cheeks blushed with joy",
         "Airborne again, arms swinging to opposite diagonal",
         "Landing, bounce settling, joyful expression",
-        "Arms lowering to sides, radiant smile, settling to neutral"]
+        "Arms lowering to sides, radiant smile, settling to neutral"
+      ]
     },
     {
-      "id": "encourage", "name": "加油", "duration": 2,
-      "poses": ["Standing with determined face, right fist beginning to rise",
+      "id": "encourage",
+      "name": "加油",
+      "duration": 2,
+      "poses": [
+        "Standing with determined face, right fist beginning to rise",
         "Right fist pumped up near chest, determined sparkling eyes",
         "Fist higher, confident open mouth, cheering expression",
         "Fist at peak, other arm starting, energetic posture",
         "Both fists up in double cheer, blushing with effort smile",
         "Fists lowering slightly, maintaining determined smile",
         "One fist remaining, small nod of resolve",
-        "Back to neutral standing, confident calm expression"]
+        "Back to neutral standing, confident calm expression"
+      ]
     },
     {
-      "id": "drink", "name": "喝饮料", "duration": 3,
-      "poses": ["Holding a small cup at waist with both hands, looking at it",
+      "id": "drink",
+      "name": "喝饮料",
+      "duration": 3,
+      "poses": [
+        "Holding a small cup at waist with both hands, looking at it",
         "Cup rising toward mouth, eyes soft",
         "Cup at lips, tilting slightly, sipping with closed eyes",
         "Sipping, eyes closed contentedly, tiny blush",
         "Cup lowering from lips, small satisfied aah expression",
         "Cup held at chest, happy relaxed smile",
         "Cup lowering back to waist, peaceful expression",
-        "Cup at rest, returning to initial holding pose"]
+        "Cup at rest, returning to initial holding pose"
+      ]
     },
     {
-      "id": "eat", "name": "吃东西", "duration": 3,
-      "poses": ["Holding a small snack with both hands at chest, eyes on it",
+      "id": "eat",
+      "name": "吃东西",
+      "duration": 3,
+      "poses": [
+        "Holding a small snack with both hands at chest, eyes on it",
         "Snack rising to mouth, mouth opening slightly",
         "Taking a small bite, eyes closed happily, cheeks puffed slightly",
         "Chewing gently with satisfied expression, snack lowered a bit",
         "Swallowing, tiny happy sparkle in eyes",
         "Raising snack for another bite, anticipating",
         "Second small bite, blushing with delight",
-        "Snack lowered, full satisfied smile, back to holding pose"]
+        "Snack lowered, full satisfied smile, back to holding pose"
+      ]
     },
     {
-      "id": "phone", "name": "看手机", "duration": 3,
-      "poses": ["Holding a phone with both hands at chest, looking down at screen",
+      "id": "phone",
+      "name": "看手机",
+      "duration": 3,
+      "poses": [
+        "Holding a phone with both hands at chest, looking down at screen",
         "Eyes scanning screen, thumb tapping, interested expression",
         "Thumb scrolling, eyes following content, slight smile",
         "Tapping screen twice, small focused squint",
         "Eyes widening at something on screen, small surprise",
         "Chucking softly at the screen, warm smile",
         "Continuing to scroll, relaxed happy expression",
-        "Eyes finishing a page, returning to initial phone pose"]
+        "Eyes finishing a page, returning to initial phone pose"
+      ]
     },
     {
-      "id": "play_cat", "name": "玩猫咪", "duration": 4,
-      "poses": ["Crouching slightly, extending one hand toward a small kitten at her feet, gentle smile",
+      "id": "play_cat",
+      "name": "玩猫咪",
+      "duration": 4,
+      "poses": [
+        "Crouching slightly, extending one hand toward a small kitten at her feet, gentle smile",
         "Hand reaching the kitten's head, starting to pet, kitten looking up",
         "Petting the kitten softly, both smiling, kitten eyes closed happy",
         "Kitten rubbing against her hand, her eyes bright with delight",
         "Kitten small happy hop, her hand following playfully",
         "Kitten rolling over, her laughing expression, hand teasing gently",
         "Kitten settling, her hand resting on it, both content",
-        "Hand withdrawing slightly, kitten sitting by her feet, warm smile, returning to start pose"]
+        "Hand withdrawing slightly, kitten sitting by her feet, warm smile, returning to start pose"
+      ]
     },
     {
-      "id": "stretch", "name": "伸懒腰", "duration": 2.5,
-      "poses": ["Standing neutral, arms starting to rise",
+      "id": "stretch",
+      "name": "伸懒腰",
+      "duration": 2.5,
+      "poses": [
+        "Standing neutral, arms starting to rise",
         "Arms rising to sides and up, back beginning to arch slightly",
         "Arms stretched high above head, deep satisfying stretch, eyes closed",
         "Peak stretch: fingers spread, back arched, small content sound face",
         "Holding the stretch, one small extra reach on tiptoes",
         "Arms starting to lower, stretch easing, eyes opening",
         "Arms coming down, body relaxing, refreshed smile",
-        "Back to neutral standing, relaxed refreshed expression"]
+        "Back to neutral standing, relaxed refreshed expression"
+      ]
     },
     {
-      "id": "sleeping", "name": "睡觉", "duration": 3,
-      "poses": ["Standing asleep: head slightly bowed, eyes closed, hands folded in front",
+      "id": "sleeping",
+      "name": "睡觉",
+      "duration": 3,
+      "poses": [
+        "Standing asleep: head slightly bowed, eyes closed, hands folded in front",
         "Deep breath while asleep, chest rising gently, head drifting",
         "Head drifting slightly to one side, soft sleeping face",
         "Gentle exhale, chest settling, head drifting to other side slightly",
         "Small sleep bubble zone: head nodding a tiny bit, peaceful",
         "Breath in again, shoulders rising softly",
         "Breath out, whole body gently settled, serene face",
-        "Returning to the exact sleeping pose of keyframe 1, peaceful loop"]
+        "Returning to the exact sleeping pose of keyframe 1, peaceful loop"
+      ]
     },
     {
-      "id": "dance", "name": "跳舞", "duration": 4,
-      "poses": ["Dance start: weight on right foot, left hand up, right hand down, playful smile",
+      "id": "dance",
+      "name": "跳舞",
+      "duration": 4,
+      "poses": [
+        "Dance start: weight on right foot, left hand up, right hand down, playful smile",
         "Weight switching to left foot, arms swapping diagonally, head bob",
         "Small spin: body rotating slightly, hair swinging with motion",
         "Both arms up in a small wave pose, hips to the right, joyful eyes",
         "Arms down crossing, hips to the left, wink expression",
         "Bounce step: feet hopping together, arms bouncing at sides",
         "Twirl ending: hair flowing, arms opening outward, bright smile",
-        "Settling back into the exact starting dance pose, playful smile"]
+        "Settling back into the exact starting dance pose, playful smile"
+      ]
     }
   ]
 }
