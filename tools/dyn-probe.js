@@ -150,7 +150,7 @@
     assert('todo.editPersisted', JSON.parse(localStorage.getItem(sourceOf() === 'preview' ? 'dsh.sessions.preview' : 'dsh.sessions.model'))
       .sessions.find((x) => x.id === s.id).todoTasks[0].content === '写探针脚本(改)');
 
-    // 3) 状态循环 pending → in_progress → completed → pending
+    // 3) 状态循环 pending → in_progress → verifying → completed → pending（G4 扩展了验证中态）
     const clickStatus = async () => {
       $('#todoPanelBody .todo-item[data-idx="0"] [data-todo-status]').click();
       await sleep(50);
@@ -160,8 +160,11 @@
     await clickStatus();
     const after2 = s.todoTasks[0].status;
     await clickStatus();
-    assert('todo.statusCycle', after1 === 'in_progress' && after2 === 'completed' && s.todoTasks[0].status === 'pending',
-      [after1, after2, s.todoTasks[0].status]);
+    const after3 = s.todoTasks[0].status;
+    await clickStatus();
+    assert('todo.statusCycle', after1 === 'in_progress' && after2 === 'verifying' && after3 === 'completed'
+      && s.todoTasks[0].status === 'pending',
+      [after1, after2, after3, s.todoTasks[0].status]);
 
     // 4) 两段确认删除第 2 项
     $('#todoPanelBody .todo-item[data-idx="1"] [data-todo-del]').click();

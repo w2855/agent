@@ -245,12 +245,13 @@
     && savedProfiles.active === state.activeProfileId, `count=${(savedProfiles.profiles || []).length}`);
   add('localStorage 连接记录不含明文 Key', (savedProfiles.profiles || []).every((p) => !p.key), JSON.stringify((savedProfiles.profiles || []).map((p) => ({ name: p.name, hasKey: !!p.key }))));
   let vault = null;
+  // 密钥主进程化后凭据库返回掩码视图（明文永不外泄）：hasKey=true 且返回值不含明文即证明已入库
   for (let i = 0; i < 30; i++) {
     vault = await window.dsh.secrets.getProfiles();
-    if (vault?.ok && vault.data?.profiles?.some((p) => p.key === 'test-key-2')) break;
+    if (vault?.ok && vault.data?.profiles?.some((p) => p.hasKey === true && p.key !== 'test-key-2')) break;
     await sleep(100);
   }
-  add('Key 已进入 safeStorage 凭据库', vault?.ok && vault.data.profiles.some((p) => p.key === 'test-key-2'), vault?.ok ? `profiles=${vault.data?.profiles?.length}` : vault?.error?.message);
+  add('Key 已进入 safeStorage 凭据库(掩码视图)', vault?.ok && vault.data.profiles.some((p) => p.hasKey === true && p.key !== 'test-key-2' && String(p.key).startsWith('sk-****')), vault?.ok ? `profiles=${vault.data?.profiles?.length}` : vault?.error?.message);
   document.querySelector('#profileRow .profile').click();
   await sleep(120);
   add('切换连接会加载对应配置', document.querySelector('#apiKey').value === 'test-key', `key=${document.querySelector('#apiKey').value}`);
