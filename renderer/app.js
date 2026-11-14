@@ -3076,6 +3076,7 @@ function runApiTurn(ctx, opts) {
         s.todoTasks = draft.tasks; // 会话级并行：写给本回合的会话，不是当前活跃会话
         renderTasks(node, draft);
         renderTodoPanel();
+        if (s.todoCollapsedByUser !== true) openTodoPanel();
       }
       renderTools(node, draft);
       scrollToBottom();
