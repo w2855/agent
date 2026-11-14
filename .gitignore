@@ -11,3 +11,4 @@ tmp-*.json-*-wal
 .DS_Store
 .e2e-userdata/
 *.e2e-userdata/
+release/

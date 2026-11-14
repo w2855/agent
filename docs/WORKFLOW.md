@@ -65,16 +65,19 @@ R2 已落地（2026-11-14，来源：本地定位 11 条 + ZCode 挖掘 16 项 +
 - [x] 助手消息复制按钮（成功打勾 1.2s 还原，ZCode CopyRowAction 模式）
 - [x] 输入历史 ↑/↓ 翻阅（30 条，localStorage，ZCode promptHistory 模式）
 
-R3 候选（按 ZCode 清单价值排序，待下一轮）：
-- [ ] 代码块复制按钮（hover pre 显示）
-- [ ] 会话右键删除 + 确认（当前无法删会话，存储只增不减）
-- [ ] 工具调用行：运行中扫光进度条（ZCode ToolCallProgressIndicator 的 indeterminate keyframe）
-- [ ] 输入草稿按会话持久化（切会话/重启不丢）
-- [ ] 重试状态内嵌卡片增强（倒计时已有，加低对比 shimmer）
+R3 候选 → 已全部落地（见 R3 轮次记录）：
+- [x] 代码块复制按钮（hover 注入，打勾反馈）
+- [x] 会话删除（两段确认 + 运行保护；顺带修复逐行监听重复注册）
+- [x] 工具调用行：运行中扫光进度条
+- [x] 输入草稿按会话持久化
+
+R4 候选（剩余，按价值排序）：
+- [x] markdown 斜体中文标点边界（R4 已修，截图验证）
+- [ ] 重试状态内嵌卡片增强（低对比 shimmer）
 - [ ] 思考/工具折叠区：正文到达后自动收起，用户点过不再自动动
 - [ ] 会话内查找（Ctrl+F，CSS Highlight API）
 - [ ] 选区浮动操作菜单（复制/追问）
-- [ ] 发送键四态状态机（canSend/发送中/运行中空草稿→停止/队列）
+- [ ] electron-builder 打包实测（进行中）
 
 ### 观察项
 - [ ] runtime-ipc-check.js 只能在 Electron 内跑（`--script` 方式），文档化
@@ -107,7 +110,30 @@ foundation 43 / orchestrator 58 / delegation 63 / project 43 / queue 29 / graph 
 - [x] 存储写入失败告警（原静默吞掉，只提示一次防刷屏）
 - 验证：语法 ✓ · 296/296 ✓ · tool-e2e 74/74 ✓（新代码上）· 截图 ✓
 
-### R2 · 2026-11-14 · UX 第一批（来源：本地定位 11 条 + ZCode 挖掘 16 项）
-- [x] toast 队列 / markdown 错误降级 / 建议直发 / 失败重试按钮 / 输入计数 / 回到底部 / 消息复制（打勾反馈）/ 输入历史 ↑/↓
-- 验证：语法 ✓ · tool-e2e 74/74 ✓ · 296 回归（见下）
-- 下一轮 R3：代码块复制、会话删除、工具行扫光、草稿持久化（清单见 backlog）
+### R2 · 2026-11-14 · UX 第一批（commit `8c05b52`，来源：本地定位 11 条 + ZCode 挖掘 16 项）
+- [x] toast 队列（不再互相覆盖）
+- [x] markdown 渲染错误降级为纯文本（ZCode 错误边界模式）
+- [x] 建议 chips 点击直接发送
+- [x] 失败回合「重试」按钮
+- [x] 输入长度计数（接近上限才出现，超限变红）
+- [x] 回到底部悬浮按钮
+- [x] 助手消息复制按钮（打勾 1.2s 还原，ZCode CopyRowAction 模式）
+- [x] 输入历史 ↑/↓ 翻阅（30 条，ZCode promptHistory 模式）
+- 验证：tool-e2e 74/74 ✓ · 296 回归 ✓
+- 插曲：`.e2e-userdata`（e2e 隔离测试目录，含测试 secrets）误入提交，已 gitignore + 移出跟踪 + amend 清理
+
+### R3 · 2026-11-14 · UX 第二批（commit `958da5a`）
+- [x] 会话删除：hover 出 ×，两段确认（3 秒内再点一次），运行中/生成中不可删，全删光兜底新会话；顺带把逐行监听改为事件委托（修一处重复注册）
+- [x] 代码块复制：悬停注入角落按钮，打勾反馈（流式重绘会冲掉按钮，悬停即补）
+- [x] 草稿按会话持久化：localStorage `dsh.drafts`，400ms 防抖，发送即清，切会话/重启恢复
+- [x] 工具行运行中扫光进度条（indeterminate，reduced-motion 下关闭）
+- [x] 新增 tools/r3-shot.js 渲染检查脚本
+- 验证：e2e 74/74 ✓ · 回归 296/296 ✓ · 截图 ✓（代码块/列表/链接渲染正常）
+- 发现既有小瑕疵：中文标点后 `*斜体*` 不生效（inline() 边界类不认中文标点）→ 转 R4
+
+### R4 · 2026-11-14 · 收尾轮
+- [x] italic 中文标点边界修复（inline() 边界类补中文标点，截图验证 `*斜体*` 正确渲染）
+- [~] electron-builder 打包实测：win-unpacked 已产出、nsis.7z 82MB 已产出，最终 portable exe 组装被 540s 超时截断一次，重跑中
+- [~] e2e 最终回归：诊断出**关键坑——陈旧 mock 网关污染测试**。老网关进程存活数小时后被 kill 中断的会话状态留在内存里，后续 e2e 在 /chat/completions 步骤全部挂起；而「重启」因 EADDRINUSE 静默失败实际仍是老进程在服务。正确流程固化到 docs/e2e-guide.md（杀干净 → 起新 → 验证唯一性 → 再跑）
+- [~] 三路并行修复中：A=runtime 安全向 P2（delegate_task 校验/download-exec 变体/_prune 保护/end 后事件抑制）、B=e2e+打包收尾、C=renderer R5 UX（重试 shimmer/折叠自动收起）
+- 诊断工具沉淀：tools/diag.js（启动状态 + 主进程网络 + 渲染层 fetch 可达性一次查清）
