@@ -490,6 +490,58 @@ function sessionMatches(s) {
   return false;
 }
 
+/* [G6-P1] 会话右键菜单：菜单 DOM 动态构建（单例 #sessionCtxMenu），样式复用既有 .menu/.menu-item；
+   定位照 openMenu 的视口钳制逻辑手工计算。菜单项：复制会话 ID / 重命名（简化为 toast 提示走设置页）/
+   删除（复用 deleteSession 的两段确认逻辑）。 */
+function openSessionContextMenu(x, y, sid) {
+  const s = state.sessions.find((n) => n.id === sid);
+  if (!s || !sid) return;
+  let menu = document.getElementById('sessionCtxMenu');
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = 'sessionCtxMenu';
+    menu.className = 'menu';
+    menu.hidden = true;
+    document.body.appendChild(menu);
+    // 菜单项事件委托：元素只创建一次，之后每次仅重绘内容
+    menu.addEventListener('click', (ev) => {
+      const item = ev.target.closest('.menu-item');
+      if (!item) return;
+      ev.stopPropagation();
+      const target = item.dataset.sid || '';
+      if (item.dataset.act === 'copy') {
+        navigator.clipboard?.writeText(target).then(() => {
+          const small = item.querySelector('small');
+          if (small) small.textContent = '已复制 ✓'; // 打勾反馈
+          toast('会话 ID 已复制');
+          setTimeout(() => { menu.hidden = true; }, 900);
+        }).catch(() => toast('复制失败：剪贴板不可用'));
+      } else if (item.dataset.act === 'rename') {
+        menu.hidden = true;
+        // 简化版：不弹 inline 编辑框，toast 提示去设置页改（避免再引入一套编辑 UI）
+        toast('重命名请到设置中修改该会话标题');
+      } else if (item.dataset.act === 'del') {
+        menu.hidden = true;
+        deleteSession(target); // 复用两段确认（armed）；运行中的会话会被 deleteSession 拒绝
+      }
+    });
+  }
+  menu.innerHTML = `
+    <div class="menu-title">${esc(s.title || '会话')}</div>
+    <button class="menu-item" data-act="copy" data-sid="${esc(sid)}">复制会话 ID<small>${esc(sid)}</small></button>
+    <button class="menu-item" data-act="rename" data-sid="${esc(sid)}">重命名<small>前往设置</small></button>
+    <button class="menu-item" data-act="del" data-sid="${esc(sid)}">删除会话</button>`;
+  menu.classList.remove('is-closing'); // 可能正播出场动画，取消它
+  menu.hidden = false;
+  // 手工定位：右键点在屏幕边缘时把菜单钳回视口内（与 openMenu 同一套边界规则）
+  const w = menu.offsetWidth || 210;
+  const h = menu.offsetHeight;
+  const left = Math.max(10, Math.min(x, window.innerWidth - w - 10));
+  const top = (y + 6 + h <= window.innerHeight - 10) ? y + 6 : Math.max(10, y - h - 8);
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+
 function renderSessions() {
   // 任何会话状态变化（开始/结束/切活跃）都会走到这里：顺手校准「活跃会话忙」派生值，
   // 并刷新「N 个会话运行中」轻提示
@@ -522,7 +574,7 @@ function renderSessions() {
       const running = s.state === 'running';
       const pending = s.state === 'pending';
       html += `
-        <div class="session ${s.id === state.activeId ? 'is-active' : ''}" data-id="${esc(s.id)}">
+        <div class="session ${s.id === state.activeId ? 'is-active' : ''}" data-id="${esc(s.id)}" data-sid="${esc(s.id)}" title="右键：复制会话 ID · 重命名 · 删除">
           ${running ? '<span class="s-spin"></span>' : pending ? '<span class="s-badge"></span>' : s.unread ? '<span class="s-unread"></span>' : '<span class="s-empty"></span>'}
           <span class="s-title">${esc(s.title)}</span>
           <button class="s-del ${deleteArmed.has(s.id) ? 'is-armed' : ''}" data-del="${esc(s.id)}" title="删除会话">${deleteArmed.has(s.id) ? '确认?' : '×'}</button>
@@ -2783,6 +2835,14 @@ function runApiTurn(ctx, opts) {
     renderTools(node, draft);
     scrollToBottom();
 
+    /* [G6-P3] project_architecture 按会话归档：args 注入 sessionId
+       （R3 runtime 已支持按 workspace+sessionId 隔离架构）。本回合所属会话优先
+       （s 是本回合的会话，后台并行时不误挂到正在浏览的会话），取不到再退回活跃会话。 */
+    if (name === 'project_architecture' && args && typeof args === 'object' && !Array.isArray(args) && !args.sessionId) {
+      const g6sid = (typeof s !== 'undefined' && s && s.id) ? s.id : ((active() && active().id) || '');
+      if (g6sid) args.sessionId = g6sid;
+    }
+
     if (parseError) {
       tool.status = 'error';
       tool.meta = '参数错误';
@@ -3304,6 +3364,20 @@ function updateInputCount() {
 }
 
 function send() {
+  /* [G6-P2] 发送自动识别会话 ID：输入恰好是一个已存在的会话 ID（形如 m-/p-时间戳-随机码）时，
+     直接载入该会话上下文（复用 T1 的 handleLoadSession；/load 命令保持可用），不再当作普通消息发送。 */
+  {
+    const g6raw = ($('#input')?.value || '').trim();
+    if (/^(m|p)-\d{10,}-[a-z0-9]{4,}$/.test(g6raw) && state.sessions.some((n) => n.id === g6raw)) {
+      handleLoadSession(g6raw);
+      const g6input = $('#input');
+      if (g6input) { g6input.value = ''; autoGrow(); updateSendState(); }
+      hideMenus();
+      return;
+    }
+  }
+
+
   const input = $('#input');
   const text = input.value.trim();
 
@@ -3462,6 +3536,23 @@ function handleLoadSession(idArg) {
   renderChat();
   updateStatusline();
   toast(`已载入「${target.title || '未命名'}」的上下文（${msgs.length} 条消息）`);
+
+  /* [G6-P3] /load 附带架构提示：目标会话在 Runtime 里有专属项目架构时，
+     在占位消息 body 追加提示（此处异步执行，不阻塞 /load 主体）。 */
+  (async () => {
+    try {
+      const api = window.dsh?.runtime?.projects;
+      if (!api?.list) return;
+      const r = await api.list();
+      const rows = (r?.ok && Array.isArray(r.data?.projects)) ? r.data.projects : [];
+      const arch = rows.find((p) => (p?.project?.sessionId ?? p?.sessionId) === target.id);
+      if (!arch) return;
+      const nodeCount = (arch.live?.stats?.nodes
+        ?? (Array.isArray(arch.live?.nodes) ? arch.live.nodes.length : 0)) || 0;
+      loadedMsg.body += `\n\n🏗️ 该会话包含项目架构（${nodeCount} 节点），切到架构页查看`;
+      renderChat(); // 占位消息已在时间线上，补写正文后重绘即可
+    } catch { /* 架构查询失败不影响 /load 主体 */ }
+  })();
 }
 
 /** 压缩核心：把会话未压缩的历史折叠成摘要，写入 compacted 池并把消息列表重置为一条占位消息。
@@ -5328,9 +5419,34 @@ function scheduleArchPoll() {
   }, 3000);
 }
 
+/* [G6-P3] 架构页会话过滤：listProjects 结果里优先展示 sessionId === 当前活跃会话的项目；
+   没有会话专属项目时回退到共享项目（!sessionId，兼容老数据）。
+   注意 runtime 的 list/get 都返回 { project, live } 包装（与 ensure 一致），sessionId 在 project 里。 */
+async function applyArchSessionFilter() {
+  try {
+    const api = window.dsh?.runtime?.projects;
+    if (!api?.list || !state.projectOpen) return;
+    const r = await api.list();
+    const rows = (r?.ok && Array.isArray(r.data?.projects)) ? r.data.projects : [];
+    if (!rows.length) return;
+    const aid = (active() && active().id) || '';
+    const sidOf = (p) => (p?.project?.sessionId ?? p?.sessionId) || '';
+    const mine = rows.find((p) => aid && sidOf(p) === aid);
+    const shared = rows.find((p) => !sidOf(p));
+    const pick = mine || shared;
+    if (pick && pick.project && state.project?.project?.id !== pick.project.id) {
+      state.project = pick;
+      state.projectWorkspace = state.workspace;
+    }
+  } catch { /* list 不可用时保持 loadProject（ensure）的结果，等价于共享兜底 */ }
+}
+
 async function refreshArchitecture(force = true) {
   if (!state.projectOpen) return;
   await loadProject(force);
+  await applyArchSessionFilter(); // [G6-P3] 会话专属优先、共享兜底（实现见 applyArchSessionFilter）
+
+
   renderArchPage();
 }
 
@@ -7054,6 +7170,16 @@ function bind() {
     if (del) { e.stopPropagation(); deleteSession(del.dataset.del); return; }
     const row = e.target.closest('.session');
     if (row) selectSession(row.dataset.id);
+  });
+
+  /* [G6-P1] 会话右键菜单：容器级事件委托（renderSessions 每次重建 DOM，监听挂容器上只需挂一次）。
+     会话行已有 data-id（G6 补丁又补了 data-sid 双保险），两者任取其一作为会话 ID。 */
+  $('#sessions').addEventListener('contextmenu', (e) => {
+    const row = e.target.closest('.session');
+    if (!row) return;
+    if (typeof openSessionContextMenu !== 'function') return; // P1-b 未落地时静默降级，不报错
+    e.preventDefault();
+    openSessionContextMenu(e.clientX, e.clientY, row.dataset.sid || row.dataset.id || '');
   });
 
   // 代码块复制：悬停时注入角落按钮（流式重绘会冲掉按钮，悬停即补）
