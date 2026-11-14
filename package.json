@@ -32,7 +32,8 @@
       "lib/**",
       "renderer/**",
       "assets/**",
-      "package.json"
+      "package.json",
+      "!assets/pet/**/*.frames"
     ],
     "win": {
       "icon": "assets/icon.png",
@@ -47,6 +48,7 @@
     },
     "portable": {
       "artifactName": "DSH-Desktop-${version}.exe"
-    }
+    },
+    "electronVersion": "45.3.1"
   }
 }
