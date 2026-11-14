@@ -45,13 +45,13 @@
 ### P2 遗留（来自交接文档 + code-review-2026-11-13.md 交叉核对）
 - [x] 流式 O(n²) 渲染：改稳定块+活动尾增量渲染（R1 完成，aider mdstream 模式，两路径接入）
 - [x] msgStore 永不清理：压缩后 pruneMsgStore（R1 完成）
-- [ ] 子任务预算不预留、父 usage 不累计子消耗（delegation.js:35-59 + state.js:954-958）⚠️ 冻结区，需用户点头
-- [ ] 密钥回传渲染层（main.js:269-284, preload.js:40-43，架构取舍，需用户点头才动）
-- [ ] delegate_task 声明 workspaceOnly 但 policy 层不校验参数（tool-registry.js:60）——安全向可做
-- [ ] download-exec 只查 curl/wget 直连管道，`curl -o evil.exe … & evil.exe` 不命中（policy.js:65）——安全向可做
-- [ ] `_prune` 可删仍被子任务引用的父任务（state.js:1336）
-- [ ] graph.js 不抑制 end 后事件（state.js:1249-1334 相关）
-- [ ] electron-builder 打包实测（DSH-Desktop-${version}.exe）
+- [x] 子任务预算不预留、父 usage 不累计子消耗（`62fa051` R6-budget，用户授权解冻：幂等并入父 usage + 在途预留 + 跨重启只计一次）
+- [x] 密钥回传渲染层（`18532b8` R7-secrets，用户授权：API Key 主进程保管 + 掩码视图 + profileId 注入，渲染层不再收到明文）
+- [x] delegate_task 声明 workspaceOnly 但 policy 层不校验参数（`e5fe8b1` R5-runtime：workspaceOnly 参数校验）
+- [x] download-exec 只查 curl/wget 直连管道（`e5fe8b1` R5-runtime：3 正则 + 空白归一化覆盖 `curl -o evil.exe … & evil.exe` 变体）
+- [x] `_prune` 可删仍被子任务引用的父任务（`e5fe8b1` R5-runtime：被引用父任务跳过保护）
+- [x] graph.js 不抑制 end 后事件（`e5fe8b1` R5-runtime：end 后事件抑制，保留断点续跑重开）
+- [x] electron-builder 打包实测：R4 产出 release/DSH-Desktop-0.1.0.exe 105.7MB；设置页/MCP/通知之后的新版重出归入 R9 P5 打包流水线
 - [x] tool-e2e 完整端到端数字：**74/74 全通过**（卡点是 userData 缓存锁，`--user-data-dir` 隔离即解，已验证两次）
 
 ### UX 优化
@@ -73,11 +73,11 @@ R3 候选 → 已全部落地（见 R3 轮次记录）：
 
 R4 候选（剩余，按价值排序）：
 - [x] markdown 斜体中文标点边界（R4 已修，截图验证）
-- [ ] 重试状态内嵌卡片增强（低对比 shimmer）
-- [ ] 思考/工具折叠区：正文到达后自动收起，用户点过不再自动动
-- [ ] 会话内查找（Ctrl+F，CSS Highlight API）
-- [ ] 选区浮动操作菜单（复制/追问）
-- [ ] electron-builder 打包实测（进行中）
+- [x] 重试状态内嵌卡片增强（`244fdd7` R5-renderer：重试原因呼吸）
+- [x] 思考/工具折叠区：正文到达后自动收起，用户点过不再自动动（`244fdd7` R5-renderer）
+- [x] 会话内查找（Ctrl+F，CSS Highlight API，命中计数环绕跳转）（`97354c5` R7-g3）
+- [x] 选区浮动操作菜单（复制/追问预填）（`97354c5` R7-g3）
+- [x] electron-builder 打包实测（R4 完成；新版重出归入 R9 P5）
 
 ### 观察项
 - [ ] runtime-ipc-check.js 只能在 Electron 内跑（`--script` 方式），文档化
@@ -86,13 +86,15 @@ R4 候选（剩余，按价值排序）：
 
 ```bash
 cd /e/dsh-desktop
-for f in tools/runtime-*-check.js; do node "$f" 2>&1 | tail -5; done   # 8 脚本 296 项
-npx electron . --script=tools/tool-e2e.js                              # 渲染层 e2e
+node tools/run-all.js [--quick]                                        # 一键聚合：语法门禁 + 回归 + lib 自检 (+ Electron 探针/e2e)
+for f in tools/runtime-*-check.js; do node "$f" 2>&1 | tail -5; done   # 9 脚本（runtime-ipc-check 需 Electron）
+npx electron . --user-data-dir="E:/dsh-desktop/.e2e-userdata" --script=tools/tool-e2e.js   # 渲染层 e2e
 ```
 
-基线数字（2026-11-14 实测，与交接文档一致，全绿）：
-foundation 43 / orchestrator 58 / delegation 63 / project 43 / queue 29 / graph 20 / audit 17 / validation 23 = **296/296**
-（runtime-ipc-check.js 需 Electron 上下文，node 直跑报 `window is not defined` 属预期）
+基线数字（2026-11-14 聚合器实测，全绿；R6-budget 起从 296 升至 339）：
+foundation 62 / orchestrator 58 / delegation 83 / project 43 / queue 29 / graph 24 / audit 17 / validation 23 = **339/339**
+（runtime-ipc-check.js 需 Electron 上下文（`--script` 通道），node 直跑报 `window is not defined` 属预期）
+（并发代理扩容会改变各脚本计数，以聚合器当场实测为准；lib 自检另含 mcp 26 / skills 14 / ipc-mcp 18 / secret-mask 37 / h3 31 / lessons 39）
 
 ## 7. 轮次记录
 
@@ -147,7 +149,19 @@ foundation 43 / orchestrator 58 / delegation 63 / project 43 / queue 29 / graph 
 - **工具行闪烁修复**：renderTools 全量重建 → 增量更新（签名对比，未变行零 DOM 写入）
 - 验证：回归 339/339 ✓ · e2e 74/74 ✓（全量树）
 
-### R7 · 2026-11-14 · 进行中
-- [~] G1 子代理：MCP/Skills 渲染层 UI（设置页 paneMcp/paneSkills + /skills 斜杠 + 工具行 MCP 标签容错）
-- [ ] G2 接力：密钥主进程化（用户已授权）+ Ctrl+F 会话查找 + 选区浮动菜单
-- [ ] 最终打包：electron-builder 重出 exe（当前 exe 是设置页之前的版本）
+### R7 · 2026-11-14 · MCP UI + 密钥主进程化 + 系统集成 + 查找/选区（全部已提交）
+- **R7-mcp-skills-ui**（`34823ef`，G1）：设置页新增 MCP服务器/技能 两 pane（启动停止/两段删除/错误行内展示/工具汇总/技能注入）+ `/skills` 斜杠 + 工具行 MCP 标签容错（--tone-mcp 蓝系）+ 状态轮询签名比对防重建闪烁
+- **R7-secrets**（`18532b8`，G2a，用户授权）：API Key 迁移主进程保管（掩码视图 + profileId 解析 + 掩码反查防迁移 401 + set 侧还原防凭据覆盖，37 项自检）；渲染层不再收到明文
+- **R7-sysint**（`7dd6fb2`，H3）：OS 系统通知（tag 去重 30s + 点击聚焦 + document.hidden 才发）+ Windows 托盘（关闭到托盘开关/右键菜单/新对话）+ 会话导出（md/json 对话框，序列化抽 lib/session-export）；31 项自检 + Electron 探针全过；MCP 与密钥链路原样保留
+- **R7-g3**（`97354c5`，G3）：密钥接线（apiCfg 带 profileId、掩码不回写守卫、localStorage 脱敏）+ Ctrl+F 会话查找（CSS Highlight API，命中计数环绕跳转）+ 选区浮动菜单（复制打勾/追问预填）；含 H3 渲染层触发点（OS 通知/托盘开关/导出按钮）；探针 44/44
+
+### R8 · 2026-11-14 · 桌宠系统 + 架构图实时化（全部已提交）
+- **R8-pet 第一阶段**（`690ac84`）：35 动作姿势表 + 生成器（参考图一致性，edits 端点 + 透明）+ 渲染器（脚底锚定对齐 + Farneback 光流插帧到 60fps + GIF/manifest）+ 验收脚本；批 1 六动作 48 关键帧 + 120-144 帧 GIF 全过验收
+- **R8-pet 渲染升级**（`b3d7a9b`）：alpha 覆盖率合成（修重叠区半透明）+ 光流灰度输入修复 + GIF 逐帧延迟 [20,20,10]ms 循环（均值 16.67ms = 真 60fps，数学精确解）；批 1 六动作 120-144 帧重刷验收全过
+- **R8-pet 直出模式**（`890e3cd`，按用户反馈）：废弃光流插帧（即过渡动画感来源），改关键帧直出零添加帧（60fps 时钟均匀直切）；wave/happy/sleepy/confused/shy 已直出；idle 姿势已加大幅度待重生成（暂停）
+- **R8-dynamic**（`d421370`，H4，用户硬需求）：架构图事件驱动实时刷新（150ms 去抖 + 实时徽标 + 运行节点呼吸光环 + diff 防闪烁，轮询降 3s 兜底）+ 任务清单全交互（行内编辑/状态循环/两段删除/拖拽排序/新增/同步模型开关）；探针 arch14 + todo22 全绿；顺手修面板点击误关与定位裁切两个既有 bug
+
+### R9 · 2026-11-14 · 进行中（6 路并行 + 验收聚合器）
+- [~] 本轮 6 路并行子代理，记录在案 5 路（均运行中）：P1 A组（TOP15 渲染/交互差距项，含 #7 主题跟随）/ P2 稳定性（runtime 回归扩容，各脚本计数已变、总 339）/ P3 经验库（新增 tools/lessons-check.js 自检 39 项）/ P5 打包流水线（electron-builder 重出 exe）/ P6 桌宠归档
+- [x] 新建 tools/run-all.js 一键验收聚合器（`node tools/run-all.js [--quick]`）：语法门禁（46 文件）+ runtime 回归 + lib 自检（存在才跑）+ Electron 探针（隔离 .runall-probe，--quick 跳过）+ tool-e2e（自动 mock-gateway 复用/新建回收）；统一解析 [script]/JSON/中文计数，汇总中文表格，任一失败退出码 1；聚合器只跑现状，并发改动导致的异常不重试不修复
+- [x] 文档同步：本文件轮次记录补齐 R7（4 提交）/R8（4 提交）/R9 + backlog 勾选（P2 遗留 8 项全部关账）+ §6 基线更新为 339；feature-gap-analysis.md TOP15 状态列（#3 通知 / #6 导出 / #11 托盘 完成，#7 主题跟随 → P1 进行中）
