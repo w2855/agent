@@ -19,6 +19,7 @@
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -32,6 +33,7 @@ const RUNTIME_CHECKS = fs.readdirSync(path.join(ROOT, 'tools'))
 const LIB_CHECKS = [
   'lessons-check.js', 'mcp-selfcheck.js', 'skills-selfcheck.js',
   'ipc-mcp-check.js', 'secret-mask-check.js', 'h3-check.js',
+  'r15-check.js', // R15 审计整改自检（47 断言：档位权威/委派回滚/上下文预算/备份/加固）
 ];
 const PROBES = ['settings-probe.js', 'dyn-probe.js', 'g3-probe.js', 'mcp-ui-probe.js'];
 const SYNTAX_CORE = [
@@ -111,6 +113,24 @@ function run(cmd, args, { timeoutMs = 60000, cwd = ROOT } = {}) {
 
 function rmrf(p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* 被占用则留给下次 */ } }
 
+/* 探针隔离目录必须「每轮真的空」。
+   Chromium 的 Cache/*、网关日志会留锁句柄，rmSync 静默失败后上一轮的 dsh-storage.json
+   （尤其 dsh.perm）会漏进下一轮：曾让 tool-e2e 一开局就不是 full、g3-probe 的
+   sel.askNotSent 假失败。所以这里清完要回读校验，清不掉就整目录改名让开。 */
+function resetProbeDir() {
+  let stale = false;
+  for (let i = 0; i < 3; i++) {
+    rmrf(PROBE_DIR);
+    if (!fs.existsSync(path.join(PROBE_DIR, 'dsh-storage.json'))) return { ok: true, stale };
+    stale = true;
+    const aside = `${PROBE_DIR}.stale-${Date.now()}`;
+    try { fs.renameSync(PROBE_DIR, aside); } catch { /* 仍被占用，下一轮再试 */ }
+    rmrf(aside);
+    if (!fs.existsSync(PROBE_DIR)) return { ok: true, stale };
+  }
+  return { ok: false, stale: true };
+}
+
 /** 解析 stdout 里的 {total,passed,failed} 计数（JSON 整体 / 尾部 JSON / 中文「N 通过 / M 失败」/ OK/XX 行） */
 function parseCounts(text) {
   const tryJson = (s) => {
@@ -152,12 +172,12 @@ function structuralIssue(obj) {
    fresh=true 先清空隔离 userData；fresh=false 保留（dyn-probe 两相位靠 localStorage 翻转复用同一目录）；
    cleanup=true 跑完即删；需要跨跑保留状态时传 false、由调用方统一清理 */
 async function runElectronProbe(script, { timeoutMs = 120000, fresh = true, cleanup = true } = {}) {
-  if (fresh) rmrf(PROBE_DIR);
+  if (fresh) resetProbeDir();
   const args = ['.', `--user-data-dir=${PROBE_DIR}`, '--shot', `--script=tools/${script}`];
   const cmd = electronPath || 'npx';
   const argv = electronPath ? args : ['electron', '.', ...args.slice(1)];
   const r = await run(cmd, argv, { timeoutMs, cwd: ROOT });
-  if (cleanup) rmrf(PROBE_DIR);
+  if (cleanup) resetProbeDir();
   if (r.timedOut) return { fail: `超时（>${Math.round(timeoutMs / 1000)}s）已终止`, raw: r };
   const errLine = r.stdout.split(/\r?\n/).find((l) => l.startsWith('[script-error]'));
   if (errLine) return { fail: errLine.slice('[script-error] '.length).slice(0, 300), raw: r };
@@ -186,9 +206,8 @@ async function ensureGateway() {
     req.on('error', () => resolve(false));
   });
   if (alive) return { reused: true, child: null };
-  rmrf(PROBE_DIR);
-  fs.mkdirSync(PROBE_DIR, { recursive: true });
-  const log = fs.openSync(path.join(PROBE_DIR, 'mock-gw.log'), 'a');
+  // 日志写系统临时目录：放进 PROBE_DIR 会一直占着句柄，下一轮就清不干净
+  const log = fs.openSync(path.join(os.tmpdir(), 'dsh-mock-gw.log'), 'a');
   const child = spawn(process.execPath, ['tools/mock-gateway.js'], { cwd: ROOT, stdio: ['ignore', log, log], windowsHide: true });
   const up = await new Promise((resolve) => {
     const t0 = Date.now();
@@ -266,12 +285,17 @@ async function ensureGateway() {
     add('Electron探针', 'tool-e2e.js', '—', null, '--quick 跳过');
   } else {
     console.log('── 4. Electron 探针 ──');
+    /* 隔离目录可清空性本身也要入表：清不掉就等于带了上一轮的 dsh.perm 跑，
+       失败会伪装成业务回归（历史上 tool-e2e 与 g3-probe 都这么假失败过）。 */
+    const iso = resetProbeDir();
+    add('Electron探针', '隔离 userData 已清空', iso.ok ? '✓' : '✗', null,
+      iso.ok ? (iso.stale ? '上一轮残留已改名清理' : '空目录') : '清不掉，本轮结果可能被上一轮状态污染');
     for (const f of PROBES) {
       if (f === 'dyn-probe.js') {
         /* dyn-probe 两阶段复用同一 userData（localStorage 翻转），两跑均不清理，结束后一起删 */
         const p1 = await runElectronProbe(f, { timeoutMs: 120000, fresh: true, cleanup: false });
         const p2 = p1.fail ? null : await runElectronProbe(f, { timeoutMs: 120000, fresh: false, cleanup: false }); // 同目录自动进 todo 相位
-        rmrf(PROBE_DIR);
+        resetProbeDir();
         if (p1.fail) { add('Electron探针', f, '✗', null, '相位1(arch): ' + p1.fail); continue; }
         if (!p2 || p2.fail) { add('Electron探针', f, '✗', null, '相位2(todo): ' + (p2 ? p2.fail : '未运行')); continue; }
         const count = (o) => {
@@ -303,7 +327,7 @@ async function ensureGateway() {
     console.log('── 5. tool-e2e ──');
     const gw = await ensureGateway();
     if (gw.child && !gw.up) {
-      killTree(gw.child); rmrf(PROBE_DIR);
+      killTree(gw.child); resetProbeDir();
       add('Electron探针', 'tool-e2e.js', '✗', null, 'mock-gateway 启动失败（端口 57321 无响应）');
     } else {
       const { obj, fail, raw } = await runElectronProbe('tool-e2e.js', { timeoutMs: 300000 });
@@ -314,7 +338,7 @@ async function ensureGateway() {
         (gw.reused ? '复用现有网关 · ' : '新建网关已回收 · ') + (obj.failed ? `${obj.failed} 项失败: ` +
           (obj.checks || []).filter((c) => !c.pass).slice(0, 5).map((c) => c.name).join(', ') : 'exit=' + raw.code));
     }
-    rmrf(PROBE_DIR);
+    resetProbeDir();
   }
 
   /* 总表输出（中文列对齐，CJK 按 2 列宽） */

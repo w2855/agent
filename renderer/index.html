@@ -784,6 +784,17 @@
         </div>
 
         <div class="settings-card">
+          <div class="settings-row">
+            <div class="sp-row-main">
+              <b>数据备份</b>
+              <small id="backupFine">正常退出时自动快照：会话存储 · 任务状态 · 审计链 · 最近 3 天事件</small>
+            </div>
+            <button class="btn ghost" id="backupOpen" type="button">打开备份目录</button>
+          </div>
+          <p class="fine">恢复方法：完全退出 DSH 后，把某份时间戳目录里的文件覆盖回 userData 对应位置，再重新启动。</p>
+        </div>
+
+        <div class="settings-card">
           <div class="group-title">MetaHarness 配置评分</div>
           <div class="doctor-list" id="doctorScores"><div class="doctor-item">等待体检…</div></div>
           <p class="fine">对每个 API 配置打分（0-100）：baseUrl 合法 40 · 模型已选 20 · 密钥已保管 20 · 名称非默认 10 · 上次探活成功 10；低于 60 分黄色警示。</p>

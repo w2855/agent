@@ -3,6 +3,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { TOOL_SPECS } = require('../lib/tools');
+const { estimateTokens, estimateMessagesTokens } = require('../lib/token-estimate');
+const { sleep: abortableSleep } = require('../lib/retry');
 
 /* 子 Agent 执行器：主进程内的非流式模型循环。
    子 Run 复用 Runtime 的 Step/ModelCall/ToolCall/Approval 与事件，不绕过 Policy。 */
@@ -10,10 +12,14 @@ const { TOOL_SPECS } = require('../lib/tools');
 const MAX_CONTEXT_REF_CHARS = 20000;
 const MAX_CONTEXT_TOTAL_CHARS = 40000;
 const MAX_TOOL_RESULT_CHARS = 12000;
+/* 子代理历史总量上限（R15/A6）：以前只有「轮数」与「token」两道闸，
+   而 token 依赖上游返回 usage（兼容网关普遍不返回 → 预算等于不存在）。
+   12 轮 × 每轮 24 工具 × 12000 字符理论上能到 345 万字符，必撞上游窗口。
+   120000 字符 ≈ 12 万 token 中文，给系统提示与输出留出余量。 */
+const MAX_CHILD_CONTEXT_CHARS = 120000;
+const CHECKPOINT_KEEP_MESSAGES = 40;
 const APPROVAL_POLL_MS = 300;
 const MODEL_RETRY_DELAY_MS = 1200;
-
-function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 const SYSTEM_PROMPT = [
   '你是 DSH Desktop 中被父 Agent 委派的子 Agent。',
@@ -117,7 +123,10 @@ async function requestModel(runtime, { providerConfig, delegation, messages, too
     } catch (err) {
       lastErr = err;
       if (attempt >= 3 || !err?.retryable || Date.now() + MODEL_RETRY_DELAY_MS >= deadline) throw err;
-      await sleep(MODEL_RETRY_DELAY_MS * attempt);
+      /* R15/A12：退避必须可中断——取消子任务时不该还等满 1.2/2.4 秒再退出。
+         取消时 abortableSleep 抛 AbortError，这里把原始错误抛出去让上层按 CANCELED 收尾。 */
+      try { await abortableSleep(MODEL_RETRY_DELAY_MS * attempt, signal); }
+      catch { throw err; }
     }
   }
   throw lastErr;
@@ -229,6 +238,83 @@ function clipToolResult(text) {
   return s.length > MAX_TOOL_RESULT_CHARS ? s.slice(0, MAX_TOOL_RESULT_CHARS) + '\n…（工具结果已截断）' : s;
 }
 
+function messagesChars(messages) {
+  return (Array.isArray(messages) ? messages : [])
+    .reduce((n, m) => n + String(m?.content || '').length, 0);
+}
+
+/**
+ * 修复 tool_calls / tool 配对（R15/A6）。
+ * 裁剪只能整段掐，断点很容易落在「assistant 带 tool_calls」与「对应 tool 结果」之间；
+ * 上游对配对是强校验（缺结果 / 多余结果都会 400），所以裁完必须补一遍：
+ *   · 孤儿 tool 消息（找不到声明的 tool_call_id）→ 丢弃；
+ *   · assistant 的 tool_calls 里没有对应结果的 → 去掉该条声明；
+ *   · 去掉声明后既无正文又无工具的 assistant → 丢弃（空消息上游也可能拒）。
+ */
+function repairToolPairs(messages) {
+  const declared = new Set();
+  for (const m of messages) {
+    if (m?.role === 'assistant' && Array.isArray(m.tool_calls)) {
+      for (const c of m.tool_calls) if (c?.id) declared.add(c.id);
+    }
+  }
+  const kept = messages.filter((m) => !(m?.role === 'tool' && !declared.has(m.tool_call_id)));
+  const answered = new Set(kept.filter((m) => m?.role === 'tool').map((m) => m.tool_call_id));
+  const out = [];
+  for (const m of kept) {
+    if (m?.role === 'assistant' && Array.isArray(m.tool_calls)) {
+      const stillValid = m.tool_calls.filter((c) => answered.has(c?.id));
+      if (stillValid.length !== m.tool_calls.length) {
+        const content = String(m.content || '');
+        if (!stillValid.length && !content) continue;
+        out.push(stillValid.length ? { ...m, tool_calls: stillValid } : { ...m, tool_calls: undefined });
+        continue;
+      }
+    }
+    out.push(m);
+  }
+  return out;
+}
+
+/**
+ * 子代理历史裁剪（R15/A6）：按字符预算从尾部保留，超出部分用一行占位说明。
+ * 保留首条 system（角色与协议），裁掉的是最早的工具往返——那部分信息密度最低，
+ * 且模型可以重新读取文件。裁剪后统一做配对修复，避免上游 400。
+ */
+function trimChildMessages(messages) {
+  if (messagesChars(messages) <= MAX_CHILD_CONTEXT_CHARS) return messages;
+  const head = messages[0]?.role === 'system' ? [messages[0]] : [];
+  const body = head.length ? messages.slice(1) : messages.slice();
+  const keep = [];
+  let used = head.reduce((n, m) => n + String(m?.content || '').length, 0);
+  for (let i = body.length - 1; i >= 0; i--) {
+    const size = String(body[i]?.content || '').length;
+    if (used + size > MAX_CHILD_CONTEXT_CHARS && keep.length) break;
+    keep.push(body[i]);
+    used += size;
+  }
+  keep.reverse();
+  const dropped = body.length - keep.length;
+  if (dropped <= 0) return messages;
+  const note = {
+    role: 'system',
+    content: `（已省略更早的 ${dropped} 条子任务对话，其中包含工具调用记录；需要该信息时请重新读取相关文件。）`,
+  };
+  return repairToolPairs([...head, note, ...keep]);
+}
+
+/** 检查点只存最近若干条（R15/A6）：整段 messages 每步全量写 state.json 是 O(n²) 写放大。 */
+function checkpointMessages(messages) {
+  if (messages.length <= CHECKPOINT_KEEP_MESSAGES) return messages;
+  const head = messages[0]?.role === 'system' ? [messages[0]] : [];
+  const tail = messages.slice(-CHECKPOINT_KEEP_MESSAGES);
+  return repairToolPairs([
+    ...head,
+    { role: 'system', content: `（检查点只保留最近 ${CHECKPOINT_KEEP_MESSAGES} 条消息）` },
+    ...tail,
+  ]);
+}
+
 async function runAgentTask({ runtime, delegation, providerConfig }) {
   const state = runtime.stateStore;
   const task = state.getTask(delegation.childTaskId);
@@ -298,13 +384,20 @@ async function runAgentTask({ runtime, delegation, providerConfig }) {
           providerId: run.providerId,
           model: delegation.model || providerConfig.model,
           messageCount: messages.length,
-          approxInputTokens: Math.round(messages.reduce((n, m) => n + String(m.content || '').length, 0) / 4),
+          approxInputTokens: estimateMessagesTokens(messages),
           meta: messages.map((m) => ({ role: m.role, chars: String(m.content || '').length })),
         });
         modelCallId = mc.ok ? mc.data.modelCallId : '';
       }
 
       modelCalls++;
+      /* R15/A6：请求前按字符预算裁剪历史（就地替换，保持 messages 引用），
+         只保留最近一段工具往返；裁剪后 pairing 已修复，不会因缺 tool 结果被上游拒。 */
+      const trimmed = trimChildMessages(messages);
+      if (trimmed !== messages) {
+        messages.length = 0;
+        messages.push(...trimmed);
+      }
       let reply;
       try {
         reply = await requestModel(runtime, { providerConfig, delegation, messages, tools, deadline });
@@ -322,6 +415,10 @@ async function runAgentTask({ runtime, delegation, providerConfig }) {
       if (stepId) runtime.finishStep({ stepId, status: 'succeeded', modelCallId });
       if (reply.usage && typeof reply.usage === 'object') {
         tokens += (Number(reply.usage.prompt_tokens) || 0) + (Number(reply.usage.completion_tokens) || 0);
+      } else {
+        /* 兼容网关常不返回 usage：用估算兜底。输入按本轮实际发送的全量 messages 计，
+           输出按本次正文计——与真实计费口径一致（每轮都重发上下文）。 */
+        tokens += estimateMessagesTokens(messages) + estimateTokens(text);
       }
       if (tokens > maxTokens) { budgetExceeded = { scope: 'tokens', limit: maxTokens, used: tokens }; break; }
 
@@ -330,7 +427,9 @@ async function runAgentTask({ runtime, delegation, providerConfig }) {
       if (text) finalText = text;
       messages.push({ role: 'assistant', content: text, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) });
       // 每个模型回合后落检查点：中断后可从此处续跑
-      state.saveDelegationCheckpoint(delegation.id, { messages, modelCalls, tokens, finalText });
+      state.saveDelegationCheckpoint(delegation.id, {
+        messages: checkpointMessages(messages), modelCalls, tokens, finalText,
+      });
       if (!toolCalls.length) break;
 
       let canceled = false;
@@ -341,7 +440,9 @@ async function runAgentTask({ runtime, delegation, providerConfig }) {
         const toolStepId = toolStepR.ok ? toolStepR.data.step.id : null;
         const r = await executeToolCall(runtime, { call, delegation, stepId: toolStepId, providerConfig, deadline });
         messages.push({ role: 'tool', tool_call_id: call.id, content: clipToolResult(r.content) });
-        state.saveDelegationCheckpoint(delegation.id, { messages, modelCalls, tokens, finalText });
+        state.saveDelegationCheckpoint(delegation.id, {
+          messages: checkpointMessages(messages), modelCalls, tokens, finalText,
+        });
         if (state.getRun(run.id)?.status === 'canceled') { canceled = true; break; }
       }
       if (canceled) { failure = { code: 'CANCELED', message: '父任务已取消子任务' }; break; }
@@ -402,5 +503,9 @@ module.exports = {
   buildChildTools,
   buildMessages,
   requestModel,
+  trimChildMessages,
+  repairToolPairs,
+  checkpointMessages,
+  MAX_CHILD_CONTEXT_CHARS,
   APPROVAL_POLL_MS,
 };

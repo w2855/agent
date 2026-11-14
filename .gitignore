@@ -16,14 +16,15 @@ release/
 # 桌宠帧序列（由 pet_render.py 从关键帧确定性再生，不入库）
 assets/pet/**/*.frames/
 
-# 探针隔离目录
+# 探针隔离目录 / 截图输出（瞬态）
 .s-*/
 .runall-probe/
+.runall-probe.stale-*/
 .e2e-g5/
-
-# 截图输出目录（瞬态）
 shots-output/
 .shot-run/
 
-# 全量门禁的隔离探针目录
-.runall-probe/
+# 开发脚本残留（R15/A13）：补丁工具的字节码缓存与逐次备份副本不入库
+__pycache__/
+*.pyc
+tools/patches/backup/

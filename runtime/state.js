@@ -287,6 +287,28 @@ class StateStore {
     return agent;
   }
 
+  /**
+   * 回滚删除 Agent（R15/A3）。
+   * 只用于「委派自动创建后立刻失败」的场景：刚建出来、还没有任何任务或委派引用，
+   * 归档会在设置页留下垃圾条目（archived 仍占列表），删除才是真正的回滚。
+   * 有引用 / 默认 Agent 一律拒绝，避免误删正在使用的主体。
+   */
+  deleteAgent(agentId, reason = 'auto_created_rollback') {
+    const id = String(agentId || '');
+    const agent = this.state.agents[id];
+    if (!agent) return { ok: false, code: 'AGENT_NOT_FOUND' };
+    if (id === this.defaultAgentId) return { ok: false, code: 'DEFAULT_AGENT' };
+    const usedByTask = Object.values(this.state.tasks || {}).some((t) => t.agentId === id);
+    const usedByDelegation = Object.values(this.state.delegations || {}).some((d) => d.targetAgentId === id);
+    if (usedByTask || usedByDelegation) return { ok: false, code: 'AGENT_IN_USE' };
+    const snapshot = { id, name: agent.name, status: agent.status };
+    delete this.state.agents[id];
+    delete this.state.agentVersions[id];
+    this._append('agent.deleted', { payload: { ...snapshot, reason } });
+    this._persist();
+    return { ok: true, agent: snapshot };
+  }
+
   /* ---------------- 项目 / 主控 Agent ---------------- */
 
   findProjectByWorkspace(workspace) {

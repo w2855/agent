@@ -4,6 +4,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 // 会话导出序列化是纯函数（node 单测可直接跑）：渲染层进程没有 require，
 // 由 preload 加载后透传给页面（见 lib/session-export.js）。
 const sessionExport = require('./lib/session-export');
+// token 估算同理：渲染层算上下文预算与用量记录时要和主进程用同一把尺子（见 lib/token-estimate.js）
+const tokenEstimate = require('./lib/token-estimate');
+// 有界读取规划器（R15/A9）：以前只有自检在调用，渲染层自己去截断；现在接到同一份规划器上
+const contextPlan = require('./lib/context-plan');
 
 /* 文件存储快照：sendSync 一次性取（页面脚本执行前 renderer 就要能同步读）。
    main.js 模块顶层注册了 storage:bootstrap，加载时序上必然先于本文件执行，不会阻塞。 */
@@ -152,6 +156,25 @@ contextBridge.exposeInMainWorld('dsh', {
     defaultWorkspace: () => ipcRenderer.invoke('workspace:default'),
     pickWorkspace: (current) => ipcRenderer.invoke('workspace:pick', current),
   },
+  /* 纯函数工具（无 IO）：渲染层用同一套估算口径，避免各处 /4 各算各的 */
+  util: {
+    estimateTokens: (text) => tokenEstimate.estimateTokens(text),
+    estimateMessagesTokens: (messages) => tokenEstimate.estimateMessagesTokens(messages),
+    planContextRead: (read, limits) => contextPlan.planContextRead(read, limits),
+    contextPlanDefaults: { ...contextPlan.DEFAULT_LIMITS },
+  },
+  /* 备份浏览（R15/A7）：列出 userData/backups 下的时间戳快照，或打开某一份/根目录。
+     恢复本身要先退出应用再覆盖文件，这里只提供「找到并打开」。 */
+  backup: {
+    list: () => ipcRenderer.invoke('backup:list'),
+    open: (name) => ipcRenderer.invoke('backup:open', name),
+  },
+  /* 权限档位：权威值在主进程（dsh.perm）。set 只「请求」——提升到 full 由主进程弹原生
+     确认框，降级直接生效；返回的 permission 是主进程裁定后的实际档位，调用方以此为准。 */
+  permission: {
+    get: () => ipcRenderer.invoke('permission:get'),
+    set: (level) => ipcRenderer.invoke('permission:set', level),
+  },
   mcp: {
     getServers: () => ipcRenderer.invoke('mcp:servers:get'),
     setServers: (list) => ipcRenderer.invoke('mcp:servers:set', list),
@@ -163,6 +186,7 @@ contextBridge.exposeInMainWorld('dsh', {
   skills: {
     scan: (workspace) => ipcRenderer.invoke('skills:scan', { workspace }),
     read: (filePath, workspace) => ipcRenderer.invoke('skills:read', { path: filePath, workspace }),
+    openDir: (workspace) => ipcRenderer.invoke('skills:open-dir', workspace),
   },
   /* Doctor 经验库检查（G4 妥协项修复）：统计概要 + 最近 5 条，只读；
      数据源 userData/runtime/lessons.jsonl，空库返回 { ok:false, reason:'empty' } */

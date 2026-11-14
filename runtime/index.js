@@ -166,11 +166,29 @@ class Runtime {
   }
 
   evaluateTool(input = {}) {
+    /* 档位双重收敛（R15/A1）：
+       1) 调用方请求的档位先与 Agent 当前版本档位取更严格者——与 executor.execute 同源，
+          否则「评估时允许、执行时收紧」会让同一份策略给出两种答案；
+       2) 未显式给 agentId 时回落到默认 Agent，避免「不传 agentId 就绕开 Agent 档位」。
+       收敛只会收紧、不会放大：stricterProfile 返回 rank 更大的一侧。 */
+    const agentId = typeof input.agentId === 'string' && input.agentId
+      ? input.agentId
+      : (this.stateStore?.defaultAgentId || '');
+    let agentProfile = null;
+    if (agentId) {
+      try {
+        const agent = this.stateStore.getAgent(agentId);
+        const ver = agent?.currentVersion
+          ? this.stateStore.getAgentVersion(agentId, agent.currentVersion)
+          : null;
+        agentProfile = ver?.permissionProfileId || null;
+      } catch { /* Agent 不存在时不做二级收敛 */ }
+    }
     return policy.evaluatePolicy({
-      profile: input.profile,
+      profile: policy.stricterProfile(input.profile, agentProfile),
       tool: input.tool,
       args: input.args,
-      agentId: input.agentId,
+      agentId,
       runId: input.runId,
       context: input.context,
       workspace: typeof input.workspace === 'string' && input.workspace ? input.workspace : this.workspacePath,

@@ -35,6 +35,15 @@
     return node ? node.querySelector(`.approval-actions [data-approve="${kind}"]`) : null;
   };
 
+  /* 档位切换（R15/A1 后语义变了）：权威值在主进程，渲染层只能「请求」。
+     无头（--shot/--script）不允许弹提权确认框，一律按拒绝处理——因此探针不能
+     「在主进程把权威值降到 ask，末尾再升回 full」，否则末尾清理会被降级拦成拒绝。
+     这里只改渲染层的请求值：请求更严 → 主进程收敛后照旧走审批流（正是第 4/5 段要验的），
+     权威值始终是初始的 full → 末尾 run_command 不被降级拦下。 */
+  const requestPerm = (level) => { state.permission = level; renderPerm(); };
+  const auth0 = await window.dsh.permission?.get?.();
+  add('探针前提：主进程档位为 full（无头不能提权）', auth0?.permission === 'full', `authority=${auth0?.permission}`);
+
   /* ── 1. 启动即加载工具定义 / 工作目录 ── */
   await waitUntil(() => state.toolsReady, 5000);
   add('启动后工具定义已加载', state.toolsReady === true, `specs=${state.toolSpecs.length}`);
@@ -54,7 +63,7 @@
   state.connection = { source: 'model', api: { baseUrl: MOCK, key: 'test-key', model: 'mock-tool-model' }, verified: false };
   if (sourceOf() !== 'model') switchSource('model');
   fillFormFromConn();
-  setPermission('full');
+  requestPerm('full');
   newChat();
 
   /* ── 3. 完全权限：模型下发工具 → 执行 → 结果回灌 → 继续输出 ── */
@@ -75,10 +84,11 @@
     (t.tasks || []).map((x) => x.status).join(','));
   const tNode = lastNode();
   const taskItems = tNode ? tNode.querySelectorAll('.tasks-card .task-item') : [];
-  add('任务清单卡片渲染 3 项且无进行中', taskItems.length === 3 && !tNode.querySelector('.task-item.is-in_progress')
-    && tNode.querySelectorAll('.task-item.is-completed').length === 3, `items=${taskItems.length}`);
-  add('任务卡片进度显示 3/3', !!tNode && tNode.querySelector('.tasks-head span').textContent === '3/3',
-    tNode ? tNode.querySelector('.tasks-head span').textContent : '无卡片');
+  add('任务清单卡片渲染 3 项且无进行中', taskItems.length === 3 && !tNode?.querySelector('.task-item.is-in_progress')
+    && tNode?.querySelectorAll('.task-item.is-completed').length === 3, `items=${taskItems.length}`);
+  // 用可选链：卡片没渲染时应当「这条失败」，而不是空指针把后面 60 条断言全部打断
+  add('任务卡片进度显示 3/3', tNode?.querySelector('.tasks-head span')?.textContent === '3/3',
+    tNode ? tNode.querySelector('.tasks-head span')?.textContent ?? '无进度节点' : '无卡片');
 
   /* ── 3.6 工具调用次数不设上限 ── */
   const okM = await runTurnAndWait('[[many]] 连续调用 20 次工具', 60000);
@@ -159,7 +169,7 @@
   }
 
   /* ── 4. 每次询问：弹审批卡 → 允许一次 → 执行 ── */
-  setPermission('ask');
+  requestPerm('ask');
   runTurn('[[write]] 需要审批的写入');
   await waitUntil(() => state.busy === true, 3000);
   const okApproveCard = await waitUntil(() => !!approvalBtn('once'), 10000);
@@ -182,7 +192,7 @@
   add('拒绝结果回灌给模型', String(c.body).includes('用户拒绝'), String(c.body).slice(0, 90));
 
   /* ── 6. 恢复完全权限（后续配置操作不受影响） ── */
-  setPermission('full');
+  requestPerm('full');
 
   /* ── 7. 先把 mock 配置保存为活动连接，API 面板以活动连接为准 ── */
   openConnect();
@@ -334,7 +344,7 @@
   state.workspace = prevWorkspace || '';
   if (prevWsRaw === null) localStorage.removeItem('dsh.workspace'); else localStorage.setItem('dsh.workspace', prevWsRaw);
   if (prevProfilesRaw === null) localStorage.removeItem('dsh.apis'); else localStorage.setItem('dsh.apis', prevProfilesRaw);
-  setPermission(prevPermission);
+  requestPerm(prevPermission);
   loadProfiles();
   loadProfile(state.activeProfileId);
   renderHeader();

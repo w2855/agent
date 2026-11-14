@@ -26,6 +26,7 @@ const persistStoreModule = require('./lib/persist-store');
 const userDataPaths = require('./lib/user-data');
 const { createAutopilot } = require('./lib/autopilot'); // 无人值守任务推进循环（开关经 IPC 控制）
 const { createToolGateway } = require('./lib/tool-gateway'); // 工具治理内核（旧通道 + MCP 旁路统一到同一策略/审批/审计）
+const authority = require('./lib/permission-authority'); // 权限档位裁定（请求 vs 权威值，纯函数）
 const runtimeModule = require('./runtime');
 
 // 测试模式（--script/--shot）禁用硬件加速：本机 GPU 驱动间歇性导致渲染进程启动即崩
@@ -120,6 +121,9 @@ const CONNECT_TIMEOUT_MS = 15000;
 const HARD_TIMEOUT_MS = 180000;   // 单次回合总时长上限（重试共享这一份预算）
 const IDLE_TIMEOUT_MS = 45000;    // 两次 chunk 之间的最长静默
 const MAX_OUTPUT_CHARS = 200000;  // 防止异常网关把内存打满
+/* SSE 行缓冲上限（R15/A8）：MAX_OUTPUT_CHARS 只保护「已解析的正文」，
+   保护不到尚未出现空行分隔的 buf——异常网关持续发送不含 \n\n 的数据会让它无限增长。 */
+const SSE_BUFFER_LIMIT = 4 * 1024 * 1024;
 const MAX_INPUT_CHARS = 200000;
 const MAX_MODELS = 500;
 
@@ -599,10 +603,70 @@ app.on('before-quit', () => {
   // 退出时停掉所有 MCP server（杀整棵进程树，避免遗留子进程）；
   // 注意用 if 而非 getMcpManager()：退出路径不允许懒建出一个新管理器
   if (mcpManager) { try { mcpManager.stopAll(); } catch { /* 尽力停止即可 */ } }
-  // 退出前轮换备份经验库与运行时水位（userData/runtime/{lessons.jsonl,runtime.json} → userData/backups，保留 7 份；尽力而为，失败不影响退出）
-  try { backup.rotateBackup([path.join(app.getPath('userData'), 'runtime', 'lessons.jsonl'), path.join(app.getPath('userData'), 'runtime', 'runtime.json')], path.join(app.getPath('userData'), 'backups'), { keep: 7 }); } catch { /* 备份失败不阻塞退出 */ }
+  /* 退出前轮换备份（R15/A7）：源从「经验库 + 水位」扩到「用户真正在乎的全部状态」——
+     · dsh-storage.json：会话历史 / 设置 / 连接配置（真值源）
+     · state.json：任务 / Run / 审批 / 委派快照
+     · audit/：哈希链审计（整目录）
+     · events/ 最近 3 天分片（事件链是审计真值；更早分片体积大、价值递减）
+     保留 7 份，尽力而为，失败不影响退出。 */
+  try {
+    const userData = app.getPath('userData');
+    const runtimeDir = path.join(userData, 'runtime');
+    const eventsDir = path.join(runtimeDir, 'events');
+    let eventFiles = [];
+    try {
+      eventFiles = fs.readdirSync(eventsDir)
+        .filter((n) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(n))
+        .sort()
+        .slice(-3)
+        .map((n) => path.join(eventsDir, n));
+    } catch { /* 事件目录不存在：只备状态文件 */ }
+    backup.rotateBackup([
+      path.join(userData, 'dsh-storage.json'),
+      path.join(runtimeDir, 'state.json'),
+      path.join(runtimeDir, 'lessons.jsonl'),
+      path.join(runtimeDir, 'runtime.json'),
+      path.join(runtimeDir, 'audit'),
+      ...eventFiles,
+    ], path.join(userData, 'backups'), { keep: 7 });
+  } catch { /* 备份失败不阻塞退出 */ }
   // 托盘先销毁再退出，防止图标残留在任务栏托盘区
   destroyTray();
+});
+
+/* ---------------- 备份浏览（R15/A7） ----------------
+ * 只读 + 打开目录：真正的「恢复」需要先退出应用再覆盖文件，
+ * 这里提供列目录与用系统文件管理器打开，避免在运行中覆盖自身状态。 */
+ipcMain.handle('backup:list', () => {
+  const dir = path.join(app.getPath('userData'), 'backups');
+  try {
+    const items = fs.readdirSync(dir)
+      .filter((name) => backup.STAMP_RE.test(name))
+      .sort()
+      .reverse()
+      .map((name) => ({ name, path: path.join(dir, name) }));
+    return { ok: true, dir, items };
+  } catch {
+    return { ok: true, dir, items: [] };
+  }
+});
+
+ipcMain.handle('backup:open', async (_event, name) => {
+  const root = path.join(app.getPath('userData'), 'backups');
+  const raw = typeof name === 'string' ? name.trim() : '';
+  const target = raw ? path.join(root, raw) : root;
+  // 防穿越：解析后必须仍在 backups 根下，且只接受时间戳形态的目录名
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(target);
+  if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(resolvedRoot + path.sep)) {
+    return { ok: false, code: 'BAD_PATH', error: '备份路径非法' };
+  }
+  if (raw && !backup.STAMP_RE.test(raw)) {
+    return { ok: false, code: 'BAD_PATH', error: '备份目录名非法' };
+  }
+  if (!fs.existsSync(resolvedTarget)) return { ok: false, code: 'NOT_FOUND', error: '备份目录不存在' };
+  const err = await shell.openPath(resolvedTarget);
+  return err ? { ok: false, code: 'OPEN_FAILED', error: err } : { ok: true, path: resolvedTarget };
 });
 
 app.on('window-all-closed', () => {
@@ -645,15 +709,113 @@ ipcMain.on('storage:bootstrap', (event) => {
     event.returnValue = {};
   }
 });
+/* dsh.perm 是权限档位的权威值，只能经 permission:set 写（那条路径带提权确认框）。
+   通用 storage 通道必须挡住它，否则 confirm 形同虚设——这是 R15/A1 的关键一环。 */
+const STORAGE_GUARDED_KEYS = new Set(['dsh.perm']);
+
 ipcMain.handle('storage:set', (_event, payload) => {
+  const key = payload && payload.key;
+  if (STORAGE_GUARDED_KEYS.has(key)) {
+    return { ok: false, error: 'PROTECTED_KEY', message: '该键只能通过专用通道写入' };
+  }
   const r = getStorageStore().set(payload && payload.key, payload && payload.value);
   if (!r.ok) console.log('[storage] set 被拒：', r.error, payload && payload.key);
   return r;
 });
-ipcMain.handle('storage:set-many', (_event, payload) => getStorageStore().setMany(payload));
-ipcMain.handle('storage:remove', (_event, key) => getStorageStore().remove(key));
+ipcMain.handle('storage:set-many', (_event, payload) => {
+  if (!payload || typeof payload !== 'object') return getStorageStore().setMany(payload);
+  const safe = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (STORAGE_GUARDED_KEYS.has(k)) continue;
+    safe[k] = v;
+  }
+  return getStorageStore().setMany(safe);
+});
+ipcMain.handle('storage:remove', (_event, key) => {
+  // 删除受保护键等于把档位回落到默认值（full），必须与 set 一并挡住
+  if (STORAGE_GUARDED_KEYS.has(key)) {
+    return { ok: false, error: 'PROTECTED_KEY', message: '该键只能通过专用通道修改' };
+  }
+  return getStorageStore().remove(key);
+});
 ipcMain.handle('storage:flush', () => getStorageStore().flushSync());
 ipcMain.handle('storage:stats', () => getStorageStore().stats());
+
+/* ---------------- 权限档位权威（R15/A1） ----------------
+ * 档位只能由主进程裁定。渲染层传下来的 permission / profile 一律按「请求」处理：
+ * 与权威值取更严格者，永不放大。理由是 R14 只收回了审批权（approved:true 已失效），
+ * 但档位权仍在渲染层——被注入的渲染层可以传 permission:'full' 让 ask 档静默放行。
+ *
+ * 提升到 full 需要主进程原生确认框：正常切换多一次点击，注入者无法绕过。
+ * 降级（full→ask→readonly）不需要确认，随时可以收紧。
+ */
+/* 裁定逻辑抽到 lib/permission-authority.js（纯函数，可单测）；这里只负责读写权威值。 */
+function readPermissionAuthority() {
+  try {
+    const raw = getStorageStore().get('dsh.perm');
+    return authority.isProfile(raw) ? raw : 'full';
+  } catch { return 'full'; }
+}
+
+/** 请求档位只能比权威值更严格；非法值回落权威值。 */
+function resolvePermission(requested) {
+  return authority.resolvePermission(requested, readPermissionAuthority());
+}
+
+/** runtime 通道（tools:propose / tools:execute）用 profile 字段。 */
+function withAuthorityProfile(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  return { ...src, profile: resolvePermission(src.profile) };
+}
+
+/** 旧通道（tool:exec）用 opts.permission 字段。 */
+function withAuthorityToolPayload(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {};
+  const opts = src.opts && typeof src.opts === 'object' ? src.opts : {};
+  return { ...src, opts: { ...opts, permission: resolvePermission(opts.permission) } };
+}
+
+async function confirmPermissionElevation(from) {
+  // 无头自检不允许弹框：一律按拒绝处理（探针据此断言「提权被挡」）
+  if (process.argv.includes('--shot') || process.argv.includes('--script')) return false;
+  if (!win || win.isDestroyed()) return false;
+  try {
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'warning',
+      title: 'DSH · 提升权限',
+      message: '把权限档位提升到「完全权限」？',
+      detail: `当前档位：${from}。完全权限下，助手可以不经过确认直接写文件、执行命令。仅在信任当前任务时开启。`,
+      buttons: ['提升到完全权限', '取消'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    return response === 0;
+  } catch { return false; }
+}
+
+ipcMain.handle('permission:get', () => ({ ok: true, permission: readPermissionAuthority() }));
+
+ipcMain.handle('permission:set', async (_event, raw) => {
+  const next = String(raw || '');
+  if (!authority.isProfile(next)) return { ok: false, code: 'BAD_ARGS', error: '权限档位非法' };
+  const current = readPermissionAuthority();
+  const elevating = authority.isElevation(current, next);
+  if (elevating && next === 'full') {
+    const allowed = await confirmPermissionElevation(current);
+    if (!allowed) return { ok: false, code: 'DENIED', error: '提权未获确认', permission: current };
+  }
+  const r = getStorageStore().set('dsh.perm', next);
+  if (!r.ok) return { ok: false, code: r.error || 'STORAGE_ERROR', error: '档位保存失败' };
+  try {
+    runtimeSvc?.append?.({
+      type: 'permission.changed',
+      actor: { kind: 'user', id: 'local-user' },
+      payload: { from: current, to: next, elevating, at: new Date().toISOString() },
+    });
+  } catch { /* 审计失败不影响切换 */ }
+  return { ok: true, permission: next, elevated: elevating };
+});
 
 /* ---------------- 系统通知（Windows toast） ----------------
  * 渲染层只在 document.hidden 时发起（前台不打扰），走这里统一展示：
@@ -863,8 +1025,8 @@ ipcMain.handle('runtime:runs:finish-step', (_event, input) => runtimeCall((rt) =
 ipcMain.handle('runtime:runs:model-start', (_event, input) => runtimeCall((rt) => rt.modelStart(input)));
 ipcMain.handle('runtime:runs:model-finish', (_event, input) => runtimeCall((rt) => rt.modelFinish(input)));
 ipcMain.handle('runtime:runs:finish', (_event, input) => runtimeCall((rt) => rt.finishRun(input)));
-ipcMain.handle('runtime:tools:propose', (_event, input) => runtimeCall((rt) => rt.proposeTool(input)));
-ipcMain.handle('runtime:tools:execute', (_event, input) => runtimeCall((rt) => rt.executeTool(input)));
+ipcMain.handle('runtime:tools:propose', (_event, input) => runtimeCall((rt) => rt.proposeTool(withAuthorityProfile(input))));
+ipcMain.handle('runtime:tools:execute', (_event, input) => runtimeCall((rt) => rt.executeTool(withAuthorityProfile(input))));
 ipcMain.handle('runtime:tools:reconcile', (_event, input) => runtimeCall((rt) => rt.reconcileTool(input && typeof input === 'object' ? input : {})));
 ipcMain.handle('runtime:approvals:list', (_event, query) => runtimeCall((rt) => rt.listApprovals(query && typeof query === 'object' ? query : {})));
 ipcMain.handle('runtime:approvals:decide', (_event, input) => runtimeCall((rt) => rt.decideApproval(input && typeof input === 'object' ? input : {})));
@@ -1640,6 +1802,13 @@ ipcMain.on('model:chat', (event, rawPayload) => {
         // 上游可能在首个 token 前连发几十秒 keep-alive，此时不能判成卡死。
         armIdle();
         buf += decoder.decode(chunk, { stream: true });
+        // R15/A8：未分隔缓冲上限。超限说明上游数据不符合 SSE 分帧（或恶意灌流），
+        // 直接按流错误收尾，避免内存被单条「永无空行」的响应撑爆。
+        if (buf.length > SSE_BUFFER_LIMIT) {
+          streamError = new Error(`上游数据块超限（缓冲 ${buf.length} 字符仍未出现事件分隔），已中止`);
+          sawDone = true;
+          return;
+        }
         const sep = /\r?\n\r?\n/;
         let idx;
         while ((idx = buf.search(sep)) >= 0) {
@@ -1850,11 +2019,38 @@ ipcMain.handle('tool:specs', () => {
 
 ipcMain.handle('tool:exec', async (_event, payload) => {
   if (!payload || typeof payload !== 'object') return { ok: false, code: 'BAD_ARGS', error: '工具调用参数为空' };
-  // 单入口：策略 + 审批 + 审计都在主进程完成，渲染层传什么 approved 都不影响判定
-  return getToolGateway().execLocal(payload);
+  // 单入口：策略 + 审批 + 审计都在主进程完成，渲染层传什么 approved 都不影响判定；
+  // 档位同样走权威收敛（withAuthorityToolPayload）：渲染层只能请求更严格的档位。
+  return getToolGateway().execLocal(withAuthorityToolPayload(payload));
 });
 
 ipcMain.handle('workspace:default', () => app.getPath('documents'));
+
+/* 打开工作区技能目录（R15/A2）：专用通道。
+   旧实现是渲染层用 run_command + permission:'full' + approved:true 打开 explorer，
+   等于「用户设只读也会以完全权限跑一条命令」——档位收归主进程后这条路径必须消失。
+   这里只做一件事：把 <workspace>/.dsh/skills 用系统文件管理器打开，不经过工具执行层。 */
+ipcMain.handle('skills:open-dir', async (_event, rawWorkspace) => {
+  const raw = typeof rawWorkspace === 'string' ? rawWorkspace.trim() : '';
+  if (!raw) return { ok: false, code: 'NO_WORKSPACE', error: '暂未设置工作目录' };
+  let base;
+  try {
+    base = fs.realpathSync(raw);
+  } catch {
+    return { ok: false, code: 'WORKSPACE_MISSING', error: '工作目录不存在或不可访问' };
+  }
+  try {
+    if (!fs.statSync(base).isDirectory()) return { ok: false, code: 'NOT_DIR', error: '工作目录不是文件夹' };
+  } catch {
+    return { ok: false, code: 'WORKSPACE_MISSING', error: '工作目录不存在或不可访问' };
+  }
+  // 目录名是常量，不存在路径穿越面；建不出来（权限/只读盘）交给 openPath 返回错误
+  const dir = path.join(base, '.dsh', 'skills');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* 已存在或不可写 */ }
+  if (!fs.existsSync(dir)) return { ok: false, code: 'MKDIR_FAILED', error: '技能目录创建失败（工作区可能只读）' };
+  const err = await shell.openPath(dir);
+  return err ? { ok: false, code: 'OPEN_FAILED', error: err } : { ok: true, path: dir };
+});
 
 ipcMain.handle('workspace:pick', async (_event, currentPath) => {
   try {

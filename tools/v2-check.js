@@ -118,14 +118,23 @@
   add('重试用尽后报错收尾', !!err && !!done3, err ? `${err.code} ${String(err.message).slice(0, 50)}` : '无 error');
   add('用尽后 attempts 等于上限', (done3?.attempts || 0) === 3, `attempts=${done3?.attempts}`);
 
-  /* ── 6. 权限级别 ── */
-  setPermission('readonly');
+  /* ── 6. 权限级别 ──
+     R15/A1：档位权威在主进程，setPermission 变成异步「请求」；
+     且无头模式（--script）下提升到 full 会被主进程拒绝（原生确认框不可用）。
+     这里同时覆盖「降级生效」与「提权被挡」两条语义。 */
+  await setPermission('readonly');
   add('权限可切到只读', state.permission === 'readonly'
     && document.querySelector('#permBtn').dataset.level === 'readonly'
     && document.querySelector('#permName').textContent === '只读',
     document.querySelector('#permName').textContent);
-  setPermission('full');
-  add('权限可切回完全权限', document.querySelector('#permName').textContent === '完全权限', document.querySelector('#permName').textContent);
+  const granted = await window.dsh.permission.get();
+  add('主进程权威档位同步为只读', granted?.permission === 'readonly', String(granted?.permission));
+  const elevate = await window.dsh.permission.set('full');
+  add('无头模式拒绝提权到完全权限', elevate?.ok === false && elevate?.code === 'DENIED', JSON.stringify(elevate));
+  await setPermission('full');
+  add('提权被拒后档位保持不变', state.permission === 'readonly'
+    && document.querySelector('#permName').textContent === '只读',
+    document.querySelector('#permName').textContent);
 
   out.total = out.checks.length;
   out.passed = out.checks.filter((c) => c.pass).length;

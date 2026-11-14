@@ -373,6 +373,33 @@ function projectEvent(event) {
         outcome: 'rejected',
         detail: { targetAgentId: p.targetAgentId, code: p.code, reason: String(p.reason || '').slice(0, 200) },
       };
+    /* R15/A3：委派自动创建后失败的回滚——审计要能回答「那个 Agent 是谁建的、为什么没了」 */
+    case 'delegation.rollback':
+      return {
+        ...base,
+        action: 'delegation.rollback',
+        outcome: p.rolledBack === true ? 'rolled_back' : 'rollback_failed',
+        detail: {
+          agentId: p.agentId,
+          code: p.code,
+          rolledBack: p.rolledBack === true,
+          reason: String(p.reason || '').slice(0, 120),
+        },
+      };
+    case 'agent.deleted':
+      return {
+        ...base,
+        action: 'agent.deleted',
+        outcome: 'deleted',
+        detail: { agentId: p.id, name: p.name, reason: String(p.reason || '').slice(0, 120) },
+      };
+    case 'permission.changed':
+      return {
+        ...base,
+        action: 'permission.changed',
+        outcome: p.elevating === true ? 'elevated' : 'tightened',
+        detail: { from: p.from, to: p.to, elevating: p.elevating === true },
+      };
     case 'project.updated':
       return {
         ...base,

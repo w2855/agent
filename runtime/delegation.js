@@ -205,7 +205,46 @@ class DelegationService {
       }
     } catch { /* 预算层故障：放行，不影响委派主链路 */ }
 
+    /* 配额前置（R15/A3）：只依赖 parentRun，必须在自动创建 Agent 之前判定。
+       否则「单 Run 委派满 5 次」的每一次越界调用都会先建一个 Agent 再被拒，
+       留下 active 的孤儿（设置页垃圾条目 + state.json 膨胀 + 可被再次委派）。 */
+    const attemptedBeforeCreate = this.state.listDelegations({ parentRunId: parentRun.id, limit: 200 }).delegations
+      .filter((d) => d.status !== 'rejected').length;
+    if (attemptedBeforeCreate >= MAX_DELEGATIONS_PER_RUN) {
+      return this._reject(parentRun, targetAgentId, 'DELEGATION_LIMIT', `单个 Run 最多委派 ${MAX_DELEGATIONS_PER_RUN} 次`);
+    }
+
     let autoCreated = null;
+    /* autoCreate 之后的任何失败都要回滚刚建出来的 Agent：
+       删掉而不是归档（archived 仍占列表），有引用时 deleteAgent 会拒绝并退回归档语义。 */
+    const rejectAfterCreate = (code, message, extra = {}) => {
+      const out = this._reject(parentRun, targetAgentId, code, message, extra);
+      if (autoCreated) {
+        let rolledBack = false;
+        let reason = '';
+        try {
+          const rb = this.state.deleteAgent(autoCreated.agent.id, `delegation_rejected:${code}`);
+          rolledBack = rb.ok === true;
+          reason = rb.code || '';
+          if (!rb.ok) {
+            // 有引用（理论上不该发生）→ 退回归档，至少不留在可委派列表里
+            try { this.state.archiveAgent(autoCreated.agent.id); rolledBack = true; reason = rb.code; } catch { /* 已归档 */ }
+          }
+        } catch (err) {
+          reason = err?.message || String(err);
+        }
+        try {
+          this.events.append({
+            type: 'delegation.rollback',
+            taskId: parentTask.id,
+            runId: parentRun.id,
+            payload: { agentId: autoCreated.agent.id, code, rolledBack, reason: String(reason).slice(0, 120) },
+          });
+        } catch { /* 事件失败不影响回滚结果 */ }
+      }
+      return out;
+    };
+
     if (autoCreate) {
       /* 持久预算降级时直接用 fallbackModel：新建子 Agent 的模型本来就由本次委派指定 → 可替换 */
       const requestedModel = budgetFallback || String(args.model || '').trim().slice(0, 128);
@@ -218,24 +257,24 @@ class DelegationService {
     }
 
     const target = this.state.getAgent(targetAgentId);
-    if (!target) return this._reject(parentRun, targetAgentId, 'TARGET_NOT_FOUND', '目标 Agent 不存在');
+    if (!target) return rejectAfterCreate('TARGET_NOT_FOUND', '目标 Agent 不存在');
     if (target.agent.status !== 'active') {
-      return this._reject(parentRun, targetAgentId, 'TARGET_ARCHIVED', '目标 Agent 已归档，不能接收委派');
+      return rejectAfterCreate('TARGET_ARCHIVED', '目标 Agent 已归档，不能接收委派');
     }
     const targetVersion = target.currentVersion;
     if (!targetVersion || targetVersion.version !== target.agent.currentVersion) {
-      return this._reject(parentRun, targetAgentId, 'TARGET_VERSION_MISSING', '目标 Agent 没有可用的当前版本');
+      return rejectAfterCreate('TARGET_VERSION_MISSING', '目标 Agent 没有可用的当前版本');
     }
 
     const ancestors = ancestorAgentIds(this.state, parentTask);
     if (ancestors.has(targetAgentId)) {
-      return this._reject(parentRun, targetAgentId, 'AGENT_LOOP', '目标 Agent 已出现在祖先链中，禁止环状委派');
+      return rejectAfterCreate('AGENT_LOOP', '目标 Agent 已出现在祖先链中，禁止环状委派');
     }
 
     const depth = Number.isInteger(parentTask.delegationDepth) ? parentTask.delegationDepth : 0;
     const childDepth = depth + 1;
     if (childDepth > MAX_DEPTH) {
-      return this._reject(parentRun, targetAgentId, 'DEPTH_EXCEEDED', `委派深度最多 ${MAX_DEPTH} 层`);
+      return rejectAfterCreate('DEPTH_EXCEEDED', `委派深度最多 ${MAX_DEPTH} 层`);
     }
 
     // 续跑候选：优先同任务内匹配；找不到时跨任务按目标+目标内容匹配（重启后父任务通常已中断换新）
@@ -280,50 +319,45 @@ class DelegationService {
 
     // 续跑候选检查完毕：非续跑场景下父 run 必须活跃
     if (parentInactive) {
-      return { ok: false, code: 'RUN_NOT_ACTIVE', message: `父运行已结束：${parentRun.status}` };
+      return rejectAfterCreate('RUN_NOT_ACTIVE', `父运行已结束：${parentRun.status}`);
     }
 
-    // 配额只计入真实尝试（非 rejected/failed-before-start 的记录），被拒的委派不消耗名额
-    const attempted = this.state.listDelegations({ parentRunId: parentRun.id, limit: 200 }).delegations
-      .filter((d) => d.status !== 'rejected').length;
-    if (attempted >= MAX_DELEGATIONS_PER_RUN) {
-      return this._reject(parentRun, targetAgentId, 'DELEGATION_LIMIT', `单个 Run 最多委派 ${MAX_DELEGATIONS_PER_RUN} 次`);
-    }
+    // 配额已在 autoCreate 之前判定（R15/A3），这里不再重复
     const activeChildren = this.state.listDelegations({ limit: 200 }).delegations.filter((d) => (
       d.parentAgentId === parentRun.agentId && (d.status === 'queued' || d.status === 'running')
     )).length;
     if (activeChildren >= MAX_ACTIVE_CHILDREN_PER_AGENT) {
-      return this._reject(parentRun, targetAgentId, 'DELEGATION_BUSY', `同一 Agent 同时最多 ${MAX_ACTIVE_CHILDREN_PER_AGENT} 个子任务`);
+      return rejectAfterCreate('DELEGATION_BUSY', `同一 Agent 同时最多 ${MAX_ACTIVE_CHILDREN_PER_AGENT} 个子任务`);
     }
 
     let declared;
     try { declared = normalizeBudgetInput(args.budget); }
-    catch (err) { return this._reject(parentRun, targetAgentId, 'BUDGET_INVALID', err.message); }
+    catch (err) { return rejectAfterCreate('BUDGET_INVALID', err.message); }
     const budgetResult = computeChildBudget(parentRun, declared, this.now(), this.state);
-    if (!budgetResult.ok) return this._reject(parentRun, targetAgentId, budgetResult.code, budgetResult.message);
+    if (!budgetResult.ok) return rejectAfterCreate(budgetResult.code, budgetResult.message);
 
     const queue = this.state.queueStats();
     if (queue.activeRuns >= queue.maxConcurrentRuns) {
-      return this._reject(parentRun, targetAgentId, 'DELEGATION_CAPACITY', '当前并发已满，暂时无法启动子任务');
+      return rejectAfterCreate('DELEGATION_CAPACITY', '当前并发已满，暂时无法启动子任务');
     }
 
     let refs = [];
     if (args.contextRefs != null) {
-      if (!Array.isArray(args.contextRefs)) return this._reject(parentRun, targetAgentId, 'CONTEXT_REFS_INVALID', 'contextRefs 必须是数组');
-      if (args.contextRefs.length > 10) return this._reject(parentRun, targetAgentId, 'CONTEXT_REFS_TOO_MANY', 'contextRefs 最多 10 个');
+      if (!Array.isArray(args.contextRefs)) return rejectAfterCreate('CONTEXT_REFS_INVALID', 'contextRefs 必须是数组');
+      if (args.contextRefs.length > 10) return rejectAfterCreate('CONTEXT_REFS_TOO_MANY', 'contextRefs 最多 10 个');
       for (const raw of args.contextRefs) {
         const value = String(raw || '').trim();
         if (!value) continue;
         let abs;
         try { abs = policy.resolvePath(value, workspace); }
-        catch (err) { return this._reject(parentRun, targetAgentId, 'CONTEXT_REF_INVALID', err.message); }
+        catch (err) { return rejectAfterCreate('CONTEXT_REF_INVALID', err.message); }
         if (!policy.isWithinWorkspace(workspace, abs)) {
-          return this._reject(parentRun, targetAgentId, 'CONTEXT_REF_OUTSIDE', `共享文件必须位于工作区内：${value}`);
+          return rejectAfterCreate('CONTEXT_REF_OUTSIDE', `共享文件必须位于工作区内：${value}`);
         }
         let stat;
         try { stat = fs.statSync(abs); } catch { stat = null; }
         if (!stat || !stat.isFile()) {
-          return this._reject(parentRun, targetAgentId, 'CONTEXT_REF_MISSING', `共享文件不存在或不是普通文件：${value}`);
+          return rejectAfterCreate('CONTEXT_REF_MISSING', `共享文件不存在或不是普通文件：${value}`);
         }
         refs.push({ path: abs, display: path.relative(workspace, abs).split(path.sep).join('/'), size: stat.size });
       }
@@ -339,7 +373,7 @@ class DelegationService {
       ...(Array.isArray(targetVersion.toolPolicy?.deny) ? targetVersion.toolPolicy.deny : []),
     ]);
     const toolAllow = all.filter((name) => parentAllow.includes(name) && targetAllow.includes(name) && !deny.has(name));
-    if (!toolAllow.length) return this._reject(parentRun, targetAgentId, 'TOOL_SCOPE_EMPTY', '父子权限交集为空，无法委派');
+    if (!toolAllow.length) return rejectAfterCreate('TOOL_SCOPE_EMPTY', '父子权限交集为空，无法委派');
 
     const parentProfile = ['full', 'ask', 'readonly'].includes(parentRun.effectiveProfile) ? parentRun.effectiveProfile : 'ask';
     const effectiveProfile = policy.stricterProfile(parentProfile, targetVersion.permissionProfileId);
@@ -374,13 +408,13 @@ class DelegationService {
         idempotencyKey: `delegation:${parentRun.id}:${policy.sha256(`${targetAgentId}\n${objective}`).slice(0, 24)}:${Math.floor(this.now() / DEDUPE_WINDOW_MS)}`,
       });
     } catch (err) {
-      return this._reject(parentRun, targetAgentId, 'CHILD_TASK_FAILED', err.message);
+      return rejectAfterCreate('CHILD_TASK_FAILED', err.message);
     }
     if (created.deduped || !created.run) {
       if (!created.deduped) {
         try { this.state.cancelTask({ taskId: created.task.id, reason: 'delegation_capacity' }); } catch { /* 刚创建 */ }
       }
-      return this._reject(parentRun, targetAgentId, 'DELEGATION_CAPACITY', created.deduped ? '重复的子任务请求' : '子任务未能获得运行槽位');
+      return rejectAfterCreate('DELEGATION_CAPACITY', created.deduped ? '重复的子任务请求' : '子任务未能获得运行槽位');
     }
 
     const record = this.state.createDelegationRecord({

@@ -1,3 +1,5 @@
+/* 由 tools/tool-e2e.js 生成（勿手改）：唯一差异是每条断言额外写一个 beacon 文件，
+   便于脚本中途崩掉时也能看出跑到哪一条。重新生成：见 docs/e2e-guide.md。 */
 (async () => { console.log('[trace] e2e script started');
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const out = { checks: [] };
@@ -35,6 +37,15 @@
     return node ? node.querySelector(`.approval-actions [data-approve="${kind}"]`) : null;
   };
 
+  /* 档位切换（R15/A1 后语义变了）：权威值在主进程，渲染层只能「请求」。
+     无头（--shot/--script）不允许弹提权确认框，一律按拒绝处理——因此探针不能
+     「在主进程把权威值降到 ask，末尾再升回 full」，否则末尾清理会被降级拦成拒绝。
+     这里只改渲染层的请求值：请求更严 → 主进程收敛后照旧走审批流（正是第 4/5 段要验的），
+     权威值始终是初始的 full → 末尾 run_command 不被降级拦下。 */
+  const requestPerm = (level) => { state.permission = level; renderPerm(); };
+  const auth0 = await window.dsh.permission?.get?.();
+  add('探针前提：主进程档位为 full（无头不能提权）', auth0?.permission === 'full', `authority=${auth0?.permission}`);
+
   /* ── 1. 启动即加载工具定义 / 工作目录 ── */
   await waitUntil(() => state.toolsReady, 5000);
   add('启动后工具定义已加载', state.toolsReady === true, `specs=${state.toolSpecs.length}`);
@@ -54,7 +65,7 @@
   state.connection = { source: 'model', api: { baseUrl: MOCK, key: 'test-key', model: 'mock-tool-model' }, verified: false };
   if (sourceOf() !== 'model') switchSource('model');
   fillFormFromConn();
-  setPermission('full');
+  requestPerm('full');
   newChat();
 
   /* ── 3. 完全权限：模型下发工具 → 执行 → 结果回灌 → 继续输出 ── */
@@ -75,10 +86,11 @@
     (t.tasks || []).map((x) => x.status).join(','));
   const tNode = lastNode();
   const taskItems = tNode ? tNode.querySelectorAll('.tasks-card .task-item') : [];
-  add('任务清单卡片渲染 3 项且无进行中', taskItems.length === 3 && !tNode.querySelector('.task-item.is-in_progress')
-    && tNode.querySelectorAll('.task-item.is-completed').length === 3, `items=${taskItems.length}`);
-  add('任务卡片进度显示 3/3', !!tNode && tNode.querySelector('.tasks-head span').textContent === '3/3',
-    tNode ? tNode.querySelector('.tasks-head span').textContent : '无卡片');
+  add('任务清单卡片渲染 3 项且无进行中', taskItems.length === 3 && !tNode?.querySelector('.task-item.is-in_progress')
+    && tNode?.querySelectorAll('.task-item.is-completed').length === 3, `items=${taskItems.length}`);
+  // 用可选链：卡片没渲染时应当「这条失败」，而不是空指针把后面 60 条断言全部打断
+  add('任务卡片进度显示 3/3', tNode?.querySelector('.tasks-head span')?.textContent === '3/3',
+    tNode ? tNode.querySelector('.tasks-head span')?.textContent ?? '无进度节点' : '无卡片');
 
   /* ── 3.6 工具调用次数不设上限 ── */
   const okM = await runTurnAndWait('[[many]] 连续调用 20 次工具', 60000);
@@ -104,7 +116,8 @@
   const vMsg = lastAssistant();
   const labelOk = await waitUntil(() => lastAssistant()?.summary?.label === '校验失败', 6000);
   add('收尾校验失败后回合标记「校验失败」', okV && vMsg?.summary?.label === '校验失败', `label=${vMsg?.summary?.label}`);
-  add('校验失败后展示失败明细', labelOk && !!lastNode()?.querySelector('.prose')?.textContent.includes('后置校验未通过'), lastNode()?.querySelector('.prose')?.textContent?.slice(-80));
+  const segText = [...(lastNode()?.querySelectorAll('.prose') || [])].map((el) => el.textContent).join('');
+  add('校验失败后展示失败明细', labelOk && segText.includes('后置校验未通过'), segText.slice(-80));
   const vTask = vMsg?.runtime?.taskId ? await window.dsh.runtime.tasks.get(vMsg.runtime.taskId) : null;
   add('Runtime Task/Run 同步标记 failed', vTask?.ok && vTask.data.task.status === 'failed' && vTask.data.runs[0]?.status === 'failed', JSON.stringify({ task: vTask?.data?.task?.status, run: vTask?.data?.runs?.[0]?.status }));
 
@@ -158,7 +171,7 @@
   }
 
   /* ── 4. 每次询问：弹审批卡 → 允许一次 → 执行 ── */
-  setPermission('ask');
+  requestPerm('ask');
   runTurn('[[write]] 需要审批的写入');
   await waitUntil(() => state.busy === true, 3000);
   const okApproveCard = await waitUntil(() => !!approvalBtn('once'), 10000);
@@ -181,7 +194,7 @@
   add('拒绝结果回灌给模型', String(c.body).includes('用户拒绝'), String(c.body).slice(0, 90));
 
   /* ── 6. 恢复完全权限（后续配置操作不受影响） ── */
-  setPermission('full');
+  requestPerm('full');
 
   /* ── 7. 先把 mock 配置保存为活动连接，API 面板以活动连接为准 ── */
   openConnect();
@@ -195,7 +208,7 @@
   await sleep(200);
 
   openConnect();
-  await waitUntil(() => !document.querySelector('#connectSheet').hidden, 2000);
+  await waitUntil(() => !document.querySelector('#settingsPage').hidden && document.querySelector('#paneConnect') && !document.querySelector('#paneConnect').hidden, 2000);
   add('API 面板回填已保存配置', document.querySelector('#apiBaseUrl').value === MOCK, document.querySelector('#apiBaseUrl').value);
   add('API 面板工具区已加载', !document.querySelector('#toolsFine').textContent.includes('加载中'), document.querySelector('#toolsFine').textContent.slice(0, 60));
 
@@ -208,7 +221,10 @@
   document.querySelector('#modelApply').click();
   await sleep(150);
   add('API 面板选模型只改表单不落库', state.connection.api.model === 'mock-tool-model', `saved=${state.connection.api.model}`);
-  add('选完模型返回 API 面板而非全部关闭', document.querySelector('#connectSheet').hidden === false && document.querySelector('#modelSheet').hidden === true, 'ok');
+  // 设置页重构后：API 面板 = 设置页的 paneConnect；选完模型回到该 pane 且模型列表关闭。
+  // 关闭走 is-closing 动画，hidden 要到动画结束才置位 → 用 waitUntil 等待而非立即断言
+  const backToConnect = await waitUntil(() => !document.querySelector('#paneConnect').hidden && document.querySelector('#modelSheet').hidden === true, 2000);
+  add('选完模型返回 API 面板而非全部关闭', backToConnect, 'ok');
   add('表单模型行同步显示所选模型', document.querySelector('#apiModelName').textContent === 'mock-alt-model', document.querySelector('#apiModelName').textContent);
 
   state.formModel = 'mock-tool-model';
@@ -242,12 +258,13 @@
     && savedProfiles.active === state.activeProfileId, `count=${(savedProfiles.profiles || []).length}`);
   add('localStorage 连接记录不含明文 Key', (savedProfiles.profiles || []).every((p) => !p.key), JSON.stringify((savedProfiles.profiles || []).map((p) => ({ name: p.name, hasKey: !!p.key }))));
   let vault = null;
+  // 密钥主进程化后凭据库返回掩码视图（明文永不外泄）：hasKey=true 且返回值不含明文即证明已入库
   for (let i = 0; i < 30; i++) {
     vault = await window.dsh.secrets.getProfiles();
-    if (vault?.ok && vault.data?.profiles?.some((p) => p.key === 'test-key-2')) break;
+    if (vault?.ok && vault.data?.profiles?.some((p) => p.hasKey === true && p.key !== 'test-key-2')) break;
     await sleep(100);
   }
-  add('Key 已进入 safeStorage 凭据库', vault?.ok && vault.data.profiles.some((p) => p.key === 'test-key-2'), vault?.ok ? `profiles=${vault.data?.profiles?.length}` : vault?.error?.message);
+  add('Key 已进入 safeStorage 凭据库(掩码视图)', vault?.ok && vault.data.profiles.some((p) => p.hasKey === true && p.key !== 'test-key-2' && String(p.key).startsWith('sk-****')), vault?.ok ? `profiles=${vault.data?.profiles?.length}` : vault?.error?.message);
   document.querySelector('#profileRow .profile').click();
   await sleep(120);
   add('切换连接会加载对应配置', document.querySelector('#apiKey').value === 'test-key', `key=${document.querySelector('#apiKey').value}`);
@@ -293,11 +310,13 @@
   const eventCountBefore = runEventsBefore.data.events.length;
   document.querySelector('#inspPlay').click();
   await waitUntil(() => Number.isInteger(inspector.replayCursor), 2000);
-  await sleep(900);
+  await sleep(400);
   const cursorMid = inspector.replayCursor;
   add('回放能按事件推进', Number.isInteger(cursorMid) && cursorMid > 0 && cursorMid < seqBeforeReplay, `cursor=${cursorMid}/${seqBeforeReplay}`);
+  // 回放推进速度受机器负载影响，固定时点断言会偶发踩线 → 等待「部分图」窗口出现
+  const partialGraph = await waitUntil(() => document.querySelectorAll('#inspBody .insp-node').length > 0 && document.querySelectorAll('#inspBody .insp-node').length < fullNodeCount, 3000);
   const replayNodes = document.querySelectorAll('#inspBody .insp-node').length;
-  add('回放中图按截断事件重绘', replayNodes > 0 && replayNodes < fullNodeCount, `${replayNodes}/${fullNodeCount}`);
+  add('回放中图按截断事件重绘', partialGraph, `${replayNodes}/${fullNodeCount}`);
   const runEventsDuring = await window.dsh.runtime.events.read({ runId: expectedRun, limit: 5000 });
   add('回放不产生新事件', runEventsDuring.data.events.length === eventCountBefore && (runEventsDuring.data.events.at(-1)?.seq || 0) === seqBeforeReplay, `events=${runEventsDuring.data.events.length}`);
   document.querySelector('#inspLive').click();
@@ -313,7 +332,8 @@
   const auditVerify = await window.dsh.runtime.audit.verify();
   add('Runtime 审计哈希链校验通过', auditVerify.ok && auditVerify.data.ok === true, JSON.stringify(auditVerify.data?.issues || []));
   document.querySelector('#inspClose').click();
-  add('运行检查器可关闭', document.querySelector('#inspector').hidden === true, 'closed');
+  const inspClosed = await waitUntil(() => document.querySelector('#inspector').hidden === true, 3000); // 检查器关闭带 220ms 出场动画
+  add('运行检查器可关闭', inspClosed, 'closed');
 
   /* ── 9. 清理测试目录并恢复原配置 ── */
   const clean = await window.dsh.tools.exec('run_command',
@@ -326,7 +346,7 @@
   state.workspace = prevWorkspace || '';
   if (prevWsRaw === null) localStorage.removeItem('dsh.workspace'); else localStorage.setItem('dsh.workspace', prevWsRaw);
   if (prevProfilesRaw === null) localStorage.removeItem('dsh.apis'); else localStorage.setItem('dsh.apis', prevProfilesRaw);
-  setPermission(prevPermission);
+  requestPerm(prevPermission);
   loadProfiles();
   loadProfile(state.activeProfileId);
   renderHeader();

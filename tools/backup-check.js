@@ -63,9 +63,12 @@ function stampOf(ms) {
   fs.mkdirSync(dirAsSrc, { recursive: true });
   const r3 = backup.rotateBackup([missingPath, dirAsSrc, lessonsPath], backupDir, { keep: 7, stamp: stampMs + 3000 });
   add('缺失源跳过并注明原因', r3.skipped.some((s) => s.src === missingPath && /源不存在/.test(s.reason)), JSON.stringify(r3.skipped));
-  add('目录当源跳过（复制失败），不中断其他源', r3.skipped.some((s) => s.src === dirAsSrc && s.reason)
-    && r3.backedUp.some((b) => b.src === lessonsPath), 'skip + continue');
-  add('同一次调用中损坏源不影响其余源入账', r3.backedUp.length === 3 /* 主文件 + -wal/-shm 侧车 */ && r3.backedUp.every((b) => b.src !== missingPath && b.src !== dirAsSrc), JSON.stringify(r3.backedUp.map((b) => path.basename(b.src))));
+  /* R15/A7：目录源不再跳过，改为整目录递归复制（audit/ 这类快照需要） */
+  add('目录源整目录复制', r3.backedUp.some((b) => b.src === dirAsSrc)
+    && fs.existsSync(path.join(backupDir, stampOf(stampMs + 3000), 'a-directory')),
+    JSON.stringify(r3.backedUp.map((b) => path.basename(b.src))));
+  add('同一次调用中缺失源不影响其余源入账', r3.backedUp.length === 4 /* 目录 + 主文件 + -wal/-shm 侧车 */
+    && r3.backedUp.every((b) => b.src !== missingPath), JSON.stringify(r3.backedUp.map((b) => path.basename(b.src))));
 
   /* 4. 同时间戳去重：目录已存在 → 全部跳过（幂等） */
   const r4 = backup.rotateBackup([lessonsPath, runtimeJsonPath], backupDir, { keep: 7, stamp: stampMs });
@@ -123,11 +126,16 @@ function stampOf(ms) {
   /* 10. main.js before-quit 接线冒烟：一行 try/catch 触发轮换备份 */
   const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const quitIdx = mainSrc.indexOf("app.on('before-quit'");
-  const wiring = quitIdx >= 0 ? mainSrc.slice(quitIdx, quitIdx + 1200) : '';
+  const wiring = quitIdx >= 0 ? mainSrc.slice(quitIdx, quitIdx + 3600) : '';
   add('before-quit 里调用 rotateBackup', /rotateBackup\(/.test(wiring), 'wiring present');
-  add('接线源路径含 lessons.jsonl 与 runtime.json', /lessons\.jsonl/.test(wiring) && /runtime\.json/.test(wiring), 'sources');
+  /* R15/A7：源扩到「用户真正在乎的状态」——会话存储、任务状态、审计链、事件分片 */
+  add('接线源含会话存储与任务状态', /dsh-storage\.json/.test(wiring) && /state\.json/.test(wiring), 'sources');
+  add('接线源含审计目录与事件分片', /'audit'/.test(wiring) && /events/.test(wiring), 'audit + events');
+  add('接线源仍含经验库与运行时水位', /lessons\.jsonl/.test(wiring) && /runtime\.json/.test(wiring), 'legacy sources');
   add('接线目标为 userData/backups 且 keep=7', /['"]backups['"]/.test(wiring) && /keep:\s*7/.test(wiring), 'dest + keep');
-  add('接线被 try/catch 包裹（备份失败不阻塞退出）', /try\s*\{\s*backup\.rotateBackup/.test(wiring) && /备份失败不阻塞退出/.test(wiring), 'try/catch');
+  add('接线被 try/catch 包裹（备份失败不阻塞退出）',
+    /try\s*\{[\s\S]{0,700}rotateBackup[\s\S]{0,400}catch/.test(wiring) && /备份失败不阻塞退出/.test(wiring), 'try/catch');
+  add('提供备份浏览通道（list + open）', /backup:list/.test(mainSrc) && /backup:open/.test(mainSrc), 'ipc');
 
   /* 清理 */
   fs.rmSync(tmp, { recursive: true, force: true });

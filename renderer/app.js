@@ -130,15 +130,20 @@ function writeStorageQuiet(key, value) {
   try { return FILE_STORE.set(key, value); } catch { return false; }
 }
 
-/* 会话上下文窗口（字符）：从 localStorage dsh.ctxLimit 读取，用户可在设置页「对话 → 上下文」卡片修改。
-   默认 700000，范围 50000–2000000；非法值（非数字 / 越界）一律回退默认值。 */
-const CTX_LIMIT_DEFAULT = 700000;
+/* 会话上下文窗口（字符）：从 dsh.ctxLimit 读取，用户可在设置页「对话 → 上下文」卡片修改。
+   R15/A5 修正：单位是「字符」，以前默认 700000 是按 token 的直觉定的——
+   中文 1 字 ≈ 1 token，700000 字符实际约 46 万 token，是主流 200k 窗口的 2.3 倍，
+   结果是历史裁剪与自动压缩几乎永不触发，长会话直接撞上游 400。
+   新默认 120000 字符（≈12 万 token）对 128k 窗口安全，对 200k 窗口留足输出余量。
+   范围 50000–400000；旧值超过新上限时视作历史默认值，回落新默认而不是硬 clamp。 */
+const CTX_LIMIT_DEFAULT = 120000;
 const CTX_LIMIT_MIN = 50000;
-const CTX_LIMIT_MAX = 2000000;
+const CTX_LIMIT_MAX = 400000;
 function readCtxLimit() {
   const raw = readStorage('dsh.ctxLimit', '');
   const n = Number(raw);
   if (!raw || !Number.isFinite(n) || n <= 0) return CTX_LIMIT_DEFAULT;
+  if (n > CTX_LIMIT_MAX) return CTX_LIMIT_DEFAULT;
   return clamp(Math.round(n), CTX_LIMIT_MIN, CTX_LIMIT_MAX);
 }
 
@@ -557,12 +562,32 @@ function renderPerm() {
   if (ro) ro.textContent = PERM_LABELS[state.permission];
 }
 
-function setPermission(level) {
-  if (!PERM_LABELS[level]) return;
-  state.permission = level;
-  writeStorage('dsh.perm', level);
+/* 档位切换（R15/A1）：权威值在主进程，这里只发「请求」。
+   提升到 full 会由主进程弹原生确认框（防渲染层被注入后自升权限）；
+   返回 permission 是裁定后的实际档位，失败时回滚本地状态并提示。 */
+async function setPermission(level) {
+  if (!PERM_LABELS[level] || state.permission === level) return;
+  const prev = state.permission;
+  const api = window.dsh?.permission;
+  if (api?.set) {
+    let r = null;
+    try { r = await api.set(level); } catch (err) { r = { ok: false, error: err?.message || String(err) }; }
+    if (!r?.ok) {
+      state.permission = prev;
+      renderPerm();
+      const msg = r?.code === 'DENIED' ? '提权已取消，保持原档位'
+        : r?.code === 'BAD_ARGS' ? '权限档位非法'
+          : (r?.error || '权限切换失败');
+      toast(msg);
+      return;
+    }
+    state.permission = PERM_LABELS[r.permission] ? r.permission : level;
+  } else {
+    // 无桌面外壳（浏览器预览）：只改内存，不写持久化——避免与主进程权威值冲突
+    state.permission = level;
+  }
   renderPerm();
-  toast(`权限级别：${PERM_LABELS[level]}`);
+  toast(`权限级别：${PERM_LABELS[state.permission]}`);
 }
 
 /* ───────── 顶栏 / 侧栏投影 ───────── */
@@ -1968,6 +1993,16 @@ async function runTurn(rawText, target = null) {
   return runPreviewTurn(text, ctx);
 }
 
+/* token 估算（R15/A10）：优先用 preload 透传的同一实现（lib/token-estimate.js，中文 1 字≈1 token）。
+   无桌面外壳（浏览器预览）时退化为「字符/2」的粗略估计——宁可高估，避免预算判断过于乐观。
+   以前这里是 length/4，中文场景低估 4-6 倍。 */
+function estimateMessagesTokens(messages) {
+  const api = window.dsh?.util?.estimateMessagesTokens;
+  if (api) { try { return api(messages); } catch { /* 回落到本地近似 */ } }
+  return (Array.isArray(messages) ? messages : [])
+    .reduce((n, m) => n + Math.ceil(String(m?.content || '').length / 2), 0);
+}
+
 /* ───────── 真实 API 回合 ───────── */
 
 const RISKY_TOOLS = new Set(['write_file', 'run_command']);
@@ -2708,7 +2743,22 @@ function runApiTurn(ctx, opts) {
   const forModel = (text) => {
     const room = TOOL_CONTEXT_BUDGET - toolContextUsed;
     if (room <= 0) return '（本轮工具结果总量已达上限，未再展开；请基于已有结果继续或直接结束。）';
-    const out = text.length > room ? text.slice(0, room) + '\n…（超出本轮工具上下文预算，已截断）' : text;
+    if (text.length <= room) {
+      toolContextUsed += text.length;
+      return text;
+    }
+    /* 超预算时借有界读取规划器给一条可操作的提示（R15/A9）：
+       以前 lib/context-plan.js 只有自检在调，生产路径自己拍脑袋截断；
+       现在截断口径与规划器一致，并告诉模型「该结果需要分块读」，而不是只丢一句已截断。
+       规划器按字节设计，这里传字符数——同量级，用于「是否需要拆」的判断足够。 */
+    let hint = '';
+    try {
+      const plan = window.dsh?.util?.planContextRead?.({
+        totalBytes: text.length, totalFiles: 1, intent: 'review', depth: 0,
+      });
+      if (plan?.needsSplit) hint = `；该结果约需 ${plan.chunks.length || 2} 块读取，建议用 read_file 的 offset/limit 分次取`;
+    } catch { /* 规划失败只丢提示，不影响截断 */ }
+    const out = text.slice(0, room) + `\n…（超出本轮工具上下文预算，已截断${hint}）`;
     toolContextUsed += out.length;
     return out;
   };
@@ -3274,7 +3324,7 @@ function runApiTurn(ctx, opts) {
               providerId: opts.cfg?.baseUrl || '',
               model: opts.cfg?.model || '',
               messageCount: messages.length,
-              approxInputTokens: Math.round(messages.reduce((n, m) => n + String(m.content || '').length, 0) / 4),
+              approxInputTokens: estimateMessagesTokens(messages),
               meta: messages.map((m) => ({ role: m.role, chars: String(m.content || '').length })),
             });
             modelCallId = mc?.ok ? mc.data.modelCallId : null;
@@ -3854,6 +3904,36 @@ function handleLoadSession(idArg) {
   })();
 }
 
+/* 压缩参数（R15/A4）：
+   · 单条保留 400 字符——120 字连「做了什么 + 结论」都放不下，模型压缩后会重复劳动；
+   · 摘要池上限 24000 字符，超出时保留头尾、掐掉中段，避免「压缩产物本身撑爆上下文」；
+   · 多次压缩用追加语义，早期摘要不被后续压缩覆盖。 */
+const COMPACT_LINE_CHARS = 400;
+const COMPACT_MAX_CHARS = 24000;
+
+/** 从消息里抽取不能丢的锚点：工具名与关键目标（文件路径 / 命令 / URL）。 */
+function compactAnchors(m) {
+  const tools = Array.isArray(m.tools) ? m.tools : [];
+  if (!tools.length) return '';
+  const names = [...new Set(tools.map((t) => t && t.name).filter(Boolean))].slice(0, 4);
+  const targets = [...new Set(
+    tools.map((t) => t && t.target).filter((x) => typeof x === 'string' && x && x !== '（无参数）'),
+  )].slice(0, 3);
+  const parts = [];
+  if (names.length) parts.push(`工具 ${names.join('/')}`);
+  if (targets.length) parts.push(`涉及 ${targets.join('、')}`);
+  return parts.length ? `（${parts.join(' · ')}）` : '';
+}
+
+/** 摘要池总量钳制：保留最早 30% 与最近一段，中间省略——最早的内容是任务起点，最近的是当前进度。 */
+function clampCompacted(text) {
+  if (text.length <= COMPACT_MAX_CHARS) return text;
+  const head = Math.floor(COMPACT_MAX_CHARS * 0.3);
+  const tail = COMPACT_MAX_CHARS - head - 48;
+  const omitted = text.length - head - tail;
+  return `${text.slice(0, head)}\n…（中间 ${omitted} 字符已省略）…\n${text.slice(-tail)}`;
+}
+
 /** 压缩核心：把会话未压缩的历史折叠成摘要，写入 compacted 池并把消息列表重置为一条占位消息。
     返回 { count }；没有可压缩内容时返回 null。手动 /compact 与自动压缩共用此核心，UI 反馈由调用方负责。 */
 function performCompact(s) {
@@ -3861,16 +3941,25 @@ function performCompact(s) {
   if (usable.length < 2) return null;
 
   const lines = usable.map((m) => {
-    const content = m.role === 'user' ? m.text : (m.body || '');
-    const flat = String(content).replace(/\s+/g, ' ').slice(0, 120);
-    return `- ${m.role === 'user' ? '用户' : '助手'}：${flat}`;
-  });
-  state.compacted.set(s.id, lines.join('\n'));
+    const content = m.role === 'user' ? (m.text || '') : (m.body || '');
+    const flat = String(content).replace(/\s+/g, ' ').trim();
+    const cut = flat.length > COMPACT_LINE_CHARS ? `${flat.slice(0, COMPACT_LINE_CHARS)}…` : flat;
+    return `- ${m.role === 'user' ? '用户' : '助手'}：${cut || '（空）'}${compactAnchors(m)}`;
+  }).join('\n');
+
+  /* R15/A4：追加而不是覆盖。以前 `set` 会把上一次压缩的摘要整段替换，
+     第二次压缩后早期上下文永久丢失（长任务里表现为「忘了最初约束、从头再来」）。 */
+  const prev = state.compacted.get(s.id);
+  const merged = prev ? `${prev}\n\n--- 后续对话 ---\n${lines}` : lines;
+  const summary = clampCompacted(merged);
+  state.compacted.set(s.id, summary);
+
+  const shown = summary.length > 2000 ? `${summary.slice(0, 2000)}\n…（完整摘要已注入后续请求，界面只显示前 2000 字符）` : summary;
   s.messages = [{
     role: 'assistant',
     summary: { label: '上下文已压缩', tools: 0, messages: 0 },
     tools: [], files: [], approval: null, metrics: '', compacted: true,
-    body: `已将 ${usable.length} 条历史消息压缩为摘要，后续请求会带上这段上下文。\n\n${lines.join('\n')}`,
+    body: `已将 ${usable.length} 条历史消息压缩为摘要（累计 ${summary.length} 字符），后续请求会带上这段上下文。\n\n${shown}`,
     startedAt: Date.now(), finishedAt: Date.now(),
   }];
   return { count: usable.length };
@@ -3893,12 +3982,14 @@ function autoCompactSetting() {
   return readStorage('dsh.autocompact', 'on') !== 'off';
 }
 
-/** 发送前自动压缩：历史字符量超过上下文预算 90% 时，先折叠为摘要再发本轮请求
-    （ruflo 思路：在上下文撞顶前拦截压缩，长会话不越聊越贵）。与手动 /compact 共用 performCompact。 */
+/** 发送前自动压缩：历史字符量超过上下文预算 75% 时，先折叠为摘要再发本轮请求
+    （ruflo 思路：在上下文撞顶前拦截压缩，长会话不越聊越贵）。与手动 /compact 共用 performCompact。
+    R15/A5：阈值从 90% 降到 75%——90% 时预算已所剩无几，压缩后的摘要 + 本轮输入仍可能顶到上限；
+    75% 留出四分之一余量给摘要注入与输出。 */
 function maybeAutoCompact(session) {
   if (!autoCompactSetting()) return false;
   const used = sessionContextChars(session);
-  if (used <= LIMITS.maxContextChars * 0.9) return false;
+  if (used <= LIMITS.maxContextChars * 0.75) return false;
   const pct = Math.round((used / LIMITS.maxContextChars) * 100);
   if (!performCompact(session)) return false;
   /* 时间线插入一条系统提示；compacted 标记保证它不进 API 请求、也不会被下一轮再次压缩 */
@@ -4987,16 +5078,14 @@ function useSkill(id) {
   toast(`已填入技能「${s.name}」，确认后发送`);
 }
 
-/** 打开工作区技能目录：走 run_command（explorer），失败只 toast 不打断。 */
+/** 打开工作区技能目录（R15/A2）：走专用 IPC，不再借 run_command + 硬编码 full 档位。
+    路径校验与目录创建都在主进程完成，这里只负责提示。 */
 async function openSkillsDir() {
   if (!state.workspace) { toast('先在「工具与权限」里设置工作目录'); return; }
-  const dir = `${state.workspace.replace(/[\\/]+$/, '')}\\.dsh\\skills`;
+  const api = window.dsh?.skills?.openDir;
+  if (!api) { toast('当前环境不支持打开目录'); return; }
   try {
-    const r = await window.dsh.tools.exec('run_command', { command: `explorer "${dir}"` }, {
-      workspace: state.workspace,
-      permission: 'full',
-      approved: true,
-    });
+    const r = await api(state.workspace);
     if (r && r.ok === false) toast(`打开目录失败：${r.error || '未知错误'}`);
   } catch (err) {
     toast(`打开目录失败：${err?.message || err}`);
@@ -7283,6 +7372,30 @@ function bind() {
 
   /* 体检 pane：手动强制重跑 */
   $('#doctorRerun').addEventListener('click', () => runDoctorChecks(true));
+
+  /* 备份浏览（R15/A7）：显示最近一份的时间，按钮用系统文件管理器打开备份根目录。
+     不做「运行中恢复」——覆盖自身状态文件必须完全退出应用，这里只负责让人找得到。 */
+  $('#backupOpen')?.addEventListener('click', async () => {
+    const api = window.dsh?.backup;
+    if (!api?.open) { toast('当前环境不支持打开备份目录'); return; }
+    const r = await api.open('');
+    if (r && r.ok === false) toast(`打开失败：${r.error || r.code || '未知错误'}`);
+  });
+  (async () => {
+    const el = $('#backupFine');
+    const api = window.dsh?.backup;
+    if (!el || !api?.list) return;
+    try {
+      const r = await api.list();
+      const items = Array.isArray(r?.items) ? r.items : [];
+      if (items.length) {
+        const stamp = String(items[0].name).replace(/T/, ' ').replace(/Z$/, '').replace(/-(\d{2})-(\d{2})$/, ':$1:$2');
+        el.textContent = `最近备份 ${stamp} · 共 ${items.length} 份（保留 7 份）`;
+      } else {
+        el.textContent = '暂无备份；应用正常退出时会自动创建';
+      }
+    } catch { /* 备份列表不可用时保留默认文案 */ }
+  })();
   $('#accentRow').addEventListener('click', (e) => {
     const b = e.target.closest('.accent');
     if (b) applyAccent(b.dataset.accent);
