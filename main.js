@@ -11,6 +11,8 @@ const retry = require('./lib/retry');
 const secretMask = require('./lib/secret-mask');
 const notifyDedupe = require('./lib/notify-dedupe');
 const guard = require('./lib/instance-guard');
+const redact = require('./lib/redact');   // PII 脱敏管线（通知外显 / 会话导出 / 崩溃日志三个出口接入）
+const lessons = require('./lib/lessons'); // Doctor 经验库检查（lessons:summary / lessons:tail）
 const localTools = require('./lib/tools');
 const mcpModule = require('./lib/mcp');
 const skillsModule = require('./lib/skills');
@@ -177,10 +179,23 @@ function appendCrashLog(entry) {
     let raw = '';
     try { raw = fs.readFileSync(crashLogPath(), 'utf8'); } catch { /* 首次写入前文件不存在 */ }
     fs.mkdirSync(path.dirname(crashLogPath()), { recursive: true });
-    fs.writeFileSync(crashLogPath(), guard.appendJsonlEntry(raw, entry), 'utf8');
+    // PII 脱敏（profile='standard'，理由：crash-log.jsonl 是落盘诊断数据——日志完整性优先，
+    // 走 REDACT 全替换而非 strict 的 BLOCK 档，绝不因命中敏感信息而丢日志）；
+    // message/stack 属异常文本，最可能夹带密钥/邮箱，写 jsonl 前先替换。
+    fs.writeFileSync(crashLogPath(), guard.appendJsonlEntry(raw, redactCrashEntry(entry)), 'utf8');
   } catch (err) {
     console.log('[crash-log] 写入失败：', err?.message || err);
   }
+}
+
+/** 崩溃日志条目脱敏：entry.message/stack 过 redactText(…, 'standard') 后返回新对象（不改原值）。 */
+function redactCrashEntry(entry) {
+  if (!entry || typeof entry !== 'object') return entry;
+  const out = { ...entry };
+  for (const field of ['message', 'stack']) {
+    if (typeof out[field] === 'string') out[field] = redact.redactText(out[field], 'standard');
+  }
+  return out;
 }
 
 /** 概要统计（guard:state 诊断通道用）：文件是否存在、行数、最后一条记录的 type。 */
@@ -425,10 +440,22 @@ function showOsNotification(payload) {
   if (!Notification.isSupported()) return { ok: false, code: 'UNSUPPORTED', message: '当前系统不支持通知' };
   const title = String(payload?.title || '').trim().slice(0, 80) || 'DSH';
   const body = String(payload?.body || '').slice(0, 200);
+  /* PII 脱敏（profile='strict'，理由：系统通知是「外显」出口，任何路过屏幕的人都可能瞥到，
+     凭据类（api_key/jwt/私钥）零容忍）：命中 BLOCK → 整条不发系统通知，只留主进程日志；
+     个人信息类（email/手机号/身份证/cred_kv）→ REDACT 替换后照发。 */
+  const titleRed = redact.pipeline(title, { profile: 'strict' });
+  const bodyRed = redact.pipeline(body, { profile: 'strict' });
+  if (titleRed.blocked || bodyRed.blocked) {
+    const types = [...new Set([...(titleRed.error?.types || []), ...(bodyRed.error?.types || [])])];
+    console.log('[notify] 命中 strict BLOCK，通知整体拦截不外显（类型: ' + types.join(', ') + '）');
+    return { ok: false, blocked: true, code: 'REDACT_BLOCKED', types };
+  }
+  const safeTitle = titleRed.text || 'DSH';
+  const safeBody = bodyRed.text;
   const tag = typeof payload?.tag === 'string' && payload.tag.trim() ? payload.tag.trim() : '';
   // 去重键 = tag：没有 tag 就每次都发；命中窗口期直接吞掉本次
   if (tag && !osNotifyDedupe.shouldSend(tag)) return { ok: true, deduped: true };
-  const notification = new Notification({ title, body, silent: false });
+  const notification = new Notification({ title: safeTitle, body: safeBody, silent: false });
   liveNotifications.add(notification);
   const release = () => liveNotifications.delete(notification);
   notification.on('click', () => {
@@ -1674,6 +1701,46 @@ ipcMain.handle('skills:read', async (_event, payload) => {
   }
 });
 
+/* ---------------- Doctor 经验库检查（G4 妥协项修复） ----------------
+ * 经验库落盘位置与 runtime/state.js 的 _ensureLessons 一致：userData/runtime/lessons.jsonl。
+ * 路径推导复用 runtime/delegation.js budgetPath 的「与运行时 state.json 同目录」方式——
+ * 以 userData/runtime 为基准拼接（before-quit 的备份轮换也用同一物理路径），不再各处硬编码。
+ * 只读通道：summary 给统计概要（stats）、tail 给最近 5 条（含未验证/污染记录，Doctor 看全貌）；
+ * 文件不存在 / 零条目 → { ok:false, reason:'empty' }；任何异常转 { ok:false, reason:'error' }，
+ * 绝不让 Doctor 面板因经验库故障而抛错。 */
+
+/** 经验库 store（每次调用现建，避免缓存与外部写入不一致；createLessonStore 内部容错不抛错）。 */
+function lessonsStore() {
+  return lessons.createLessonStore(path.join(app.getPath('userData'), 'runtime', 'lessons.jsonl'));
+}
+
+ipcMain.handle('lessons:summary', () => {
+  try {
+    const store = lessonsStore();
+    const probe = store.readAll();
+    // 经验库尚不存在（或为空文件）→ empty：Doctor 面板据此显示「暂无经验」而非报错
+    if (probe.missing || (probe.entries.length === 0 && probe.corrupted === 0)) {
+      return { ok: false, reason: 'empty' };
+    }
+    return { ok: true, ...lessons.stats(store) };
+  } catch (err) {
+    return { ok: false, reason: 'error', error: String(err?.message || err) };
+  }
+});
+
+ipcMain.handle('lessons:tail', () => {
+  try {
+    const store = lessonsStore();
+    const probe = store.readAll();
+    if (probe.missing) return { ok: false, reason: 'empty' };
+    // queryLessons 已按 ts 降序；includeUnverified/includeTainted 打开——最近记录不做可信过滤
+    const q = lessons.queryLessons(store, { limit: 5, includeUnverified: true, includeTainted: true });
+    return { ok: true, entries: q.entries };
+  } catch (err) {
+    return { ok: false, reason: 'error', error: String(err?.message || err) };
+  }
+});
+
 /* ---------------- 会话导出 ----------------
  * 序列化（Markdown / JSON）在 preload 侧 lib/session-export.js 完成，
  * 这里只负责保存对话框与落盘；无头探针不弹框、不阻塞。
@@ -1692,19 +1759,44 @@ function sanitizeExportName(raw, format) {
 ipcMain.handle('export:session', async (_event, payload) => {
   if (!payload || typeof payload !== 'object') return { ok: false, error: '导出参数为空' };
   const format = payload.format === 'json' ? 'json' : 'md';
-  const content = typeof payload.content === 'string' ? payload.content : '';
-  if (!content.trim()) return { ok: false, error: '导出内容为空' };
+  /* PII 脱敏（profile='standard'，理由：导出是用户主动行为——不能因内容含密钥就 BLOCK 拒绝
+     用户导出自己的会话）：REDACT 全替换后照常落盘，并回报命中数 redacted 供渲染层
+     toast「已自动脱敏 N 处」。文本走 pipeline；结构化对象先走 redactValue 递归脱敏
+     字符串字段（standard 全替换，无 BLOCK 档）再序列化。 */
+  let outText = '';
+  let redactedCount = 0;
+  if (typeof payload.content === 'string') {
+    const r = redact.pipeline(payload.content, { profile: 'standard' });
+    outText = r.text;
+    redactedCount = r.findings.length;
+  } else if (payload.content && typeof payload.content === 'object') {
+    // 计数：redactValue 不回报命中数，改在「原值序列化文本」上用同一套正则扫描一次
+    //（两处命中天然一致）；脱敏结果再兜底过一遍 pipeline，正常余量为 0。
+    redactedCount = redact.scanForPII(JSON.stringify(payload.content)).length;
+    const cleaned = redact.redactValue(payload.content, 'standard');
+    outText = redact.pipeline(JSON.stringify(cleaned), { profile: 'standard' }).text;
+  }
+  if (!outText.trim()) return { ok: false, error: '导出内容为空' };
+  // 程序化导出（探针/e2e 断言用）：显式绝对路径 targetPath 时跳过保存对话框直接落盘
+  const targetPath = typeof payload.targetPath === 'string' && path.isAbsolute(payload.targetPath)
+    ? payload.targetPath : null;
   try {
-    const choice = await dialog.showSaveDialog(win || undefined, {
-      title: '导出会话',
-      defaultPath: sanitizeExportName(payload.defaultName, format),
-      filters: format === 'json'
-        ? [{ name: 'JSON', extensions: ['json'] }]
-        : [{ name: 'Markdown', extensions: ['md'] }],
-    });
-    if (choice.canceled || !choice.filePath) return { ok: false, canceled: true };
-    await fs.promises.writeFile(choice.filePath, content, 'utf8');
-    return { ok: true, path: choice.filePath };
+    let filePath;
+    if (targetPath) {
+      filePath = targetPath;
+    } else {
+      const choice = await dialog.showSaveDialog(win || undefined, {
+        title: '导出会话',
+        defaultPath: sanitizeExportName(payload.defaultName, format),
+        filters: format === 'json'
+          ? [{ name: 'JSON', extensions: ['json'] }]
+          : [{ name: 'Markdown', extensions: ['md'] }],
+      });
+      if (choice.canceled || !choice.filePath) return { ok: false, canceled: true };
+      filePath = choice.filePath;
+    }
+    await fs.promises.writeFile(filePath, outText, 'utf8');
+    return { ok: true, path: filePath, redacted: redactedCount };
   } catch (err) {
     return { ok: false, error: `导出失败：${err?.message || String(err)}` };
   }
@@ -1779,4 +1871,12 @@ ipcMain.handle('wallpaper:clear', () => {
   return { ok: true };
 });
 
-module.exports = { DEFAULT_MODEL };
+/* node 自检钩子（tools/x1-check.js 在 mock electron 下 require 本文件用）：
+   Electron 运行时 module.exports 无人消费，无副作用；自检脚本借此直接驱动真实函数。 */
+module.exports = {
+  DEFAULT_MODEL,
+  showOsNotification,
+  redactCrashEntry,
+  appendCrashLog,
+  lessonsStore,
+};

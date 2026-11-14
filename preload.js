@@ -155,4 +155,10 @@ contextBridge.exposeInMainWorld('dsh', {
     scan: (workspace) => ipcRenderer.invoke('skills:scan', { workspace }),
     read: (filePath, workspace) => ipcRenderer.invoke('skills:read', { path: filePath, workspace }),
   },
+  /* Doctor 经验库检查（G4 妥协项修复）：统计概要 + 最近 5 条，只读；
+     数据源 userData/runtime/lessons.jsonl，空库返回 { ok:false, reason:'empty' } */
+  lessons: {
+    summary: () => ipcRenderer.invoke('lessons:summary'),
+    tail: () => ipcRenderer.invoke('lessons:tail'),
+  },
 });
