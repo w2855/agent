@@ -5,6 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const retry = require('./lib/retry');
+const secretMask = require('./lib/secret-mask');
 const localTools = require('./lib/tools');
 const mcpModule = require('./lib/mcp');
 const skillsModule = require('./lib/skills');
@@ -63,6 +64,10 @@ const activeChats = new Map();
 const mcpManager = mcpModule.createMcpManager();
 /** MCP server 配置的内存态；持久化由渲染层 localStorage 负责，经 IPC 同步下来 */
 let mcpConfigs = [];
+
+/** 主进程持有的真实 API Key（profileId → 明文）。
+    任何发回渲染层的路径都只允许掩码：get 转掩码视图，chat/test/list 用这张表还原 key。 */
+let profileKeyById = new Map();
 
 /* MCP 工具与内置工具合流：executeTool 按 mcp_ 前缀路由到管理器。
    审批与 policy 不做任何特殊放行——MCP 工具一律按 run_command 同档
@@ -303,7 +308,9 @@ ipcMain.handle('secrets:profiles:get', async () => {
     const { result } = await safeStorage.decryptStringAsync(encrypted);
     const data = JSON.parse(result);
     if (!data || !Array.isArray(data.profiles)) return { ok: true, data: null };
-    return { ok: true, data };
+    // 明文只留在主进程内存；发往渲染层前统一转掩码视图，任何路径都不回传明文 key
+    profileKeyById = secretMask.buildProfileKeyMap(data.profiles);
+    return { ok: true, data: secretMask.maskProfilesData(data) };
   } catch (err) {
     if (err?.code === 'ENOENT') return { ok: true, data: null };
     console.log('[vault] 读取失败：', err?.message || err);
@@ -316,7 +323,14 @@ ipcMain.handle('secrets:profiles:set', async (_event, payload) => {
     return { ok: false, error: { code: 'UNSUPPORTED', message: '系统凭据加密不可用' } };
   }
   try {
-    const json = JSON.stringify(payload && typeof payload === 'object' ? payload : {});
+    const incoming = payload && typeof payload === 'object' ? payload : {};
+    if (Array.isArray(incoming.profiles)) {
+      // 迁移期渲染层可能把 get 返回的掩码值原样传回：先用内存里的真实 key 还原，
+      // 避免掩码覆盖凭据库里的明文；然后据此刷新主进程持有的真实 key 表。
+      incoming.profiles = secretMask.restoreMaskedProfileKeys(incoming.profiles, profileKeyById);
+      profileKeyById = secretMask.buildProfileKeyMap(incoming.profiles);
+    }
+    const json = JSON.stringify(incoming);
     if (json.length > 1024 * 1024) return { ok: false, error: { code: 'TOO_LARGE', message: '凭据数据过大' } };
     fs.mkdirSync(path.dirname(vaultPath()), { recursive: true });
     const enc = await safeStorage.encryptStringAsync(json);
@@ -365,6 +379,17 @@ function validateCfg(cfg) {
   const modelErr = validateModel(cfg.model);
   if (modelErr) return modelErr;
   return null;
+}
+
+/**
+ * 把渲染层传入的 cfg 解析成「可直接使用」的版本：
+ * profileId 命中主进程内存表就用真实 key 覆盖；掩码值反查不到时抛错，
+ * 因为掩码一定不是真 key，发上游只会得到 401。
+ */
+function resolveCfgKey(cfg) {
+  const resolved = secretMask.resolveProfileKey(cfg, profileKeyById);
+  if (!resolved.ok) throw new Error(resolved.message);
+  return { ...(cfg && typeof cfg === 'object' ? cfg : {}), key: resolved.key };
 }
 
 function apiHeaders(cfg) {
@@ -569,7 +594,11 @@ async function fetchModels(base, cfg, opts = {}) {
 
 /* ---------------- 模型列表 / 探活 ---------------- */
 
-ipcMain.handle('model:list', async (_event, cfg) => {
+ipcMain.handle('model:list', async (_event, rawCfg) => {
+  let cfg;
+  try { cfg = resolveCfgKey(rawCfg); } catch (err) {
+    return { ok: false, code: 'BAD_CONFIG', error: err?.message || String(err) };
+  }
   const invalid = validateCfg(cfg);
   if (invalid) return { ok: false, code: 'BAD_CONFIG', error: invalid };
   let base;
@@ -577,7 +606,11 @@ ipcMain.handle('model:list', async (_event, cfg) => {
   return fetchModels(base, cfg);
 });
 
-ipcMain.handle('model:test', async (_event, cfg) => {
+ipcMain.handle('model:test', async (_event, rawCfg) => {
+  let cfg;
+  try { cfg = resolveCfgKey(rawCfg); } catch (err) {
+    return { ok: false, code: 'BAD_CONFIG', error: err?.message || String(err) };
+  }
   const invalid = validateCfg(cfg);
   if (invalid) return { ok: false, code: 'BAD_CONFIG', error: invalid };
 
@@ -779,12 +812,30 @@ class ChatError extends Error {
 }
 
 /** 流式对话：id 路由 + 可中断 + 自动重试 + 双重超时 + 输出上限 + 完整错误分类 */
-ipcMain.on('model:chat', (event, payload) => {
+ipcMain.on('model:chat', (event, rawPayload) => {
+  // 先按 profileId 解析真实 key：后续校验、脱敏、上游请求都用解析后的 cfg。
+  // 解析失败（掩码反查不到）保持原 payload，让下面的错误路径给出明确提示。
+  let payload = rawPayload;
+  let resolveError = null;
+  if (rawPayload && typeof rawPayload === 'object' && rawPayload.cfg && typeof rawPayload.cfg === 'object') {
+    try {
+      payload = { ...rawPayload, cfg: resolveCfgKey(rawPayload.cfg) };
+    } catch (err) {
+      resolveError = err;
+    }
+  }
+
   const send = (type, extra = {}) => {
     const safe = { ...extra };
     if (typeof safe.message === 'string') safe.message = scrubSecret(safe.message, payload?.cfg?.key);
     if (!event.sender.isDestroyed()) event.sender.send('model:event', { id: payload?.id, type, ...safe });
   };
+
+  if (resolveError) {
+    send('error', { code: 'BAD_CONFIG', message: resolveError.message });
+    send('done', { aborted: true, code: 'BAD_CONFIG' });
+    return;
+  }
 
   const bad = validateChatArgs(payload);
   if (bad) {
