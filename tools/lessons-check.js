@@ -3,7 +3,9 @@
 /* 验证经验库（lib/lessons.js）自检：追加 / 查询过滤 / 幂等去重 / 损坏行跳过 /
    环形上限 / runtime 收尾接线冒烟（钩子异常不影响主链路）/
    验证门（ruflo verified-guards）：污点判定 detectTaint / 验证命令门 detectVerification /
-   置信门 confidenceFor 三态 / stats-query 默认排除未验证与污染记录。
+   置信门 confidenceFor 三态 / stats-query 默认排除未验证与污染记录 /
+   Hybrid 检索组合（lib/retrieval.js hybridSearch）：searchLessons 中文命中与
+   MMR 去重 / relatedLessonsForTask 双路关联 / 空库与故障注入绝不抛错。
    运行：node tools/lessons-check.js */
 
 const fs = require('node:fs');
@@ -304,6 +306,84 @@ function tempDir(tag) {
   const taintStats = lessons.stats(taintStore);
   add('confidence：污染的成功不参与可信度 → insufficient', taintStats.confidence.agent_y === 'insufficient', JSON.stringify(taintStats.confidence));
   add('stats：tainted 计数且默认从 byOutcome 排除', taintStats.tainted === 1 && taintStats.byOutcome.success === 0 && taintStats.byOutcome.failed === 2, JSON.stringify(taintStats.byOutcome));
+
+  /* 16. Hybrid 检索组合：searchLessons（queryLessons × hybridSearch）与 relatedLessonsForTask */
+  const hybStore = lessons.createLessonStore(path.join(tmp, 'hybrid.jsonl'));
+  lessons.recordLesson(hybStore, { taskId: 'task_h1', kind: 'lesson', summary: '数据库连接池大小应按并发量配置，超时后自动重连', tags: ['db'], ts: 1 });
+  lessons.recordLesson(hybStore, { taskId: 'task_h2', kind: 'lesson', summary: '前端渲染卡顿应检查重排与虚拟列表', tags: ['ui'], ts: 2 });
+  lessons.recordLesson(hybStore, { taskId: 'task_h3', kind: 'outcome', outcome: 'success', summary: '网关端口 8787 被占用：先查占用进程再重启网关服务', tags: ['gw'], verified: true, ts: 3 });
+  lessons.recordLesson(hybStore, { taskId: 'task_h4', kind: 'outcome', outcome: 'failed', summary: '数据库连接池超时未配置重连导致失败', tags: ['db'], verified: false, ts: 4 });
+  const dupText = '部署脚本执行失败：环境变量未注入，重新部署后恢复正常';
+  lessons.recordLesson(hybStore, { taskId: 'task_h5', kind: 'lesson', summary: dupText, ts: 5 });
+  lessons.recordLesson(hybStore, { taskId: 'task_h6', kind: 'lesson', summary: dupText, ts: 6 });
+  lessons.recordLesson(hybStore, { taskId: 'task_h7', kind: 'lesson', summary: '部署预览与主题切换整理', ts: 7 });
+
+  const zh = lessons.searchLessons(hybStore, '数据库连接池');
+  add('searchLessons：中文查询命中相关 lesson（bigram + 精确加分，首条即最高分）',
+    zh.hits.length > 0 && zh.hits[0].entry.taskId === 'task_h1' && zh.hits[0].score > 0,
+    JSON.stringify(zh.hits.map((h) => [h.entry.taskId, h.score])));
+  add('searchLessons：未验证 outcome 被默认门槛排除（task_h4 不参与检索）',
+    zh.hits.every((h) => h.entry.taskId !== 'task_h4'), 'verified gate');
+  add('searchLessons：返回结构 {entry,score} 且 score ∈ [0,1]',
+    zh.hits.every((h) => h.entry && typeof h.entry.taskId === 'string' && typeof h.score === 'number' && h.score >= 0 && h.score <= 1), 'shape');
+  add('searchLessons：total 为过滤后候选总数（6 条可信，未验证不计）', zh.total === 6, `total=${zh.total}`);
+  add('searchLessons：topK 截断', lessons.searchLessons(hybStore, '部署', { topK: 2 }).hits.length === 2, 'topK 2');
+  add('searchLessons：空查询安全返回空 hits（total 仍为候选数）', (() => {
+    const r = lessons.searchLessons(hybStore, '   ');
+    return r.hits.length === 0 && r.total === 6;
+  })(), 'blank query');
+
+  // MMR 去重：task_h5 / task_h6 summary 完全相同（不同 taskId 各记一条），只应留高分一条；
+  // query 拆成「部署脚本失败」+「网关端口被占用」两半，让 h3（网关侧）与重复对（部署侧）竞争。
+  const mmr = lessons.searchLessons(hybStore, '部署脚本失败 网关端口被占用', { topK: 2 });
+  const dupIds = mmr.hits.filter((h) => h.entry.taskId === 'task_h5' || h.entry.taskId === 'task_h6');
+  add('searchLessons：MMR 去重（完全相同 summary 只留高分一条，多样条目补位）',
+    mmr.hits.length === 2 && dupIds.length === 1 && mmr.hits.some((h) => h.entry.taskId === 'task_h3'),
+    JSON.stringify(mmr.hits.map((h) => [h.entry.taskId, h.score])));
+
+  // relatedLessonsForTask：结构关联（精确 / 前缀 / tag）+ 关键词双路合并去重
+  const relStore = lessons.createLessonStore(path.join(tmp, 'related.jsonl'));
+  lessons.recordLesson(relStore, { taskId: 'task_rel_1', kind: 'lesson', summary: '经验库要支持混合检索与任务关联', tags: ['lessons', 'retrieval'], ts: 10 });
+  lessons.recordLesson(relStore, { taskId: 'task_rel_1', kind: 'outcome', outcome: 'success', summary: '混合检索实现完成并通过自检', tags: ['retrieval'], verified: true, ts: 11 });
+  lessons.recordLesson(relStore, { taskId: 'task_rel_1_sub', kind: 'lesson', summary: '子任务拆分时前缀命名便于关联查询', tags: ['task_rel_1'], ts: 12 });
+  lessons.recordLesson(relStore, { taskId: 'task_other', kind: 'lesson', summary: '前端渲染卡顿应检查重排与虚拟列表', tags: ['ui'], ts: 13 });
+  lessons.recordLesson(relStore, { taskId: 'task_rel_2', kind: 'lesson', summary: '经验库要支持混合检索与任务关联的补充说明', tags: ['misc'], ts: 14 });
+  lessons.recordLesson(relStore, { taskId: 'task_tagonly', kind: 'lesson', summary: '渲染管线与着色器编译注意事项', tags: ['task_rel_1'], ts: 15 });
+
+  const rel = lessons.relatedLessonsForTask(relStore, 'task_rel_1');
+  const relIds = rel.hits.map((h) => h.entry.taskId);
+  add('related：精确 taskId 命中（同 taskId 的 lesson + outcome 两条都在）', relIds.includes('task_rel_1'), JSON.stringify(relIds));
+  add('related：taskId 前缀命中子任务（task_rel_1_sub）', relIds.includes('task_rel_1_sub'), JSON.stringify(relIds));
+  add('related：tag 命中（summary 与关键词无关但 tags 带 taskId）', relIds.includes('task_tagonly'), JSON.stringify(relIds));
+  add('related：关键词路命中（summary 与该任务记录相似的其他任务）', relIds.includes('task_rel_2'), JSON.stringify(relIds));
+  add('related：无关任务不入榜（task_other 与关键词零交集）', !relIds.includes('task_other'), JSON.stringify(relIds));
+  add('related：按 (taskId,kind) 去重且 total 为去重后条数',
+    new Set(rel.hits.map((h) => `${h.entry.taskId}\u0001${h.entry.kind}`)).size === rel.hits.length
+    && rel.hits.length === rel.total && rel.total === 5, `total=${rel.total} hits=${rel.hits.length}`);
+  add('related：按 score 降序且都在 [0,1]',
+    rel.hits.every((h, i) => i === 0 || rel.hits[i - 1].score >= h.score)
+    && rel.hits.every((h) => h.score >= 0 && h.score <= 1), JSON.stringify(rel.hits.map((h) => h.score)));
+  add('related：精确 taskId 的结构分（1）高于纯关键词语义分（<1）', (() => {
+    const exact = rel.hits.find((h) => h.entry.taskId === 'task_rel_1');
+    const kwOnly = rel.hits.find((h) => h.entry.taskId === 'task_rel_2');
+    return !!exact && !!kwOnly && exact.score === 1 && kwOnly.score < 1;
+  })(), 'exact > keyword');
+
+  /* 17. 空库 / 非法输入 / 故障注入：一律 {hits:[], total:0}，绝不抛错 */
+  const emptyStore = lessons.createLessonStore(path.join(tmp, 'empty.jsonl'));
+  const emptySearch = lessons.searchLessons(emptyStore, '任意查询');
+  const emptyRel = lessons.relatedLessonsForTask(emptyStore, 'task_x');
+  add('searchLessons：空库安全', emptySearch.hits.length === 0 && emptySearch.total === 0, JSON.stringify(emptySearch));
+  add('relatedLessonsForTask：空库安全', emptyRel.hits.length === 0 && emptyRel.total === 0, JSON.stringify(emptyRel));
+  const badStore = { path: 'Z:\\bad.jsonl', readAll() { throw new Error('boom'); }, appendLine() { throw new Error('boom'); } };
+  add('检索故障注入不抛错（坏 store / null store / 非字符串查询 / 空 taskId / null taskId）',
+    (() => { const r = lessons.searchLessons(badStore, '查询'); return r.hits.length === 0 && r.total === 0; })()
+    && (() => { const r = lessons.searchLessons(null, '查询'); return r.hits.length === 0 && r.total === 0; })()
+    && (() => { const r = lessons.searchLessons(hybStore, 42); return r.hits.length === 0 && r.total === 0; })()
+    && lessons.relatedLessonsForTask(relStore, '').total === 0
+    && lessons.relatedLessonsForTask(relStore, null).total === 0
+    && (() => { const r = lessons.relatedLessonsForTask(badStore, 'task_rel_1'); return r.hits.length === 0 && r.total === 0; })(),
+    'fail-safe');
 
   /* 清理临时目录 */
   rt.close();
