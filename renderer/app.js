@@ -1086,6 +1086,34 @@ function renderTasks(node, msg) {
   if (slot) slot.innerHTML = taskCard(msg.tasks);
 }
 
+/* ───────── 工具叙述行（UI 层保底） ─────────
+   系统提示已硬性要求模型「调用工具前先说一句话」，但模型不总遵守——这里在工具列表
+   上方数据驱动地补一行「🛠 正在 <动词> <目标>…」：只要有 pending/running 的工具就显示，
+   全部落定后淡出移除。切会话重建节点时按消息状态投影，不会残留历史叙述。 */
+function renderNarrate(node, msg) {
+  const slot = $('.slot-narrate', node);
+  if (!slot) return;
+  const tools = msg.tools || [];
+  // 取最近一个未落定的工具（一轮并行多个时播报最新发起的一个）
+  const running = [...tools].reverse().find((t) => t.status === 'running' || t.status === 'pending');
+  const cur = $('.tool-narrate:not(.is-leaving)', slot);
+  if (running) {
+    const sig = [running.id || '', running.verb || '', running.target || ''].join('\u0001');
+    if (cur && cur.dataset.sig === sig) return; // 同一工具同一目标：零 DOM 写入
+    if (cur) cur.remove();
+    const line = document.createElement('div');
+    line.className = 'tool-narrate';
+    line.dataset.sig = sig;
+    line.innerHTML = `🛠 正在 ${esc(running.verb || running.name || '执行')} ${esc(running.target || '')}…`;
+    slot.appendChild(line);
+    return;
+  }
+  if (cur) {
+    cur.classList.add('is-leaving'); // 300ms 淡出后移除（--ease-exit）； detached 节点同样成立（后台会话投影）
+    setTimeout(() => cur.remove(), 300);
+  }
+}
+
 /* 工具行增量更新：按 data-tool-id 定位，内容签名没变的行不碰 DOM。
    旧实现每次全量 innerHTML 重建，扫光/展开态/悬停态全部重来一次，就是用户看到的闪烁 */
 function toolSignature(t) {
@@ -1094,6 +1122,7 @@ function toolSignature(t) {
 }
 
 function renderTools(node, msg) {
+  renderNarrate(node, msg); // 叙述行随工具状态联动（入列/执行中显示，落定淡出）
   const box = $('.tools', node);
   if (!box) return;
   const tools = msg.tools || [];
@@ -1208,6 +1237,7 @@ function assistantNode(msg) {
       ${ico('i-chevron', 'ico tiny chev')}
     </button>
     <div class="slot-tasks"></div>
+    <div class="slot-narrate"></div>
     <div class="${toolsCls}"></div>
     <div class="slot-retry"></div>
     <div class="slot-approval">${approvalCard(msg.approval)}</div>
@@ -1514,8 +1544,9 @@ function buildApiMessages(session, currentText, draft, skipUser) {
       + '你可以使用系统提供的工具读写本地文件、搜索、执行命令或访问网页；需要时直接调用工具，'
       + '工具结果由系统返回。任务清单（todo_write）由你自行判断是否使用：任务复杂、步骤较多时可以建立清单并更新进度。'
       + '不要虚构工具调用、工具结果或文件产出。'
-      + '调用工具前先用一句话（不超过 20 字）说明你接下来要做什么，让用户知道进展；连续同类工具调用不必反复说明；'
-      + '关键工具结束后用一句话报告结果或下一步。',
+      + '【硬性要求】每次调用工具前，必须先用一句不超过 15 字的话告诉用户你要做什么'
+      + '（例如：先看一下目录结构。），然后再发起工具调用；工具结束后用一句话报告结果。'
+      + '不要跳过这句话直接发起工具调用。',
   }, {
     role: 'system',
     content: PERM_PROMPT[state.permission],
@@ -2759,7 +2790,14 @@ function runApiTurn(ctx, opts) {
         if (answer === 'always') state.autoApproved.add(key);
       }
 
-      if (ctl.stopRequested) return null;
+      if (ctl.stopRequested) {
+        tool.status = 'error';
+        tool.meta = '已中断';
+        tool.result = '本轮已被用户中断，该工具未执行。';
+        renderTools(node, draft);
+        finishToolStep(stepId, 'canceled');
+        return null;
+      }
       tool.status = 'running';
       tool.meta = '执行中';
       renderTools(node, draft);
@@ -2885,7 +2923,14 @@ function runApiTurn(ctx, opts) {
       }
     }
 
-    if (decision === 'abort') return null;
+    if (decision === 'abort') {
+      // 中断也要落到终态：不标记的话工具行永远停在「准备中」，用户以为工具没显示
+      tool.status = 'error';
+      tool.meta = '已中断';
+      tool.result = '本轮已被用户中断，该工具未执行。';
+      renderTools(node, draft);
+      return null;
+    }
     if (decision === 'readonly' || decision === 'deny') {
       tool.status = 'denied';
       tool.meta = decision === 'readonly' ? '只读模式拒绝' : '用户拒绝';
@@ -2895,7 +2940,14 @@ function runApiTurn(ctx, opts) {
       renderTools(node, draft);
       return `${tool.result} 不要重复同样的调用，直接向用户说明。`;
     }
-    if (ctl.stopRequested) return null;
+    if (ctl.stopRequested) {
+      // 中断落到终态：工具行不能永远停在「准备中」（Y1 工具显示排查发现）
+      tool.status = 'error';
+      tool.meta = '已中断';
+      tool.result = '本轮已被用户中断，该工具未执行。';
+      renderTools(node, draft);
+      return null;
+    }
 
     tool.status = 'running';
     tool.meta = '执行中';
@@ -3772,6 +3824,7 @@ const todoAddRowHtml = () => `<div class="todo-add"><input class="todo-add-input
 function renderTodoPanel() {
   const panel = $('#todoPanel');
   if (!panel) return;
+  updateTodoBadge(); // 徽标随任务数据联动（面板展开时隐藏、收起时显示 n/m）
   const s = active();
   const tasks = Array.isArray(s?.todoTasks) ? s.todoTasks : [];
   const body = $('#todoPanelBody');
@@ -3793,11 +3846,26 @@ function renderTodoPanel() {
   if (body) body.innerHTML = tasks.map((t, i) => todoRowHtml(t, i)).join('') + todoAddRowHtml();
 }
 
-function toggleTodoPanel() {
+/* 常驻展开（Y1）：面板默认打开、随时可见；手动收起记 localStorage dsh.todoPinned，
+   下次启动按记住的状态决定是否自动展开 */
+function todoPinned() { return readStorage('dsh.todoPinned', '1') !== '0'; }
+function setTodoPinned(open) { writeStorage('dsh.todoPinned', open ? '1' : '0'); }
+
+/* 收起时的任务计数徽标：面板展开或无任务时隐藏，收起后显示 n/m（完成数/总数） */
+function updateTodoBadge() {
+  const badge = $('#todoBadge');
+  if (!badge) return;
   const panel = $('#todoPanel');
-  if (!panel) return;
-  if (!panel.hidden) { animateOut(panel, 150); return; }
-  // 重置编辑态：编辑下标 / 两段删除武装 / 拖拽源都不跨开关保留
+  const tasks = Array.isArray(active()?.todoTasks) ? active().todoTasks : [];
+  const done = tasks.filter((t) => t.status === 'completed').length;
+  badge.hidden = !(panel && panel.hidden && tasks.length > 0);
+  badge.textContent = `${done}/${tasks.length}`;
+}
+
+/* 打开面板的公共路径（toggle / boot 自动展开共用）：重置编辑态 → 渲染 → 锚点定位 */
+function openTodoPanel() {
+  const panel = $('#todoPanel');
+  if (!panel || !panel.hidden) return;
   todoUi.editing = -1;
   todoUi.armed = -1;
   todoUi.armedRef = null;
@@ -3807,6 +3875,20 @@ function toggleTodoPanel() {
   /* 统一走 openMenu 的锚点定位：面板是 position:fixed 且未设 top 的顶栏子元素，
      静态位置会被 .top-right 的垂直居中算到窗口上沿之外（面板越高裁得越多） */
   openMenu('todoPanel', $('#todoBtn'));
+}
+
+function toggleTodoPanel() {
+  const panel = $('#todoPanel');
+  if (!panel) return;
+  if (!panel.hidden) {
+    animateOut(panel, 150);
+    setTodoPinned(false); // 收起即记住：下次启动不再自动展开
+    setTimeout(updateTodoBadge, 170); // animateOut 落盘 hidden 后再亮徽标
+    return;
+  }
+  openTodoPanel();
+  setTodoPinned(true);
+  updateTodoBadge(); // 展开后（hidden=false）隐藏徽标
   const addInput = $('.todo-add-input', $('#todoPanelBody') || panel);
   if (addInput) addInput.focus();
 }
@@ -7042,7 +7124,12 @@ function bind() {
   $('#exportSessionJson').addEventListener('click', () => exportCurrentSession('json'));
 
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('.menu') && !e.target.closest('#modeBtn') && !e.target.closest('#permBtn') && !e.target.closest('#todoBtn')) hideMenus();
+    if (!e.target.closest('.menu') && !e.target.closest('#modeBtn') && !e.target.closest('#permBtn') && !e.target.closest('#todoBtn')) {
+      const todoWasOpen = !$('#todoPanel')?.hidden;
+      hideMenus();
+      // 点空白收起任务清单也要记住状态（与 toggleTodoPanel 的收起语义一致），落盘后亮徽标
+      if (todoWasOpen) { setTodoPinned(false); setTimeout(updateTodoBadge, 170); }
+    }
   });
   document.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
@@ -7261,6 +7348,9 @@ function boot() {
   renderAttachments();
   renderToolsSetting();
   updateStatusline(); // 状态条首帧：模型 / 智能体 / 上下文占用即刻可见
+  // 任务清单默认展开（Y1）：用户要求随时可见；手动收起记 localStorage（dsh.todoPinned），下次启动按记住的状态来
+  if (todoPinned()) openTodoPanel();
+  updateTodoBadge();
   startAutoSave(); // 保存加固：30s 周期自动保存（仅 dirty 时落盘；hidden/beforeunload 另有兜底）
 
   // 启动即加载工具定义并解析默认工作目录，API 面板不再停在「加载中…」
@@ -7306,7 +7396,32 @@ function boot() {
     setTimeout(() => probe({ silent: true }), 300);
   }
   initWallpaper();
+  hideBootSplash(); // 全部初始化完成后收走启动画面（纯 CSS 层，HTML 解析起即显示）
   $('#input').focus();
 }
 
+/* ───────── 启动画面收尾 ─────────
+   #bootSplash 是纯 CSS 层（无 JS 依赖），boot() 全部初始化完成后由这里收走：
+   .is-done 过渡（opacity 0 + 轻微上移，280ms --ease-exit）→ transitionend 后移除节点；
+   reduced-motion 下 CSS 直接 display:none（无过渡，不依赖 transitionend）。
+   兜底：boot() 中途异常时由 boot() 调用点处的 3.5s setTimeout 强制隐藏。 */
+function hideBootSplash() {
+  const splash = document.getElementById('bootSplash');
+  if (!splash || splash.dataset.done === '1') return;
+  splash.dataset.done = '1';
+  splash.classList.add('is-done');
+  splash.addEventListener('transitionend', () => splash.remove(), { once: true });
+  setTimeout(() => splash.remove(), 500); // transitionend 缺席兜底（reduced-motion / 后台不可见）
+}
+
+/* 探针观测点：记录 app.js 顶层执行时启动画面仍在屏（HTML 解析即显示、无 JS 依赖的证据）。
+   boot() 尚未运行，splash 必然处于未收走状态——探针断言此值而不必抢在首帧前跑脚本 */
+window.__DSH_SPLASH_SEEN_AT = typeof performance !== 'undefined' ? Math.round(performance.now()) : -1;
+window.__DSH_SPLASH_VISIBLE = (() => {
+  const el = document.getElementById('bootSplash');
+  return !!el && !el.hidden && !el.classList.contains('is-done');
+})();
+
+/* 启动画面兜底：boot() 中途抛异常也不能让 splash 卡死（3.5s 强制收走） */
+setTimeout(hideBootSplash, 3500);
 boot();

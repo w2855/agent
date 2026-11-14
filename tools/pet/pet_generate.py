@@ -67,7 +67,9 @@ def gen_keyframe(meta, action, idx, pose_text):
         except Exception as exc:  # noqa: BLE001
             err = f'{type(exc).__name__}: {exc}'
             if attempt < meta['api']['retries']:
-                time.sleep(3 + attempt * 4)
+                # 429 限流用长退避：20s 起步，逐次 +15s
+                wait = 20 + attempt * 15 if '429' in err else 3 + attempt * 4
+                time.sleep(wait)
     return False, err
 
 

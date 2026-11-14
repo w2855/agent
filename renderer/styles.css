@@ -2095,7 +2095,7 @@ input.tint-range::-webkit-slider-thumb {
 
 /* 右上角任务清单面板 */
 .menu.todo-panel {
-  width: 320px;
+  width: 280px;
   max-width: calc(100vw - 20px);
 }
 .todo-body {
@@ -3150,4 +3150,84 @@ input.tint-range::-webkit-slider-thumb {
   .approval::before { opacity: 0; }
   .btn:active, button:active:not(.win-btn):not(.no-press),
   .menu-item:active, .suggest:active, .chip:active { transform: none; }
+}
+
+/* ═════════ Y1 渲染包：启动画面 / 工具叙述行 / 任务清单徽标（追加于 motion-system 之后，令牌沿用上面 A 节） ═════════ */
+
+/* ── 启动画面：纯 CSS 层，HTML 一解析立即显示（无 JS 依赖）；
+   boot() 完成后由 hideBootSplash() 加 .is-done（opacity 0 + 轻微上移 280ms --ease-exit）
+   → transitionend 后 JS 移除节点。z-index 999 压过现役浮层（最高 95）；
+   底色用主题页面渐变，深浅主题都成立 ── */
+#bootSplash {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(180deg, var(--page-top, #1D222C), var(--page-bottom, #1B1C23));
+  transition: opacity var(--dur-slow) var(--ease-exit), transform var(--dur-slow) var(--ease-exit);
+}
+#bootSplash.is-done { opacity: 0; transform: translateY(-10px); pointer-events: none; }
+.boot-inner { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.boot-logo { width: 84px; height: 84px; object-fit: contain; animation: bootFloat 2.8s ease-in-out infinite; }
+.boot-word {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: 6px;
+  text-indent: 6px; /* 抵消末字符字距，视觉居中 */
+  color: var(--text);
+}
+.boot-dots { display: inline-flex; gap: 6px; }
+.boot-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent, var(--text-3));
+  animation: bootWave 1s ease-in-out infinite;
+}
+.boot-dots i:nth-child(2) { animation-delay: 140ms; }
+.boot-dots i:nth-child(3) { animation-delay: 280ms; }
+@keyframes bootWave { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+@keyframes bootFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+
+/* ── 工具叙述行（UI 保底）：系统提示要求模型「调用工具前先说一句话」但模型不总遵守；
+   只要有 pending/running 工具就在工具列表上方播报「🛠 正在 <动词> <目标>…」，
+   小字 --text-3 + 左侧细竖线 accent；全部落定后 300ms 淡出移除（--ease-exit） ── */
+.slot-narrate:empty { display: none; }
+.tool-narrate {
+  margin: 2px 0 6px;
+  padding: 1px 0 1px 9px;
+  border-left: 2px solid var(--accent);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-3);
+  animation: rowIn var(--dur-fast) var(--ease-out-strong) both;
+}
+.tool-narrate.is-leaving { opacity: 0; transition: opacity 300ms var(--ease-exit); }
+
+/* ── 任务清单收起时的计数徽标（todoBtn 右上角小圆标，形如 1/3） ── */
+#todoBtn { position: relative; }
+.todo-badge {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  min-width: 16px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* reduced-motion 兜底：启动画面直接消失无动画；叙述行淡出瞬时完成；徽标入场无动画 */
+@media (prefers-reduced-motion: reduce) {
+  #bootSplash { transition: none; }
+  #bootSplash.is-done { display: none; }
+  .boot-logo, .boot-dots i, .tool-narrate { animation: none !important; }
+  .tool-narrate.is-leaving { transition: none; }
 }

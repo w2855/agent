@@ -8,6 +8,16 @@
 </head>
 <body>
 
+<!-- 启动画面：纯 CSS 动画、无 JS 依赖——HTML 一解析立即显示，保证第一帧就有内容；
+     app.js boot() 全部初始化完成后由 hideBootSplash() 收走（异常时 3.5s 强制兜底） -->
+<div id="bootSplash" aria-hidden="true">
+  <div class="boot-inner">
+    <img class="boot-logo" src="../assets/whale-happy.png" alt="" />
+    <div class="boot-word">DSH</div>
+    <div class="boot-dots"><i></i><i></i><i></i></div>
+  </div>
+</div>
+
 <!-- 自定义视频壁纸：纯视频铺底 + 可选纯色压暗，全程不使用模糊/磨砂 -->
 <video id="wallpaper" muted loop autoplay playsinline></video>
 <div id="wallpaperTint"></div>
@@ -151,6 +161,7 @@
         </button>
         <button class="icon-btn ghost" id="todoBtn" title="任务清单">
           <svg class="ico"><use href="#i-checklist"/></svg>
+          <span class="todo-badge" id="todoBadge" hidden></span>
         </button>
 
         <div class="menu todo-panel" id="todoPanel" hidden>

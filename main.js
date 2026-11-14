@@ -7,6 +7,11 @@ const {
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
+// 启动阶段打点：放在所有业务 require 之前，spawn 阶段覆盖整个模块加载（lib/* 的 require 开销也算进去）
+const { BootTimer } = require('./lib/boot-timer');
+const bootTimer = new BootTimer();
+// spawn 起点 = 进程拉起时刻（backdate：main.js 首行执行时 process.uptime 已含 Electron 框架自举耗时）
+bootTimer.begin('spawn', Date.now() - Math.round(process.uptime() * 1000));
 const retry = require('./lib/retry');
 const secretMask = require('./lib/secret-mask');
 const notifyDedupe = require('./lib/notify-dedupe');
@@ -153,8 +158,15 @@ function ensureAutopilot() {
 /** id -> { lifeCtrl, ctrl, cancelBody, aborted, reason, finish } */
 const activeChats = new Map();
 
-/** MCP stdio 客户端管理器（server 的启停/发现/调用都在主进程） */
-const mcpManager = mcpModule.createMcpManager();
+/** MCP stdio 客户端管理器（server 的启停/发现/调用都在主进程）。
+ *  懒建：非首帧必需项，构建延后到 did-finish-load 之后（runDeferredBootInit 预热）；
+ *  渲染层早期 IPC 若先到（tool:specs / mcp:servers:get），此处同步兜底构建——
+ *  构建只是闭包 + Map，亚毫秒级，不会拖慢首帧 IPC。 */
+let mcpManager = null;
+function getMcpManager() {
+  if (!mcpManager) mcpManager = mcpModule.createMcpManager();
+  return mcpManager;
+}
 /** MCP server 配置的内存态；持久化由渲染层 localStorage 负责，经 IPC 同步下来 */
 let mcpConfigs = [];
 
@@ -191,8 +203,8 @@ let bootReadyAt = 0;
    审批与 policy 不做任何特殊放行——MCP 工具一律按 run_command 同档
    （ask 需审批、readonly 拒绝），见 lib/tools.js 的 executeMcpTool。 */
 localTools.setMcpBridge({
-  resolve: (fullName) => mcpModule.findTool(mcpManager.status(), fullName),
-  call: (serverId, toolName, args) => mcpManager.callTool(serverId, toolName, args),
+  resolve: (fullName) => mcpModule.findTool(getMcpManager().status(), fullName),
+  call: (serverId, toolName, args) => getMcpManager().callTool(serverId, toolName, args),
 });
 
 /* ---------------- P2 启动时长 / 崩溃日志 ----------------
@@ -251,9 +263,62 @@ function markSoftRenderNextBoot() {
   }
 }
 
+/* ---------------- P2 启动提速：阶段打点落盘 / 立即显示窗口 ----------------
+ * boot 各阶段（spawn→whenReady→createWindow→did-finish-load→renderer-ready）
+ * 写入 crash-log.jsonl（type: 'boot-stages'），did-finish-load 时先落部分记录
+ * （renderer-ready 为 null），渲染层经 IPC 上报后再补一条 complete: true 的完整记录。
+ */
+
+/** 启动窗口底色跟渲染层主题一致防白闪（与渲染层 splash 的约定值）：
+ *  深色 #0e1526 / 浅色 #f5f7fb。按 nativeTheme.shouldUseDarkColors 推导——
+ *  当前 themeSource 固定 'light'（见文件顶部），未来放开主题跟随系统时无需改这里。 */
+function bootBackgroundColor() {
+  return nativeTheme.shouldUseDarkColors ? '#0e1526' : '#f5f7fb';
+}
+
+/** 落一条 boot-stages 记录（complete=false 为部分记录，renderer-ready 尚未上报）。 */
+function writeBootStages(complete) {
+  const snap = bootTimer.snapshot();
+  const entry = {
+    type: 'boot-stages',
+    complete: !!complete,
+    stages: snap.stages,
+    at: Date.now(),
+  };
+  appendCrashLog(entry);
+  // 主进程 stdout 同步打一份，探针 / e2e 直接从运行输出取阶段耗时
+  console.log('[boot-stages]', JSON.stringify(entry));
+}
+
+/** 非首帧必需项的延后初始化（幂等）：托盘创建、MCP 管理器预热。
+ *  触发点：did-finish-load 后 setImmediate；另设 3s 兜底定时器，
+ *  覆盖「渲染进程启动即崩、did-finish-load 不触发」的场景（软渲染守护已有，这里保托盘）。 */
+let deferredBootDone = false;
+function runDeferredBootInit() {
+  if (deferredBootDone) return;
+  deferredBootDone = true;
+  // 托盘只在 Windows 创建（macOS 用 Dock，Linux 各发行版托盘行为差异大，先不铺开）
+  createTray();
+  // MCP 管理器预热：懒建闭包亚毫秒级，这里提前建只为让首帧后的 tool:specs 完全零开销
+  getMcpManager();
+}
+
+/** 渲染层 boot 完成的上报钩子：渲染层代理负责在首帧（splash）可见后调用
+ *  window.dsh… → ipcRenderer.invoke('boot:renderer-ready')。重复调用安全（幂等）。 */
+ipcMain.handle('boot:renderer-ready', () => {
+  if (!bootTimer.ended) {
+    bootTimer.mark('renderer-ready');
+    bootTimer.end();
+    writeBootStages(true);
+  }
+  return { ok: true, stages: bootTimer.snapshot().stages };
+});
+
 /* ---------------- 窗口 ---------------- */
 
 function createWindow() {
+  // activate 重建窗口会再次进这里：boot 打点只记首窗，同名重复 mark 会抛错
+  if (!bootTimer.has('createWindow')) bootTimer.mark('createWindow');
   const sizeArg = process.argv.find((x) => x.startsWith('--size='));
   const [w, h] = sizeArg ? sizeArg.slice(7).split('x').map(Number) : [1320, 880];
 
@@ -262,10 +327,12 @@ function createWindow() {
     height: Number.isFinite(h) && h >= 620 ? h : 880,
     minWidth: 900,
     minHeight: 620,
-    show: false,
+    // 立即显示：不等 ready-to-show（原先 show:false 让「进程启动→窗口可见」全程无反馈，
+    // 是用户体感启动慢的主因）。空窗期由 backgroundColor 垫底，渲染层 splash 第一帧接上。
+    show: true,
     frame: false,
     roundedCorners: true,
-    backgroundColor: '#EBF1FE',
+    backgroundColor: bootBackgroundColor(),
     title: 'DSH',
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
@@ -277,7 +344,7 @@ function createWindow() {
   });
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  win.once('ready-to-show', () => win.show());
+  // 不再等 ready-to-show：窗口构造即 show（见上方 show: true 注释）
 
   // 自检时把渲染层报错带出来，避免「看起来没问题但其实脚本挂了」
   if (process.argv.includes('--shot')) {
@@ -340,9 +407,17 @@ function createWindow() {
     }).catch(() => { /* 对话框失败即放弃，不打断主流程 */ });
   });
 
-  // P2 启动时长：whenReady → 首次 did-finish-load，每次启动写一条 boot 记录
+  // P2 启动时长：whenReady → 首次 did-finish-load，每次启动写一条 boot 记录（老口径保留）；
+  // 并在此打点 + 延后落 boot-stages 明细 / 跑非首帧必需项（都不挡渲染层首帧）
   win.webContents.once('did-finish-load', () => {
+    // 新窗口（activate 重建）也会触发：同名重复 mark 会抛错，只记首个 did-finish-load
+    if (!bootTimer.has('did-finish-load')) bootTimer.mark('did-finish-load');
     if (bootReadyAt > 0) appendCrashLog({ type: 'boot', bootMs: Date.now() - bootReadyAt, at: Date.now() });
+    // 非首帧必需：boot-stages 部分记录 + 托盘/MCP 预热，让出主线程给渲染层首帧
+    setImmediate(() => {
+      writeBootStages(false); // renderer-ready 未上报，先落部分记录（该阶段为 null）
+      runDeferredBootInit();
+    });
   });
 
   const emitMax = () => { if (win && !win.isDestroyed()) win.webContents.send('win:maximized', win.isMaximized()); };
@@ -409,6 +484,7 @@ function createWindow() {
 app.whenReady().then(() => {
   if (!lockResult.isPrimary) return; // 第二实例已请求退出，不再初始化任何服务
   bootReadyAt = Date.now();
+  bootTimer.mark('whenReady');
   try {
     runtimeSvc = runtimeModule.createRuntime({
       dir: path.join(app.getPath('userData'), 'runtime'),
@@ -426,12 +502,15 @@ app.whenReady().then(() => {
     runtimeSvc = null;
     console.log('[runtime] 初始化失败：', err && err.message ? err.message : String(err));
   }
+  // runtimeSvc 保持同步初始化：renderer 早期 IPC（runtime:* / tool:specs 经 localTools）都依赖它，
+  // 延后会拖慢首帧交互，属于首帧必需项。
   createWindow();
-  // 托盘只在 Windows 创建（macOS 用 Dock，Linux 各发行版托盘行为差异大，先不铺开）
-  createTray();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+  // 兜底：渲染进程若启动即崩（did-finish-load 一直不触发），托盘等延后项也不能永久丢失——
+  // 3s 后幂等补跑（正常路径由 did-finish-load 的 setImmediate 更早触发）
+  setTimeout(runDeferredBootInit, 3000);
 });
 
 app.on('before-quit', () => {
@@ -440,8 +519,9 @@ app.on('before-quit', () => {
   // Autopilot：退出前停轮询定时器（unref 过，此处显式停是双保险）
   try { autopilot?.stop(); } catch { /* 已停止 */ }
   try { runtimeSvc?.close(); } catch { /* 已关闭 */ }
-  // 退出时停掉所有 MCP server（杀整棵进程树，避免遗留子进程）
-  try { mcpManager.stopAll(); } catch { /* 尽力停止即可 */ }
+  // 退出时停掉所有 MCP server（杀整棵进程树，避免遗留子进程）；
+  // 注意用 if 而非 getMcpManager()：退出路径不允许懒建出一个新管理器
+  if (mcpManager) { try { mcpManager.stopAll(); } catch { /* 尽力停止即可 */ } }
   // 退出前轮换备份经验库与运行时水位（userData/runtime/{lessons.jsonl,runtime.json} → userData/backups，保留 7 份；尽力而为，失败不影响退出）
   try { backup.rotateBackup([path.join(app.getPath('userData'), 'runtime', 'lessons.jsonl'), path.join(app.getPath('userData'), 'runtime', 'runtime.json')], path.join(app.getPath('userData'), 'backups'), { keep: 7 }); } catch { /* 备份失败不阻塞退出 */ }
   // 托盘先销毁再退出，防止图标残留在任务栏托盘区
@@ -1582,7 +1662,7 @@ ipcMain.on('model:abort-all', () => {
 ipcMain.handle('tool:specs', () => {
   /* MCP 工具追加进 specs：inputSchema 本身就是 JSON Schema，基本直传。
      policy 无特殊放行：MCP 工具名追加进 needsApproval（与 run_command 同档）。 */
-  const mcpEntries = mcpModule.buildToolSpecs(mcpManager.status());
+  const mcpEntries = mcpModule.buildToolSpecs(getMcpManager().status());
   return {
     ok: true,
     specs: [...localTools.TOOL_SPECS, ...mcpEntries.map((e) => e.spec)],
@@ -1660,7 +1740,7 @@ function normalizeMcpConfig(raw, label) {
 ipcMain.handle('mcp:servers:get', () => ({
   ok: true,
   configs: mcpConfigs,
-  servers: mcpManager.status(),
+  servers: getMcpManager().status(),
 }));
 
 ipcMain.handle('mcp:servers:set', (_event, list) => {
@@ -1679,8 +1759,8 @@ ipcMain.handle('mcp:servers:set', (_event, list) => {
   }
   // 配置里被删掉的 server 如果还在运行，顺手停掉，避免游离进程
   const aliveIds = new Set(next.map((c) => c.id));
-  for (const s of mcpManager.status()) {
-    if (!aliveIds.has(s.id) && s.status !== 'stopped') mcpManager.stopServer(s.id);
+  for (const s of getMcpManager().status()) {
+    if (!aliveIds.has(s.id) && s.status !== 'stopped') getMcpManager().stopServer(s.id);
   }
   mcpConfigs = next;
   return { ok: true, configs: mcpConfigs };
@@ -1703,13 +1783,13 @@ ipcMain.handle('mcp:server:start', async (_event, idOrCfg) => {
   } catch (err) {
     return { ok: false, code: 'BAD_ARGS', error: err?.message || String(err) };
   }
-  return mcpManager.startServer(cfg);
+  return getMcpManager().startServer(cfg);
 });
 
-ipcMain.handle('mcp:server:stop', (_event, id) => mcpManager.stopServer(String(id || '')));
+ipcMain.handle('mcp:server:stop', (_event, id) => getMcpManager().stopServer(String(id || '')));
 
 ipcMain.handle('mcp:tools:list', (_event, serverId) => {
-  const servers = mcpManager.status();
+  const servers = getMcpManager().status();
   const scoped = serverId ? servers.filter((s) => s.id === String(serverId)) : servers;
   const entries = mcpModule.buildToolSpecs(scoped);
   return {
@@ -1732,7 +1812,7 @@ ipcMain.handle('mcp:tool:call', async (_event, payload) => {
   const name = String(payload.name || '');
   if (!serverId || !name) return { ok: false, code: 'BAD_ARGS', error: '缺少 serverId 或 name' };
   const args = payload.args && typeof payload.args === 'object' && !Array.isArray(payload.args) ? payload.args : {};
-  return mcpManager.callTool(serverId, name, args, payload.timeoutMs);
+  return getMcpManager().callTool(serverId, name, args, payload.timeoutMs);
 });
 
 /* ---------------- Skills（技能） ----------------
