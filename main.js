@@ -194,7 +194,7 @@ function refreshProfileMaps(profiles) {
       const baseUrl = typeof p.baseUrl === 'string' ? p.baseUrl.trim() : '';
       // 掩码值与空 key 不入库（与 buildProfileKeyMap 口径一致）
       if (!id || !key || secretMask.isMaskedKey(key) || !baseUrl) continue;
-      cfgMap.set(id, { baseUrl, key });
+      cfgMap.set(id, { baseUrl, key, effort: ['off', 'low', 'medium', 'high'].includes(p.effort) ? p.effort : 'off' });
     }
   }
   profileCfgById = cfgMap;
@@ -1008,6 +1008,7 @@ async function delegationModelRequest({ cfg, messages, tools, timeoutMs } = {}) 
       messages: sanitizeMessages(Array.isArray(messages) ? messages : []),
       stream: false,
     };
+    if (cfg.effort && cfg.effort !== 'off') body.reasoning_effort = cfg.effort;
     const specs = sanitizeTools(tools);
     if (specs?.length) {
       body.tools = specs;
@@ -1551,6 +1552,8 @@ ipcMain.on('model:chat', (event, rawPayload) => {
         requestBody.tools = tools;
         requestBody.tool_choice = 'auto';
       }
+      // 思考强度：接入点配置了且非 off 才发，兼容不支持 reasoning_effort 的普通模型
+      if (cfg.effort && cfg.effort !== 'off') requestBody.reasoning_effort = cfg.effort;
       const res = await net.fetch(base + '/chat/completions', {
         method: 'POST',
         headers: { ...apiHeaders(cfg), 'content-type': 'application/json' },

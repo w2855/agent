@@ -133,7 +133,7 @@ function handleChat(body, res) {
   const userText = [...msgs].reverse().find((m) => m.role === 'user')?.content || '';
   const toolMsgs = msgs.filter((m) => m.role === 'tool');
   const toolDefs = Array.isArray(body.tools) ? body.tools : [];
-  console.log('[mock] chat msgs=%d tools=%d toolMsgs=%d trigger=%s', msgs.length, toolDefs.length, toolMsgs.length, String(userText).slice(0, 40));
+  console.log('[mock] chat msgs=%d tools=%d toolMsgs=%d effort=%s trigger=%s', msgs.length, toolDefs.length, toolMsgs.length, body.reasoning_effort || '-', String(userText).slice(0, 40));
 
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',

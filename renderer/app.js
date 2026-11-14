@@ -470,9 +470,14 @@ const apiCfg = () => ({
      表单指向的连接（formProfileId）优先于活动连接——新建连接探活时两者不同，
      用 activeProfileId 会把旧连接的 key 配到新地址上。cfg.key 原值保留（向后兼容）。 */
   profileId: state.formProfileId || state.activeProfileId || undefined,
+  effort: readEffortSelect(),
   retry: retryConfig(),
 });
 const cfgSig = (cfg) => [cfg?.baseUrl, cfg?.key, cfg?.model].map((v) => String(v ?? '').trim()).join('|');
+/* 思考强度（reasoning_effort）：跟随接入点存储；'off' 表示不发参数，兼容普通模型 */
+const EFFORTS = ['off', 'low', 'medium', 'high'];
+const normEffort = (v) => (EFFORTS.includes(v) ? v : 'off');
+const readEffortSelect = () => normEffort($('#apiEffort')?.value);
 const active = () => state.sessions.find((s) => s.id === state.activeId) || state.sessions[0];
 
 function validateBaseAndKey(cfg, opts = {}) {
@@ -1175,14 +1180,25 @@ function renderTasks(node, msg) {
 function renderNarrate(node, msg) {
   const slot = $('.slot-narrate', node);
   if (!slot) return;
-  if (String(msg.body || '').trim()) { // 模型已经说过话：叙述行退场，不再重复同一信息
+  const tools = msg.tools || [];
+  // 取最近一个未落定的工具（一轮并行多个时播报最新发起的一个）
+  const running = [...tools].reverse().find((t) => t.status === 'running' || t.status === 'pending');
+  /* 退场规则（修复「工具调用中途不说话」）：
+     - 模型在当前 running 工具发起【之后】说过话（body 长度 ≠ 入列快照）→ 叙述行让位，不重复模型刚说的；
+     - 本回合第一个工具且发起前已有正文（模型已播报意图）→ 不叠加，避免双份观感；
+     - 其余情况（尤其多步循环中途模型沉默）→ 叙述行常驻兜底，让「正在做什么」始终可见。 */
+  const spokenAfterStart = running
+    ? (running.bodyAtStart !== undefined
+        ? String(msg.body || '').length !== running.bodyAtStart
+        : String(msg.body || '').trim() !== '') // 无快照（旧会话数据/探针构造）：保持旧规则——有正文即让位
+    : false;
+  const firstIntent = running && running.bodyAtStart !== undefined
+    && tools.indexOf(running) === 0 && running.bodyAtStart > 0;
+  if (!running || spokenAfterStart || firstIntent) {
     const leaving = $('.tool-narrate:not(.is-leaving)', slot);
     if (leaving) { leaving.classList.add('is-leaving'); setTimeout(() => leaving.remove(), 300); }
     return;
   }
-  const tools = msg.tools || [];
-  // 取最近一个未落定的工具（一轮并行多个时播报最新发起的一个）
-  const running = [...tools].reverse().find((t) => t.status === 'running' || t.status === 'pending');
   const cur = $('.tool-narrate:not(.is-leaving)', slot);
   if (running) {
     const sig = [running.id || '', running.verb || '', running.target || ''].join('\u0001');
@@ -1688,9 +1704,9 @@ function buildApiMessages(session, currentText, draft, skipUser) {
       + '你可以使用系统提供的工具读写本地文件、搜索、执行命令或访问网页；需要时直接调用工具，'
       + '工具结果由系统返回。任务清单（todo_write）由你自行判断是否使用：任务复杂、步骤较多时可以建立清单并更新进度。'
       + '不要虚构工具调用、工具结果或文件产出。'
-      + '【硬性要求】整个回合只在第一次调用工具前播报一句意图（不超过 15 字，例如：先看一下目录结构。）；'
-      + '之后继续调用其他工具时直接调用，不再重复播报；工具全部结束后只报告一次最终结果，'
-      + '不要每完成一个工具就单独汇报一遍。',
+      + '【硬性要求】每次调用工具前先用一句短句说明这一步要做什么（不超过 15 字，例如：先看一下目录结构。）；'
+      + '多步工具循环中每一步都先说明再调用，不要逐句复述同样的措辞；工具全部结束后只报告一次最终结果，'
+      + '不要每完成一个工具就单独汇报一遍结果。',
   }, {
     role: 'system',
     content: '【工作协议与执行约束（用户指定，全程遵守，与其他指令冲突时以本协议为准）】\n' + AGENT_PROTOCOLS,
@@ -3041,6 +3057,7 @@ function runApiTurn(ctx, opts) {
       args,
       result: '',
       expanded: false,
+      bodyAtStart: String(draft.body || '').length, // 叙述行判断依据：发起后模型说话 body 会变长
     };
     draft.tools.push(tool);
     saveSessions(); // 工具调用入列立即落盘：工具事件间隔秒级，序列化开销可接受；30s tick 只兜底流式正文增量
@@ -6283,6 +6300,7 @@ function loadProfiles(persist = true) {
     baseUrl: current.baseUrl || api.baseUrl,
     key: state.connection.api.key || current.key,
     model: validModel(current.model) ? current.model : api.model,
+    effort: normEffort(current.effort || api.effort),
   };
 
   state.profiles = profiles;
@@ -6376,6 +6394,7 @@ function loadProfile(id) {
   $('#apiBaseUrl').value = p.baseUrl || '';
   $('#apiKey').value = p.key || '';
   if ($('#apiProfileName')) $('#apiProfileName').value = p.name || '';
+  if ($('#apiEffort')) $('#apiEffort').value = normEffort(p.effort);
   state.formModel = validModel(p.model) ? p.model : DEFAULT_API.model;
   state.pendingModel = state.formModel;
   state.probeSig = '';
@@ -6422,6 +6441,7 @@ function fillFormFromConn() {
   $('#apiKey').value = api.key;
   const p = state.profiles.find((x) => x.id === state.activeProfileId);
   if ($('#apiProfileName')) $('#apiProfileName').value = p?.name || '';
+  if ($('#apiEffort')) $('#apiEffort').value = normEffort(p?.effort || api.effort);
   state.formModel = validModel(api.model) ? api.model : DEFAULT_API.model;
   state.pendingModel = state.formModel;
   $('#manualModel').value = '';
@@ -6465,7 +6485,8 @@ function saveConnection() {
   if (!profile) { profile = makeProfile(cfg); state.profiles.push(profile); }
   // key 为空（掩码路径、明文只在主进程）时不覆盖 profile 原值：掩码发给 setProfiles
   // 会被主进程还原成真实 key，写空反而会把它从 key 表里清掉
-  Object.assign(profile, { name, baseUrl: cfg.baseUrl, key: cfg.key || profile.key || '', model: cfg.model });
+  const effort = readEffortSelect();
+  Object.assign(profile, { name, baseUrl: cfg.baseUrl, key: cfg.key || profile.key || '', model: cfg.model, effort });
   state.activeProfileId = profile.id;
   state.formProfileId = profile.id;
   if (nameInput) nameInput.value = name;
@@ -6474,7 +6495,7 @@ function saveConnection() {
 
   persistConn({
     source: 'model',
-    api: { baseUrl: cfg.baseUrl, key: cfg.key, model: cfg.model },
+    api: { baseUrl: cfg.baseUrl, key: cfg.key, model: cfg.model, effort },
     verified,
   });
   closeSheets();
@@ -6495,7 +6516,7 @@ function activateProfile(id) {
   state.modelsFor = '';
   state.modelsError = '';
   fetchModels({ silent: false });
-  persistConn({ source: 'model', api: { baseUrl: p.baseUrl, key: p.key, model: p.model }, verified: false });
+  persistConn({ source: 'model', api: { baseUrl: p.baseUrl, key: p.key, model: p.model, effort: normEffort(p.effort) }, verified: false });
   toast(`已切换到 ${p.name || hostOf(p.baseUrl)}`);
 }
 

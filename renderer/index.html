@@ -573,6 +573,15 @@
               <input id="apiKey" type="password" placeholder="sk-…" spellcheck="false" autocomplete="off" />
             </div>
             <div class="field">
+              <label for="apiEffort">模型思考强度 <span>（推理模型有效；普通模型请选「关闭」）</span></label>
+              <select id="apiEffort">
+                <option value="off">关闭 · 不发送参数</option>
+                <option value="low">低 · reasoning_effort=low</option>
+                <option value="medium">中 · reasoning_effort=medium</option>
+                <option value="high">高 · reasoning_effort=high</option>
+              </select>
+            </div>
+            <div class="field">
               <label>模型 <span>（从上游列表选择，默认 gemini-3.8-flash）</span></label>
               <button class="model-pick" id="openModelSheet">
                 <svg class="ico"><use href="#i-sparkle"/></svg>
