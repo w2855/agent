@@ -2256,3 +2256,60 @@ input.tint-range::-webkit-slider-thumb {
   color: var(--text-3);
 }
 #todoPanelSummary { color: var(--text-3); letter-spacing: 0; }
+
+/* ───────── R2 UX：消息复制 / 回到底部 / 输入计数 ───────── */
+.msg-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 2px;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.msg:hover .msg-actions,
+.msg-actions:focus-within { opacity: 1; }
+.msg-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--menu-bg);
+  color: var(--text-3);
+  cursor: pointer;
+}
+.msg-actions button:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.msg-actions button.is-copied { color: var(--ok, #34c77b); border-color: color-mix(in srgb, var(--ok, #34c77b) 45%, transparent); }
+
+.jump-bottom {
+  position: absolute;
+  right: 52px;
+  bottom: 210px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  background: var(--menu-bg);
+  color: var(--text-2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-toast);
+  z-index: 30;
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+.jump-bottom:hover { color: var(--accent); }
+.main.inspector-open .jump-bottom { right: 444px; }
+
+.input-count {
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.input-count.is-over { color: var(--bad); }
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-actions, .jump-bottom { transition: none; }
+}

@@ -30,6 +30,8 @@
     <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="4"/><path d="M14.5 4.5v15"/></symbol>
     <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3.5l1.8 5.2 5.2 1.8-5.2 1.8L12 17.5l-1.8-5.2L5 10.5l5.2-1.8z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></symbol>
     <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V6M6.5 11.5L12 6l5.5 5.5"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v13M6.5 12.5L12 18l5.5-5.5"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></symbol>
     <symbol id="i-laptop" viewBox="0 0 24 24"><rect x="4" y="5.5" width="16" height="10.5" rx="2"/><path d="M2.5 19h19"/></symbol>
     <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3.5h7l5 5v12H6z"/><path d="M13 3.5v5h5"/></symbol>
     <symbol id="i-sheet" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M4 9.5h16M4 15h16M10 9.5V20"/></symbol>
@@ -156,6 +158,7 @@
     </header>
 
     <div class="chat" id="chat" tabindex="-1"></div>
+    <button class="jump-bottom" id="jumpBottom" hidden title="回到底部"><svg class="ico"><use href="#i-arrow-down"/></svg></button>
 
     <aside class="inspector" id="inspector" hidden>
       <div class="insp-head">
@@ -204,6 +207,7 @@
       </div>
 
       <div class="hint">
+        <span class="input-count" id="inputCount" hidden></span>
         <span>Enter 发送 · Shift + Enter 换行 · / 唤起命令</span>
         <span class="conn" id="connBadge"><i class="dot"></i>模型 API · 未验证</span>
       </div>

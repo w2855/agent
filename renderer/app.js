@@ -415,36 +415,42 @@ function inline(text) {
 }
 
 function markdown(src) {
-  const lines = esc(src).split('\n');
-  const out = [];
-  let list = null;
-  let code = null;
-  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  try {
+    const lines = esc(src).split('\n');
+    const out = [];
+    let list = null;
+    let code = null;
+    const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
 
-  for (const line of lines) {
-    if (line.startsWith('```')) {
-      if (code === null) { closeList(); code = []; }
-      else { out.push(`<pre><code>${code.join('\n')}</code></pre>`); code = null; }
-      continue;
+    for (const line of lines) {
+      if (line.startsWith('```')) {
+        if (code === null) { closeList(); code = []; }
+        else { out.push(`<pre><code>${code.join('\n')}</code></pre>`); code = null; }
+        continue;
+      }
+      if (code !== null) { code.push(line); continue; }
+      if (!line.trim()) { closeList(); continue; }
+      const h = line.match(/^(#{1,3})\s+(.*)$/);
+      if (h) { closeList(); out.push(`<p><strong>${inline(h[2])}</strong></p>`); continue; }
+      const ul = line.match(/^[-*]\s+(.*)$/);
+      const ol = line.match(/^\d+\.\s+(.*)$/);
+      if (ul || ol) {
+        const want = ul ? 'ul' : 'ol';
+        if (list !== want) { closeList(); out.push(`<${want}>`); list = want; }
+        out.push(`<li>${inline((ul || ol)[1])}</li>`);
+        continue;
+      }
+      closeList();
+      out.push(`<p>${inline(line)}</p>`);
     }
-    if (code !== null) { code.push(line); continue; }
-    if (!line.trim()) { closeList(); continue; }
-    const h = line.match(/^(#{1,3})\s+(.*)$/);
-    if (h) { closeList(); out.push(`<p><strong>${inline(h[2])}</strong></p>`); continue; }
-    const ul = line.match(/^[-*]\s+(.*)$/);
-    const ol = line.match(/^\d+\.\s+(.*)$/);
-    if (ul || ol) {
-      const want = ul ? 'ul' : 'ol';
-      if (list !== want) { closeList(); out.push(`<${want}>`); list = want; }
-      out.push(`<li>${inline((ul || ol)[1])}</li>`);
-      continue;
-    }
+    if (code !== null) out.push(`<pre><code>${code.join('\n')}</code></pre>`);
     closeList();
-    out.push(`<p>${inline(line)}</p>`);
+    return out.join('');
+  } catch (err) {
+    // 单条消息渲染出错时降级为纯文本，不拖垮整个会话区（参考 ZCode markdown 错误边界）
+    console.warn('[markdown] 渲染失败，已降级为纯文本', err);
+    return `<p>${esc(src)}</p>`;
   }
-  if (code !== null) out.push(`<pre><code>${code.join('\n')}</code></pre>`);
-  closeList();
-  return out.join('');
 }
 
 /* ───────── 流式增量渲染：稳定块只解析一次，活动尾低开销重绘（参考 aider mdstream 滑动窗口） ───────── */
@@ -660,6 +666,7 @@ function assistantNode(msg) {
     <div class="prose"></div>
     <div class="slot-files">${filesCard(msg.files)}</div>
     <div class="slot-metrics">${msg.metrics ? `<div class="metrics">${esc(msg.metrics)} ${ico('i-chevron-right', 'ico tiny')}</div>` : ''}</div>
+    <div class="msg-actions"><button data-copy-msg title="复制全文"><svg class="ico tiny"><use href="#i-copy"/></svg></button></div>
   `;
 
   if (msg.body) $('.prose', node).innerHTML = markdown(msg.body);
@@ -717,8 +724,7 @@ function emptyNode() {
       $('#input').value = b.textContent;
       autoGrow();
       updateSendState();
-      updateSlash();
-      $('#input').focus();
+      send(); // 点击建议直接发送，免去第二次点击
     })
   );
   return node;
@@ -2426,6 +2432,10 @@ function finish(draft, node, session, stopped, overrideLabel) {
     if (stopped && draft.resumeFrom) {
       slot.insertAdjacentHTML('beforeend',
         `<div class="resume-row"><span>本轮已中断</span><button class="link-strong" data-resume>继续</button></div>`);
+    } else if (draft.error) {
+      // 失败回合给一条可操作的「重试」入口，不再只留一句错误 markdown（原只有中断态才有按钮）
+      slot.insertAdjacentHTML('beforeend',
+        `<div class="resume-row"><span>本轮调用失败</span><button class="link-strong" data-resume>重试</button></div>`);
     }
   }
 
@@ -2492,6 +2502,37 @@ function requestInterrupt(text) {
   // 预览回合没有 IPC 事件，靠 stopRequested 自行收尾并消费 pendingTurn
 }
 
+/* ───────── 输入历史（↑/↓ 翻阅，本机 localStorage，最多 30 条；空值/重复不入栈） ───────── */
+let histIdx = -1;
+function inputHistory() {
+  if (!Array.isArray(state.inputHistory)) {
+    try { state.inputHistory = JSON.parse(readStorage('dsh.inputHistory', '[]')) || []; }
+    catch { state.inputHistory = []; }
+  }
+  return state.inputHistory;
+}
+function recordInputHistory(text) {
+  const h = inputHistory();
+  if (h[0] === text) return;
+  h.unshift(text);
+  if (h.length > 30) h.length = 30;
+  histIdx = -1;
+  try { writeStorage('dsh.inputHistory', JSON.stringify(h)); } catch { /* 存储满不影响发送 */ }
+}
+function tryHistory(dir) {
+  const ta = $('#input');
+  const h = inputHistory();
+  if (!h.length) return false;
+  // 只在输入为空（翻出第一条）或已在历史导航中时接管方向键，不干扰正常编辑
+  if (histIdx === -1 && ta.value && dir === -1) return false;
+  histIdx = Math.min(Math.max(histIdx + dir, -1), h.length - 1);
+  ta.value = histIdx === -1 ? '' : h[histIdx];
+  autoGrow();
+  updateSendState();
+  updateSlash();
+  return true;
+}
+
 /* ───────── 输入框 / 附件 / 命令 ───────── */
 
 function autoGrow() {
@@ -2507,6 +2548,22 @@ function updateSendState() {
   btn.classList.toggle('streaming', state.busy);
   btn.innerHTML = state.busy ? ico('i-stop') : ico('i-arrow-up');
   btn.title = state.busy ? (has ? '中断并发送新消息' : '中断本轮') : '发送';
+  updateInputCount();
+}
+
+/* 输入长度反馈：只在接近/超过上限时出现，平时零干扰 */
+function updateInputCount() {
+  const el = $('#inputCount');
+  if (!el) return;
+  const len = $('#input').value.length;
+  const warn = LIMITS.maxInput * 0.8;
+  if (len >= warn) {
+    el.hidden = false;
+    el.textContent = `${len.toLocaleString()} / ${LIMITS.maxInput.toLocaleString()}`;
+    el.classList.toggle('is-over', len > LIMITS.maxInput);
+  } else {
+    el.hidden = true;
+  }
 }
 
 function send() {
@@ -2545,6 +2602,7 @@ function send() {
   autoGrow();
   updateSendState();
   hideMenus();
+  recordInputHistory(text);
   runTurn(text);
 }
 
@@ -2759,13 +2817,25 @@ function closeSheet(id) {
   closeSheets();
 }
 
-let toastTimer = null;
+/* Toast 队列：依次展示，互相不覆盖——旧实现单槽会把重要告警（如存储失败）顶掉 */
+const toastQueue = [];
+let toastBusy = false;
 function toast(text) {
+  toastQueue.push(String(text));
+  if (toastQueue.length > 4) toastQueue.shift(); // 防积压：最多保留最近 4 条
+  if (!toastBusy) nextToast();
+}
+function nextToast() {
+  const text = toastQueue.shift();
+  if (text === undefined) { toastBusy = false; return; }
+  toastBusy = true;
   const t = $('#toast');
-  t.textContent = String(text);
+  t.textContent = text;
   t.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+  setTimeout(() => {
+    t.classList.remove('show');
+    setTimeout(nextToast, 200); // 等淡出过渡（180ms）走完再上第二条
+  }, 2200);
 }
 
 /* ───────── Phase 5：Agent 管理与子 Agent 审批 ───────── */
@@ -4462,6 +4532,8 @@ function bind() {
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     if (e.key === 'Escape') hideMenus();
+    if (e.key === 'ArrowUp' && !e.shiftKey && tryHistory(-1)) e.preventDefault();
+    if (e.key === 'ArrowDown' && !e.shiftKey && tryHistory(1)) e.preventDefault();
   });
   // 交给 send() 统一判定：busy+空输入=停止，busy+有文字=插话/排队，空闲=发送
   $('#sendBtn').addEventListener('click', send);
@@ -4689,9 +4761,27 @@ function bind() {
     if (resume) {
       const node = resume.closest('.msg');
       const msg = node ? msgStore.get(node.dataset.msgId) : null;
-      if (!msg?.resumeFrom) return;
+      // 中断续跑看 resumeFrom；失败重试只要求该轮确实失败了
+      if (!msg?.resumeFrom && !msg?.error) return;
       if (state.busy) { toast('请先结束当前回合'); return; }
       runTurn('继续');
+      return;
+    }
+    const copyBtn = e.target.closest('[data-copy-msg]');
+    if (copyBtn) {
+      const node = copyBtn.closest('.msg');
+      const msg = node ? msgStore.get(node.dataset.msgId) : null;
+      const text = String(msg?.body || msg?.text || '');
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(() => {
+        // 成功打勾 1.2s 还原（ZCode CopyRowAction 模式），比 toast 更轻
+        copyBtn.classList.add('is-copied');
+        copyBtn.innerHTML = '<svg class="ico tiny"><use href="#i-check"/></svg>';
+        setTimeout(() => {
+          copyBtn.classList.remove('is-copied');
+          copyBtn.innerHTML = '<svg class="ico tiny"><use href="#i-copy"/></svg>';
+        }, 1200);
+      }).catch(() => toast('复制失败'));
       return;
     }
     const node = e.target.closest('.msg');
@@ -4717,7 +4807,11 @@ function bind() {
   $('#chat').addEventListener('scroll', () => {
     const chat = $('#chat');
     stickBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80;
+    const jump = $('#jumpBottom');
+    if (jump) jump.hidden = stickBottom; // 上滚离开底部时给一个「回到底部」入口
   });
+
+  $('#jumpBottom')?.addEventListener('click', () => scrollToBottom(true));
 
   window.addEventListener('focus', () => {
     const s = active();

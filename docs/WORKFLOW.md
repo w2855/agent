@@ -20,17 +20,16 @@
 6. **落盘**：更新本文件轮次记录 + 相关文档，然后自动进入下一轮
 7. **结束条件**：§1 验收标准全部满足且回归全绿，否则不许停
 
-## 3. 参考源码（按 star 优先级）
+## 3. 参考源码（按优先级）
 
-| 项目 | 看什么 |
-|---|---|
-| **opencode** (sst/opencode) | 流式渲染机制、会话存储、工具调用 UX、上下文压缩、错误重试 UX |
-| **Cline** (cline/cline) | 检查点/回滚、工具调用折叠展示、成本显示、审批卡片 |
-| **aider** (Aider-AI/aider) | /undo、增量 diff 展示、repo-map、精简交互 |
-| **goose** (block/goose) | 扩展机制、会话恢复 |
-| **Open Interpreter / OpenHands / continue** | 按需 |
+| 项目 | 位置 | 看什么 |
+|---|---|---|
+| **ZCode 3.17.2（最高优先）** | `C:\Users\Administrator\Downloads\ZCode-3.17.2\ZCode-3.17.2`（完整源码） | packages/stream-animate（流式动画）、packages/ui（聊天组件）、docs/ 334 篇设计文档（agent-tool-call-renderer、markdown-type-scale、conversation-session-* 等） |
+| **opencode** | 本地克隆 `F:\tmp-opencode-research\opencode`（sst/opencode dev 分支） | paced-text-machine（流式节奏）、markdown-phase-machine、markdown-cache（分块 LRU）、compaction.ts、permission dock、session-retry 卡片 |
+| Cline / aider / goose | 远程（GitHub 访问走代理，如 127.0.0.1:7890） | aider mdstream.py（已借鉴）；Cline ChatRow / checkpoints |
+| ZCode 桌面版构建产物 | `F:\work\zcode-ref\asar-extract`（已解包） | 打包后的实现细节对照 |
 
-研究结论落在本文件 §7 各轮记录内，可执行项转 backlog。
+研究结论沉淀在本文档与轮次记录；GitHub 访问一律走代理。
 
 ## 4. 约束（不可动项，违反即返工）
 
@@ -44,8 +43,8 @@
 ## 5. 问题 Backlog
 
 ### P2 遗留（来自交接文档 + code-review-2026-11-13.md 交叉核对）
-- [~] 流式 O(n²) 渲染：app.js:1546-1554 innerHTML 重建（第一轮）
-- [~] msgStore 永不清理：app.js:160-166（第一轮）
+- [x] 流式 O(n²) 渲染：改稳定块+活动尾增量渲染（R1 完成，aider mdstream 模式，两路径接入）
+- [x] msgStore 永不清理：压缩后 pruneMsgStore（R1 完成）
 - [ ] 子任务预算不预留、父 usage 不累计子消耗（delegation.js:35-59 + state.js:954-958）⚠️ 冻结区，需用户点头
 - [ ] 密钥回传渲染层（main.js:269-284, preload.js:40-43，架构取舍，需用户点头才动）
 - [ ] delegate_task 声明 workspaceOnly 但 policy 层不校验参数（tool-registry.js:60）——安全向可做
@@ -53,10 +52,29 @@
 - [ ] `_prune` 可删仍被子任务引用的父任务（state.js:1336）
 - [ ] graph.js 不抑制 end 后事件（state.js:1249-1334 相关）
 - [ ] electron-builder 打包实测（DSH-Desktop-${version}.exe）
-- [ ] tool-e2e 完整端到端数字
+- [x] tool-e2e 完整端到端数字：**74/74 全通过**（卡点是 userData 缓存锁，`--user-data-dir` 隔离即解，已验证两次）
 
-### UX 优化（研究子代理产出后补充）
-- [ ] 待研究结论落地…
+### UX 优化
+R2 已落地（2026-11-14，来源：本地定位 11 条 + ZCode 挖掘 16 项 + opencode 机制）：
+- [x] toast 队列（不再互相覆盖）
+- [x] markdown 渲染错误降级为纯文本（ZCode 错误边界模式）
+- [x] 建议 chips 点击直接发送（少一次点击）
+- [x] 失败回合「重试」按钮（原来只有中断态有按钮）
+- [x] 输入长度计数（接近 12 万上限才出现，超限变红）
+- [x] 回到底部悬浮按钮（上滚离开底部时出现）
+- [x] 助手消息复制按钮（成功打勾 1.2s 还原，ZCode CopyRowAction 模式）
+- [x] 输入历史 ↑/↓ 翻阅（30 条，localStorage，ZCode promptHistory 模式）
+
+R3 候选（按 ZCode 清单价值排序，待下一轮）：
+- [ ] 代码块复制按钮（hover pre 显示）
+- [ ] 会话右键删除 + 确认（当前无法删会话，存储只增不减）
+- [ ] 工具调用行：运行中扫光进度条（ZCode ToolCallProgressIndicator 的 indeterminate keyframe）
+- [ ] 输入草稿按会话持久化（切会话/重启不丢）
+- [ ] 重试状态内嵌卡片增强（倒计时已有，加低对比 shimmer）
+- [ ] 思考/工具折叠区：正文到达后自动收起，用户点过不再自动动
+- [ ] 会话内查找（Ctrl+F，CSS Highlight API）
+- [ ] 选区浮动操作菜单（复制/追问）
+- [ ] 发送键四态状态机（canSend/发送中/运行中空草稿→停止/队列）
 
 ### 观察项
 - [ ] runtime-ipc-check.js 只能在 Electron 内跑（`--script` 方式），文档化
@@ -80,6 +98,16 @@ foundation 43 / orchestrator 58 / delegation 63 / project 43 / queue 29 / graph 
 - [x] 回归基线 296/296 全绿
 - [x] git 仓库初始化 + 基线提交 `7efb0e6`（158 文件，含 .gitignore 排除日志/截图/node_modules）
 - [x] 本文件建立
-- [~] 并行研究：opencode 源码模式 / 高星 agent 源码模式 / 本地问题定位
-- [~] tool-e2e 后台补跑中
-- 下一轮：按定位结果修流式渲染 + msgStore
+- [x] 四路并行研究：本地定位 / 高星 agent（Cline 71.6k、aider 50.1k 等）/ opencode（源码已克隆到 F:\tmp-opencode-research\opencode）/ ZCode 3.17.2 源码挖掘
+- [x] tool-e2e 补跑：**74/74 全通过**（历史卡点=userData 缓存锁，`--user-data-dir` 隔离解决）
+
+### R1 · 2026-11-14 · 流式渲染性能 + 内存泄漏（commit `0cd6ff9`）
+- [x] 流式渲染改增量更新：`stableBoundary()` 切稳定块 + `createStreamPainter()` 活动尾局部重绘，API 与离线预览两路径接入（参考 aider mdstream.py 滑动窗口 + opencode markdown 分块缓存思想）；光标改为常驻节点不再每帧重建
+- [x] msgStore 泄漏：新增 `pruneMsgStore()`，上下文压缩后清理不再被引用的消息
+- [x] 存储写入失败告警（原静默吞掉，只提示一次防刷屏）
+- 验证：语法 ✓ · 296/296 ✓ · tool-e2e 74/74 ✓（新代码上）· 截图 ✓
+
+### R2 · 2026-11-14 · UX 第一批（来源：本地定位 11 条 + ZCode 挖掘 16 项）
+- [x] toast 队列 / markdown 错误降级 / 建议直发 / 失败重试按钮 / 输入计数 / 回到底部 / 消息复制（打勾反馈）/ 输入历史 ↑/↓
+- 验证：语法 ✓ · tool-e2e 74/74 ✓ · 296 回归（见下）
+- 下一轮 R3：代码块复制、会话删除、工具行扫光、草稿持久化（清单见 backlog）

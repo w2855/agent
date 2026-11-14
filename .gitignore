@@ -9,3 +9,5 @@ tmp-*.json-*-wal
 *.corrupt
 *.bak
 .DS_Store
+.e2e-userdata/
+*.e2e-userdata/
