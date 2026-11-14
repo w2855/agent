@@ -25,6 +25,7 @@ const backup = require('./lib/backup');
 const persistStoreModule = require('./lib/persist-store');
 const userDataPaths = require('./lib/user-data');
 const { createAutopilot } = require('./lib/autopilot'); // 无人值守任务推进循环（开关经 IPC 控制）
+const { createToolGateway } = require('./lib/tool-gateway'); // 工具治理内核（旧通道 + MCP 旁路统一到同一策略/审批/审计）
 const runtimeModule = require('./runtime');
 
 // 测试模式（--script/--shot）禁用硬件加速：本机 GPU 驱动间歇性导致渲染进程启动即崩
@@ -152,6 +153,17 @@ function ensureAutopilot() {
         },
       },
       notify: (payload) => showOsNotification({ title: payload?.title || 'Autopilot', body: payload?.body || '', tag: 'autopilot' }),
+      /* 进度落盘：之前 iteration / lastAdvanced / 连续失败只在内存，重启就从 0 开始，
+         任务其实已经推进过多轮。存在 dsh-storage.json 里（与聊天记录同一份真值源）。 */
+      loadState: () => {
+        try {
+          const raw = getStorageStore().get('dsh.autopilot');
+          return raw ? JSON.parse(raw) : null;
+        } catch { return null; }
+      },
+      saveState: (snapshot) => {
+        try { getStorageStore().set('dsh.autopilot', JSON.stringify(snapshot)); } catch { /* 落盘失败不影响循环 */ }
+      },
     });
   }
   return autopilot;
@@ -998,10 +1010,16 @@ function classifyHttp(status, text) {
 }
 
 /** 子 Agent 的非流式模型调用：由 Runtime 委派执行器注入，密钥只在内存中使用。 */
-async function delegationModelRequest({ cfg, messages, tools, timeoutMs } = {}) {
+async function delegationModelRequest({ cfg, messages, tools, timeoutMs, signal } = {}) {
   const base = normalizeBase(cfg.baseUrl);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.max(1000, Math.min(Number(timeoutMs) || 120000, 180000)));
+  // 取消传播：Runtime 的 run 级 AbortSignal（父任务取消/收尾）直接断掉本次委派请求
+  const onAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
   try {
     const body = {
       model: String(cfg.model).trim(),
@@ -1056,6 +1074,7 @@ async function delegationModelRequest({ cfg, messages, tools, timeoutMs } = {}) 
     throw err;
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
   }
 }
 
@@ -1763,6 +1782,59 @@ ipcMain.on('model:abort-all', () => {
  * 是否调用由模型决定，是否需要用户确认由权限级别决定。
  */
 
+/* ---------------- 工具治理内核 ----------------
+ * 旧通道（tool:exec）与 MCP 直调（mcp:tool:call）都先经过这里：
+ *   策略判定（复用 Runtime 的 policy，同一 workspaceId）→ 主进程原生确认框 → 审计事件。
+ * 渲染层不再能通过传 approved:true 跳过审批。
+ */
+let toolGateway = null;
+function getToolGateway() {
+  if (!toolGateway) {
+    toolGateway = createToolGateway({
+      localTools,
+      getRuntime: () => runtimeSvc,
+      getMcp: () => getMcpManager(),
+      confirm: confirmToolApproval,
+      auditSink: (record) => console.log('[tool-gateway]', JSON.stringify(record)),
+    });
+  }
+  return toolGateway;
+}
+
+/** 主进程自己弹的确认框：审批凭证不经过渲染层，无法被页面脚本伪造。 */
+async function confirmToolApproval({ toolName, reason, riskLevel, summary }) {
+  const detailLines = [];
+  if (reason) detailLines.push(reason);
+  if (riskLevel) detailLines.push(`风险等级：${riskLevel}`);
+  if (summary) detailLines.push(`参数摘要：${summary}`);
+  detailLines.push('批准只对本次调用有效。');
+  const options = {
+    type: 'warning',
+    buttons: ['允许执行', '取消'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: '工具执行确认',
+    message: `是否允许执行：${toolName}`,
+    detail: detailLines.join('\n'),
+  };
+  try {
+    const shotMode = process.argv.includes('--shot');
+    if (shotMode) {
+      // 无头探针没有可交互窗口：一律拒绝，避免测试卡在模态框上
+      console.log('[tool-gateway] 无头模式拒绝需要人工确认的工具调用：', toolName);
+      return false;
+    }
+    const result = win && !win.isDestroyed()
+      ? await dialog.showMessageBox(win, options)
+      : await dialog.showMessageBox(options);
+    return result && result.response === 0;
+  } catch (err) {
+    console.log('[tool-gateway] 确认框失败，按拒绝处理：', err?.message || err);
+    return false;
+  }
+}
+
 ipcMain.handle('tool:specs', () => {
   /* MCP 工具追加进 specs：inputSchema 本身就是 JSON Schema，基本直传。
      policy 无特殊放行：MCP 工具名追加进 needsApproval（与 run_command 同档）。 */
@@ -1778,15 +1850,8 @@ ipcMain.handle('tool:specs', () => {
 
 ipcMain.handle('tool:exec', async (_event, payload) => {
   if (!payload || typeof payload !== 'object') return { ok: false, code: 'BAD_ARGS', error: '工具调用参数为空' };
-  const name = String(payload.name || '');
-  const args = payload.args;
-  const opts = payload.opts && typeof payload.opts === 'object' ? payload.opts : {};
-  const permission = ['full', 'ask', 'readonly'].includes(opts.permission) ? opts.permission : 'ask';
-  return localTools.executeTool(name, args, {
-    workspace: typeof opts.workspace === 'string' ? opts.workspace : '',
-    permission,
-    approved: opts.approved === true,
-  });
+  // 单入口：策略 + 审批 + 审计都在主进程完成，渲染层传什么 approved 都不影响判定
+  return getToolGateway().execLocal(payload);
 });
 
 ipcMain.handle('workspace:default', () => app.getPath('documents'));
@@ -1912,11 +1977,8 @@ ipcMain.handle('mcp:tools:list', (_event, serverId) => {
 
 ipcMain.handle('mcp:tool:call', async (_event, payload) => {
   if (!payload || typeof payload !== 'object') return { ok: false, code: 'BAD_ARGS', error: '参数为空' };
-  const serverId = String(payload.serverId || '');
-  const name = String(payload.name || '');
-  if (!serverId || !name) return { ok: false, code: 'BAD_ARGS', error: '缺少 serverId 或 name' };
-  const args = payload.args && typeof payload.args === 'object' && !Array.isArray(payload.args) ? payload.args : {};
-  return getMcpManager().callTool(serverId, name, args, payload.timeoutMs);
+  // MCP 不再有独立执行入口：走同一治理内核（策略 + 审批 + 审计 + 并发上限）
+  return getToolGateway().callMcp(payload);
 });
 
 /* ---------------- Skills（技能） ----------------

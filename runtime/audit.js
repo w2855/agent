@@ -262,6 +262,34 @@ function projectEvent(event) {
           digest: p.digest,
         },
       };
+    case 'tool.gateway':
+      return {
+        ...base,
+        action: 'tool.gateway',
+        outcome: p.phase === 'result' ? (p.ok ? 'succeeded' : 'failed')
+          : p.phase === 'deny' ? 'denied'
+            : p.phase === 'approval' ? (p.granted ? 'approved' : 'denied')
+              : 'unknown',
+        detail: {
+          channel: p.channel,
+          phase: p.phase,
+          tool: String(p.tool || '').slice(0, 80),
+          serverId: p.serverId,
+          actionHash: p.actionHash,
+          ruleIds: Array.isArray(p.ruleIds) ? p.ruleIds.slice(0, 10) : undefined,
+          approvalSource: p.approvalSource,
+          code: p.code,
+          durationMs: p.durationMs,
+          reason: String(p.reason || p.error || '').slice(0, 200),
+        },
+      };
+    case 'runtime.reconciled':
+      return {
+        ...base,
+        action: 'runtime.reconciled',
+        outcome: 'reconciled',
+        detail: { repaired: p.repaired, entities: p.entities, reason: String(p.reason || '').slice(0, 80) },
+      };
     case 'task.created':
       return {
         ...base,

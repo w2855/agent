@@ -3150,40 +3150,13 @@ function runApiTurn(ctx, opts) {
     }
 
     const isReadOnly = READ_TOOLS.has(name) || state.readOnlyTools.has(name);
-    let decision = 'allow';
-    if (!isReadOnly) {
-      if (state.permission === 'readonly') {
-        decision = 'readonly';
-      } else if (state.permission === 'ask') {
-        const key = s.id + '::' + approvalKey(name, args); // 按回合会话记账，不用活跃会话
-        if (state.autoApproved.has(key)) {
-          decision = 'auto';
-        } else {
-          const answer = await askToolApproval(ctx, tool);
-          ctx.s.state = 'running';
-          renderSessions();
-          if (ctl.stopRequested) decision = 'abort';
-          else if (answer === 'always') { state.autoApproved.add(key); decision = 'allow'; }
-          else if (answer === 'once') decision = 'allow';
-          else decision = 'deny';
-        }
-      }
-    }
-
-    if (decision === 'abort') {
-      // 中断也要落到终态：不标记的话工具行永远停在「准备中」，用户以为工具没显示
-      tool.status = 'error';
-      tool.meta = '已中断';
-      tool.result = '本轮已被用户中断，该工具未执行。';
-      renderTools(node, draft);
-      return null;
-    }
-    if (decision === 'readonly' || decision === 'deny') {
+    /* 旧通道（Runtime 不可用时的降级路径）不再自审批：
+       ask 档的确认由主进程原生确认框完成 —— 渲染层传 approved 布尔值已不被信任。
+       这里只做只读档的快速拒绝，省一次 IPC。 */
+    if (!isReadOnly && state.permission === 'readonly') {
       tool.status = 'denied';
-      tool.meta = decision === 'readonly' ? '只读模式拒绝' : '用户拒绝';
-      tool.result = decision === 'readonly'
-        ? `权限级别为只读，未执行 ${name}。`
-        : `用户拒绝执行该工具（${name}）。`;
+      tool.meta = '只读模式拒绝';
+      tool.result = `权限级别为只读，未执行 ${name}。`;
       renderTools(node, draft);
       return `${tool.result} 不要重复同样的调用，直接向用户说明。`;
     }
@@ -3207,7 +3180,6 @@ function runApiTurn(ctx, opts) {
       r = await window.dsh.tools.exec(name, args, {
         workspace: state.workspace,
         permission: state.permission,
-        approved: true,
       });
     } catch (err) {
       r = { ok: false, error: err?.message || String(err) };
@@ -3242,8 +3214,9 @@ function runApiTurn(ctx, opts) {
       return forModel(tool.result);
     }
 
-    tool.status = 'error';
-    tool.meta = r?.meta?.label || (r?.code === 'DENIED' ? '被拒绝' : '失败');
+    const deniedByMain = r?.code === 'APPROVAL_DENIED' || r?.code === 'POLICY_DENIED';
+    tool.status = deniedByMain ? 'denied' : 'error';
+    tool.meta = deniedByMain ? '未获批准' : (r?.meta?.label || (r?.code === 'DENIED' ? '被拒绝' : r?.code === 'BUSY' ? '繁忙' : '失败'));
     tool.result = String(r?.content || r?.error || '工具执行失败');
     renderTools(node, draft);
     scrollToBottom();
