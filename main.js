@@ -18,6 +18,7 @@ const mcpModule = require('./lib/mcp');
 const skillsModule = require('./lib/skills');
 const backup = require('./lib/backup');
 const userDataPaths = require('./lib/user-data');
+const { createAutopilot } = require('./lib/autopilot'); // 无人值守任务推进循环（开关经 IPC 控制）
 const runtimeModule = require('./runtime');
 
 // 测试模式（--script/--shot）禁用硬件加速：本机 GPU 驱动间歇性导致渲染进程启动即崩
@@ -119,6 +120,36 @@ const MAX_MODELS = 500;
 let win = null;
 /** Runtime 基础服务（Phase 1：事件存储 / Policy / 工具注册表） */
 let runtimeSvc = null;
+/** Autopilot 实例（懒创建：勾选开关时才注入 taskApi 闭包；状态只存内存，重启即关） */
+let autopilot = null;
+
+/** Autopilot 的 runtime 任务 API 适配层：把 runtimeSvc 的 {ok,data} 包装成
+ *  lib/autopilot.js 约定的「数据或抛错」契约。queued 任务在 runtime 只能等
+ *  调度器 admit（resumeTask 仅支持 paused），因此降级为 waiting 信号而非失败。 */
+function ensureAutopilot() {
+  if (!autopilot) {
+    autopilot = createAutopilot({
+      taskApi: {
+        listTasks: () => {
+          const r = runtimeSvc?.listTasks({ limit: 200 });
+          if (!r || r.ok !== true) throw new Error(r?.error?.message || 'listTasks 失败');
+          return r.data;
+        },
+        resumeTask: ({ taskId, reason }) => {
+          const r = runtimeSvc?.resumeTask({ taskId, reason });
+          if (!r || r.ok !== true) {
+            // queued 任务被拒（runtime 只有 paused 可恢复）→ 排队等待调度，不算失败
+            if (/已暂停/.test(r?.error?.message || '')) return { waiting: true };
+            throw new Error(r?.error?.message || 'resumeTask 失败');
+          }
+          return r.data;
+        },
+      },
+      notify: (payload) => showOsNotification({ title: payload?.title || 'Autopilot', body: payload?.body || '', tag: 'autopilot' }),
+    });
+  }
+  return autopilot;
+}
 /** id -> { lifeCtrl, ctrl, cancelBody, aborted, reason, finish } */
 const activeChats = new Map();
 
@@ -406,6 +437,8 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   // quit 途中窗口还会收到 close 事件：置位后 close 拦截不再生效，保证能退干净
   quitting = true;
+  // Autopilot：退出前停轮询定时器（unref 过，此处显式停是双保险）
+  try { autopilot?.stop(); } catch { /* 已停止 */ }
   try { runtimeSvc?.close(); } catch { /* 已关闭 */ }
   // 退出时停掉所有 MCP server（杀整棵进程树，避免遗留子进程）
   try { mcpManager.stopAll(); } catch { /* 尽力停止即可 */ }
@@ -476,6 +509,37 @@ ipcMain.handle('notify:show', (_event, payload) => {
     return { ok: false, error: `通知发送失败：${err?.message || String(err)}` };
   }
 });
+
+/* ---------------- Autopilot（无人值守任务推进） ----------------
+ * 渲染层开关 UI 走这两个通道；状态只存主进程内存（重启即关，安全默认）。
+ * 开启 = 每 30s 轮询 runtime 任务列表，推进 paused/queued 任务；
+ * 停止条件（全部内建于 lib/autopilot.js）：全部终态 / 迭代上限 / 连续失败 ≥2。
+ */
+ipcMain.handle('autopilot:state:get', () => {
+  if (!autopilot) {
+    // 未实例化时返回默认态，渲染层据此画开关
+    return { ok: true, state: { enabled: false, iteration: 0, lastAction: null, decisions: [] } };
+  }
+  try { return { ok: true, state: autopilot.state() }; }
+  catch (err) { return { ok: false, error: `读取 Autopilot 状态失败：${err?.message || String(err)}` }; }
+});
+
+ipcMain.handle('autopilot:state:set', (_event, payload) => {
+  const enabled = !!(payload && payload.enabled);
+  try {
+    if (!enabled) {
+      autopilot?.stop();
+      return { ok: true, state: autopilot?.state() || { enabled: false, iteration: 0, lastAction: null, decisions: [] } };
+    }
+    if (!runtimeSvc) return { ok: false, error: 'Runtime 未初始化，Autopilot 不可用' };
+    const ap = ensureAutopilot();
+    ap.start(); // 幂等：已启用时直接返回现状
+    return { ok: true, state: ap.state() };
+  } catch (err) {
+    return { ok: false, error: `设置 Autopilot 失败：${err?.message || String(err)}` };
+  }
+});
+
 
 /* ---------------- Windows 托盘 ----------------
  * 仅 win32 创建；左键点击显示并聚焦窗口，右键菜单提供打开 / 新对话 / 退出。
