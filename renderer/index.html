@@ -161,6 +161,9 @@
       </div>
     </header>
 
+    <!-- 状态条（Statusline）：顶栏下常驻一行，事件驱动 150ms 去抖刷新 -->
+    <div class="statusline" id="statusline" role="status"></div>
+
     <div class="chat" id="chat" tabindex="-1"></div>
 
     <!-- 会话内查找条（Ctrl+F）：chat 顶部浮层，CSS Custom Highlight 负责正文高亮 -->
@@ -205,6 +208,8 @@
       <div class="attach-bar" id="attachBar" hidden></div>
 
       <div class="perm-row">
+        <!-- 协作模式徽标：非「普通」时显示，点击回设置页对话 pane -->
+        <button class="pair-badge" id="pairBadge" hidden title="协作模式进行中，点击前往设置">协作</button>
         <button class="perm" id="permBtn" title="选择权限级别">
           <svg class="ico"><use href="#i-alert"/></svg>
           <span id="permName">完全权限</span>
@@ -330,6 +335,9 @@
         </button>
         <button class="settings-nav-item" data-sp="agents">
           <svg class="ico"><use href="#i-users"/></svg><span>Agent</span>
+        </button>
+        <button class="settings-nav-item" data-sp="doctor">
+          <svg class="ico"><use href="#i-shield"/></svg><span>体检</span>
         </button>
         <button class="settings-nav-item" data-sp="about">
           <svg class="ico"><use href="#i-laptop"/></svg><span>关于</span>
@@ -473,6 +481,22 @@
             </div>
           </div>
           <p class="fine">默认开启；阈值 = 上下文预算（700000 字符）× 90%，压缩摘要作为 system 消息注入后续请求。手动 /compact 不受此开关影响。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">协作模式</div>
+          <div class="settings-row">
+            <div class="sp-row-main">
+              <b>协作模式</b>
+              <small id="pairFine">非「普通」时向每轮对话注入对应工作方式的系统约束（参考 pair.ts 的模式语义）。</small>
+            </div>
+            <div class="seg" id="pairSeg">
+              <button data-pair="none" class="is-active">普通</button>
+              <button data-pair="tdd">结对(TDD)</button>
+              <button data-pair="review">评审</button>
+              <button data-pair="mentor">导师</button>
+            </div>
+          </div>
         </div>
 
         <div class="settings-card">
@@ -700,6 +724,31 @@
           </div>
           <button class="btn primary" id="agentCreate">创建 Agent</button>
           <p class="fine" id="agentFine"></p>
+        </div>
+      </div>
+
+      <!-- 体检（Doctor 自检 + MetaHarness 配置评分，参考 claude-flow doctor.ts HealthCheck 模式） -->
+      <div class="settings-pane" id="paneDoctor" hidden>
+        <div class="sp-head">
+          <h3>体检</h3>
+          <p>十项本地环境自检与 API 配置评分；不可达的检查项会标记跳过而不是失败。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="sp-row-main">
+              <b>环境自检</b>
+              <small id="doctorFine">进入本页自动体检一次，结果在本次会话内缓存。</small>
+            </div>
+            <button class="btn ghost" id="doctorRerun" type="button">重新体检</button>
+          </div>
+          <div class="doctor-list" id="doctorList"><div class="doctor-item">等待体检…</div></div>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">MetaHarness 配置评分</div>
+          <div class="doctor-list" id="doctorScores"><div class="doctor-item">等待体检…</div></div>
+          <p class="fine">对每个 API 配置打分（0-100）：baseUrl 合法 40 · 模型已选 20 · 密钥已保管 20 · 名称非默认 10 · 上次探活成功 10；低于 60 分黄色警示。</p>
         </div>
       </div>
 

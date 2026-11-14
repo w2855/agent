@@ -1204,6 +1204,35 @@ function projectPromptText() {
   return lines.join('\n');
 }
 
+/* ───────── 协作模式（Pair，参考 pair.ts 的模式语义表） ─────────
+   四态：普通 / 结对(TDD) / 评审 / 导师；非「普通」时向每轮对话注入系统约束。
+   持久化 localStorage dsh.pairMode；文案集中在 PAIR_PROMPTS 常量表（探针直接断言）。 */
+const PAIR_MODE_LABEL = { none: '普通', tdd: '结对(TDD)', review: '评审', mentor: '导师' };
+const PAIR_PROMPTS = {
+  tdd: '协作模式「结对(TDD)」约束：先写测试再实现（红-绿-重构）。每个功能点先给出会失败的测试用例，再写最小实现让它通过；涉及代码变更时每轮都要运行测试并报告结果；需求不明确时先与用户确认验收标准再动手。',
+  review: '协作模式「评审」约束：只读分析，不要修改任何文件、不要执行写操作类工具。对代码给出结构化评审意见（问题 / 风险 / 建议 / 优先级），结论必须引用具体文件与位置并给出依据；确需改动时只列出建议，等用户确认。',
+  mentor: '协作模式「导师」约束：解释式回答。每个结论附教学说明（为什么、背后的原理、常见误区），由浅入深；在结尾给出可操作的练习建议；执行影响较大的操作前先向用户解释并获得确认。',
+};
+let pairMode = readStorage('dsh.pairMode', 'none');
+if (!PAIR_MODE_LABEL[pairMode]) pairMode = 'none';
+
+function setPairMode(mode) {
+  if (!PAIR_MODE_LABEL[mode]) return;
+  pairMode = mode;
+  writeStorage('dsh.pairMode', mode);
+  syncPairUi();
+  toast(mode === 'none' ? '已切回普通模式' : `协作模式：${PAIR_MODE_LABEL[mode]}，约束将注入每一轮对话`);
+}
+
+/* 同步两处 UI：设置页 seg 选中态 + composer 左下徽标（普通时隐藏） */
+function syncPairUi() {
+  $$('#pairSeg button').forEach((b) => b.classList.toggle('is-active', b.dataset.pair === pairMode));
+  const badge = $('#pairBadge');
+  if (!badge) return;
+  badge.hidden = pairMode === 'none';
+  badge.textContent = PAIR_MODE_LABEL[pairMode];
+}
+
 function buildApiMessages(session, currentText, draft, skipUser) {
   const out = [{
     role: 'system',
@@ -1225,6 +1254,10 @@ function buildApiMessages(session, currentText, draft, skipUser) {
   // 个性化提示词：用户自定义指令，每轮注入、优先遵守
   if (state.customPrompt?.trim()) {
     out.push({ role: 'system', content: `用户的个性化提示词（用户自定义，优先遵守）：\n${state.customPrompt.trim()}` });
+  }
+  // 协作模式：非「普通」时注入对应工作方式的系统约束（PAIR_PROMPTS 常量表）
+  if (pairMode !== 'none' && PAIR_PROMPTS[pairMode]) {
+    out.push({ role: 'system', content: PAIR_PROMPTS[pairMode] });
   }
   // 会话目标：/goal 设置，每轮注入
   if (session.goal?.trim()) {
@@ -1278,6 +1311,42 @@ function sessionContextChars(session) {
     if (text) used += text.length;
   }
   return used;
+}
+
+/* ───────── 状态条（Statusline，顶栏常驻一行） ─────────
+   格式：模型 X · 智能体 N 活动 · 上下文 P% · 本轮 T tok / D s。
+   事件驱动：runtime / model 事件到达时 150ms 去抖刷新（updateStatusline 供探针直接调用断言）。 */
+let statuslineTimer = null;
+
+/* 最后一条带结束信息的助手消息（本轮 token 与耗时的数据源） */
+function lastAssistantMsg() {
+  const msgs = active()?.messages || [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'assistant') return msgs[i];
+  }
+  return null;
+}
+
+function formatStatusline() {
+  const s = active();
+  const agents = (state.agents || []).filter((a) => a.status === 'active').length;
+  const ctxPct = s ? Math.min(100, Math.round((sessionContextChars(s) / LIMITS.maxContextChars) * 100)) : 0;
+  const msg = lastAssistantMsg();
+  const u = msg?.usage || {};
+  const tok = u.total_tokens ?? u.totalTokens
+    ?? ((u.prompt_tokens ?? u.inputTokens ?? 0) + (u.completion_tokens ?? u.outputTokens ?? 0));
+  const durMs = msg?.startedAt && msg?.finishedAt ? Math.max(0, msg.finishedAt - msg.startedAt) : 0;
+  return `模型 ${currentModel()} · 智能体 ${agents} 活动 · 上下文 ${ctxPct}% · 本轮 ${Number(tok || 0).toLocaleString('en-US')} tok / ${(durMs / 1000).toFixed(1)}s`;
+}
+
+function updateStatusline() {
+  const el = $('#statusline');
+  if (el) el.textContent = formatStatusline();
+}
+
+function scheduleStatusline() {
+  if (statuslineTimer) return;
+  statuslineTimer = setTimeout(() => { statuslineTimer = null; updateStatusline(); }, 150);
 }
 
 /* ───────── 回合 ───────── */
@@ -3192,8 +3261,11 @@ const todoUi = { editing: -1, armed: -1, armedRef: null, armedTimer: null, dragF
    开启时每次手工修改压一行摘要，下一轮对话请求的 user 消息 apiSuffix 追加后清空 */
 let todoSyncToModel = readStorage('dsh.todoSync', '') === '1';
 const todoSyncLines = [];
-const TODO_STATUS_ORDER = ['pending', 'in_progress', 'completed'];
-const TODO_STATUS_LABEL = { pending: '待办', in_progress: '进行中', completed: '已完成' };
+/* 三态循环 + 独立阻塞态（状态机枚举参考 missions/schemas.ts 的 verifying/blocked）：
+   圆点按 ORDER 循环 pending → in_progress → verifying → completed；
+   blocked 不参与循环，只能通过行内「⛔阻塞 / 解除」按钮设入或解除。 */
+const TODO_STATUS_ORDER = ['pending', 'in_progress', 'verifying', 'completed'];
+const TODO_STATUS_LABEL = { pending: '待办', in_progress: '进行中', verifying: '验证中', completed: '已完成', blocked: '已阻塞' };
 
 const todoCut = (t) => String(t == null ? '' : t).replace(/\s+/g, ' ').trim().slice(0, 24);
 
@@ -3212,12 +3284,15 @@ function todoSyncSuffix() {
 }
 
 function todoRowHtml(t, i) {
-  const st = TODO_STATUS_ORDER.includes(t.status) ? t.status : 'pending';
+  /* blocked 是循环外的独立态：不在 ORDER 里也要原样呈现，其余未知状态回落 pending */
+  const st = TODO_STATUS_ORDER.includes(t.status) || t.status === 'blocked' ? t.status : 'pending';
   const armed = todoUi.armed === i;
+  const blocked = st === 'blocked';
   return `<div class="todo-item is-${st}${armed ? ' is-armed' : ''}" data-idx="${i}" draggable="true">
-    <button class="todo-dot-btn" data-todo-status="${i}" title="点击切换状态（待办 → 进行中 → 已完成）"><i class="todo-dot ${esc(st)}"></i></button>
+    <button class="todo-dot-btn" data-todo-status="${i}" title="点击循环状态（待办 → 进行中 → 验证中 → 已完成）"><i class="todo-dot ${esc(st)}"></i></button>
     <span class="todo-text" data-todo-edit="${i}" title="点击编辑">${esc(String(t.content || ''))}</span>
     <span class="todo-acts">
+      <button class="todo-act todo-block${blocked ? ' is-unblock' : ''}" data-todo-block="${i}" title="${blocked ? '解除阻塞，回到待办' : '标记阻塞（不参与状态循环）'}">${blocked ? '解除' : '⛔'}</button>
       <button class="todo-act" data-todo-edit="${i}" title="编辑">✎</button>
       <button class="todo-act todo-del${armed ? ' is-armed' : ''}" data-todo-del="${i}" title="删除">${armed ? '确认?' : '✕'}</button>
     </span>
@@ -3327,6 +3402,22 @@ function cycleTodoStatus(i) {
   if (dot) { dot.classList.add('is-bounce'); setTimeout(() => dot.classList.remove('is-bounce'), 340); }
 }
 
+/* 阻塞切换：blocked 是循环外独立态——设入前记住原状态，解除时回到原状态（默认待办） */
+function toggleTodoBlocked(i) {
+  const tasks = active()?.todoTasks;
+  if (!Array.isArray(tasks) || !tasks[i]) return;
+  const cur = tasks[i];
+  if (cur.status === 'blocked') {
+    tasks[i] = { ...cur, status: cur.prevStatus && TODO_STATUS_ORDER.includes(cur.prevStatus) ? cur.prevStatus : 'pending' };
+    noteTodoChange(`「${todoCut(cur.content)}」解除阻塞 → ${TODO_STATUS_LABEL[tasks[i].status]}`);
+  } else {
+    tasks[i] = { ...cur, prevStatus: TODO_STATUS_ORDER.includes(cur.status) ? cur.status : 'pending', status: 'blocked' };
+    noteTodoChange(`「${todoCut(cur.content)}」标记阻塞`);
+  }
+  saveSessions();
+  renderTodoPanel();
+}
+
 /* 删除：两段确认（3 秒内再点一次），与 session 删除同款交互 */
 function todoDelete(i) {
   const tasks = active()?.todoTasks;
@@ -3358,6 +3449,8 @@ function bindTodoPanel() {
     e.stopPropagation();
     const stBtn = e.target.closest('[data-todo-status]');
     if (stBtn) { cycleTodoStatus(Number(stBtn.dataset.todoStatus)); return; }
+    const blkBtn = e.target.closest('[data-todo-block]');
+    if (blkBtn) { toggleTodoBlocked(Number(blkBtn.dataset.todoBlock)); return; }
     const delBtn = e.target.closest('[data-todo-del]');
     if (delBtn) { todoDelete(Number(delBtn.dataset.todoDel)); return; }
     const editBtn = e.target.closest('[data-todo-edit]');
@@ -3497,6 +3590,7 @@ const SETTINGS_PANES = {
   mcp:        { pane: 'paneMcp',        desc: 'MCP 服务器与外部工具' },
   skills:     { pane: 'paneSkills',     desc: '技能扫描与注入' },
   agents:     { pane: 'paneAgents',     desc: '可委派的子 Agent' },
+  doctor:     { pane: 'paneDoctor',     desc: '环境自检与 API 配置评分' },
   about:      { pane: 'paneAbout',      desc: '版本信息与运行环境' },
 };
 let settingsCategory = 'appearance';
@@ -3524,6 +3618,8 @@ function switchSettingsPane(category) {
     renderSkillsDirs();
     scanSkills();
   }
+  // 体检 pane：进入即跑一次（pane 级缓存，同会话重复进入不再重跑；按钮可强制重跑）
+  if (category === 'doctor') runDoctorChecks(false);
 }
 
 function openSettings(category = settingsCategory || 'appearance') {
@@ -3551,6 +3647,216 @@ function renderAboutSystem() {
   set('#sysElectron', v.electron || '未知');
   set('#sysChrome', v.chrome || '未知');
   set('#sysNode', v.node || '未知');
+}
+
+/* ───────── 设置页：体检 pane（Doctor 自检 + MetaHarness 配置评分） ─────────
+   HealthCheck 模式参考 claude-flow doctor.ts：{name, status: pass/warn/fail, detail, fix?}。
+   环境不可达的检查项标 skip（不算失败），所有 IPC 探测都带 3 秒超时。
+   scoreProfile 是纯函数（探针直接调用断言各分支）；检查结果 pane 级缓存，
+   进入 pane 自动跑一次，重复进入不重跑，「重新体检」按钮强制刷新。 */
+
+const DOCTOR_PROBE_KEY = 'dsh.doctor.probe';
+const DOCTOR_TIMEOUT_MS = 3000;
+let doctorCache = null;
+let doctorRunning = false;
+
+/* IPC 探测统一包一层超时竞速：任何检查都不允许把体检面板卡死 */
+function withTimeout(promise, ms) {
+  return Promise.race([
+    Promise.resolve().then(() => promise).then((v) => ({ done: true, v })),
+    new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), ms)),
+  ]).catch((err) => ({ error: err }));
+}
+
+/* ① localStorage 写读删探测 */
+function doctorCheckStorage() {
+  try {
+    localStorage.setItem(DOCTOR_PROBE_KEY, '1');
+    const ok = localStorage.getItem(DOCTOR_PROBE_KEY) === '1';
+    localStorage.removeItem(DOCTOR_PROBE_KEY);
+    return ok
+      ? { name: '本地存储', status: 'pass', detail: 'localStorage 写 / 读 / 删 探测全部通过' }
+      : { name: '本地存储', status: 'fail', detail: '写入后读回的值不一致', fix: '检查是否处于隐私模式或存储配额已满' };
+  } catch (err) {
+    return { name: '本地存储', status: 'fail', detail: `读写探测失败：${err?.message || err}`, fix: '检查磁盘空间与 WebView 存储策略' };
+  }
+}
+
+/* ② dsh.conn JSON 合法性（空视为首次使用，通过） */
+function doctorCheckConn() {
+  const raw = readStorage('dsh.conn', '');
+  if (!raw) return { name: '连接配置', status: 'pass', detail: 'dsh.conn 尚未写入（首次使用，属正常）' };
+  try {
+    const cfg = JSON.parse(raw);
+    return cfg && typeof cfg === 'object' && !Array.isArray(cfg)
+      ? { name: '连接配置', status: 'pass', detail: `dsh.conn JSON 合法（baseUrl ${String(cfg.baseUrl || '未设置').slice(0, 40)}）` }
+      : { name: '连接配置', status: 'warn', detail: 'dsh.conn 解析结果不是对象', fix: '在「模型与连接」重新保存一次配置即可覆盖' };
+  } catch (err) {
+    return { name: '连接配置', status: 'fail', detail: `dsh.conn JSON 损坏：${err?.message || err}`, fix: '在「模型与连接」重新保存配置即可覆盖修复' };
+  }
+}
+
+/* ③ profiles 掩码一致性：localStorage 不得残留明文 sk- key（掩码 = sk-****） */
+function doctorCheckMasked() {
+  const raw = readStorage(PROFILES_KEY, '');
+  const leaked = raw && /"key"\s*:\s*"sk-(?!\*\*)[^"]*"/.test(raw);
+  if (leaked) {
+    return { name: '密钥掩码', status: 'fail', detail: 'localStorage 里发现疑似明文 sk- 密钥残留', fix: '重启应用触发密钥迁移；必要时在「模型与连接」重存该配置' };
+  }
+  const inconsistent = (state.profiles || []).filter((p) => isMaskedKey(p.key) && p.hasKey !== true);
+  return inconsistent.length
+    ? { name: '密钥掩码', status: 'warn', detail: `${inconsistent.length} 个配置是掩码视图但缺少 hasKey 标记（凭据库可能未接回）`, fix: '打开「模型与连接」触发凭据库回填' }
+    : { name: '密钥掩码', status: 'pass', detail: '无明文密钥残留，掩码视图与 hasKey 标记一致' };
+}
+
+/* ④ 工作目录可达：list_dir 探测，3 秒超时；离线预览 / 未选目录跳过 */
+async function doctorCheckWorkspace() {
+  if (!window.dsh?.tools?.exec || !state.workspace) {
+    return { name: '工作目录', status: 'skip', detail: '离线预览模式或尚未选择工作目录，跳过' };
+  }
+  const r = await withTimeout(window.dsh.tools.exec('list_dir', { path: state.workspace }, { workspace: state.workspace, permission: state.permission, approved: true }), DOCTOR_TIMEOUT_MS);
+  if (r.timeout) return { name: '工作目录', status: 'warn', detail: `3 秒内未响应（${state.workspace}）`, fix: '检查目录所在磁盘是否可访问（网络盘 / 休眠盘）' };
+  if (r.error || r.v?.ok === false) return { name: '工作目录', status: 'fail', detail: `list_dir 探测失败：${r.v?.error || r.error?.message || '未知错误'}`, fix: '在「工具与权限」重新选择工作目录' };
+  return { name: '工作目录', status: 'pass', detail: `${state.workspace} 可达` };
+}
+
+/* ⑤ 会话存储体积（>4MB 警示，>8MB 视为异常膨胀） */
+function doctorCheckSessions() {
+  let size = 0;
+  try { size = JSON.stringify(state.sessions || []).length; } catch { /* 序列化失败按 0 处理 */ }
+  if (size > 8 * 1024 * 1024) {
+    return { name: '会话存储', status: 'fail', detail: `序列化体积 ${Math.round(size / 1024 / 1024)}MB，超过 8MB 硬阈值`, fix: '删除不再需要的会话，或压缩长对话上下文' };
+  }
+  if (size > 4 * 1024 * 1024) {
+    return { name: '会话存储', status: 'warn', detail: `序列化体积约 ${Math.round(size / 1024)}KB，已超过 4MB 警戒线`, fix: '考虑归档或删除旧会话，避免保存变慢' };
+  }
+  return { name: '会话存储', status: 'pass', detail: `序列化体积约 ${Math.round(size / 1024)}KB（阈值 4MB）` };
+}
+
+/* ⑥ 任务清单数据完整性：todoTasks 必须是数组且每项有 content + 合法状态 */
+function doctorCheckTodos() {
+  const tasks = active()?.todoTasks;
+  if (tasks == null) return { name: '任务清单', status: 'pass', detail: '当前会话暂无任务清单（属正常）' };
+  if (!Array.isArray(tasks)) return { name: '任务清单', status: 'fail', detail: `todoTasks 类型异常：${typeof tasks}`, fix: '重开任务面板或新建会话' };
+  const bad = tasks.filter((t) => !t || typeof t.content !== 'string' || !(TODO_STATUS_ORDER.includes(t.status) || t.status === 'blocked'));
+  return bad.length
+    ? { name: '任务清单', status: 'fail', detail: `${bad.length} 条任务结构非法（缺 content 或状态不在枚举内）`, fix: '删除异常行后重建任务' }
+    : { name: '任务清单', status: 'pass', detail: `${tasks.length} 条任务结构完整` };
+}
+
+/* ⑦ runtime 健康：dsh.runtime.system.health（preload 已确认存在），不可用标 skip */
+async function doctorCheckRuntime() {
+  const health = window.dsh?.runtime?.system?.health;
+  if (!health) return { name: 'Runtime 服务', status: 'skip', detail: '当前外壳没有 runtime IPC，跳过' };
+  const r = await withTimeout(health(), DOCTOR_TIMEOUT_MS);
+  if (r.timeout) return { name: 'Runtime 服务', status: 'warn', detail: 'health IPC 3 秒内未响应', fix: '重启应用；持续无响应可查看启动日志' };
+  if (r.error) return { name: 'Runtime 服务', status: 'fail', detail: `health 调用抛错：${r.error.message || r.error}`, fix: '重启应用恢复 runtime 服务' };
+  if (r.v?.ok === false) return { name: 'Runtime 服务', status: 'fail', detail: `Runtime 报告异常：${r.v?.error?.message || '未知错误'}`, fix: '重启应用恢复 runtime 服务' };
+  return { name: 'Runtime 服务', status: 'pass', detail: 'runtime health 响应正常' };
+}
+
+/* ⑧ MCP server 异常状态：status=error 的数量 >0 即警示 */
+async function doctorCheckMcp() {
+  if (!window.dsh?.mcp?.getServers) return { name: 'MCP 服务器', status: 'skip', detail: '当前外壳没有 MCP IPC，跳过' };
+  const r = await withTimeout(window.dsh.mcp.getServers(), DOCTOR_TIMEOUT_MS);
+  if (r.timeout) return { name: 'MCP 服务器', status: 'warn', detail: 'getServers 3 秒内未响应', fix: '检查 MCP 配置里的命令是否卡死' };
+  if (r.error) return { name: 'MCP 服务器', status: 'warn', detail: `状态读取失败：${r.error.message || r.error}`, fix: '在「MCP 服务器」页手动刷新' };
+  const servers = Array.isArray(r.v?.servers) ? r.v.servers : [];
+  const errs = servers.filter((s) => s?.status === 'error');
+  if (!servers.length) return { name: 'MCP 服务器', status: 'pass', detail: '未配置任何 MCP 服务器' };
+  return errs.length
+    ? { name: 'MCP 服务器', status: 'warn', detail: `${errs.length}/${servers.length} 个服务器处于 error 状态（${errs.map((s) => s.id || '?').join('、')}）`, fix: '到「MCP 服务器」页查看错误行内信息并重启' }
+    : { name: 'MCP 服务器', status: 'pass', detail: `${servers.length} 个服务器均无 error 状态` };
+}
+
+/* ⑨ 经验库：lessons.jsonl 仅主进程可读（渲染层无 IPC），诚实跳过而非伪造失败 */
+function doctorCheckLessons() {
+  return { name: '经验库', status: 'skip', detail: 'userData/lessons.jsonl 无渲染层 IPC，本项跳过（不算失败）' };
+}
+
+/* ⑩ 版本 / 平台信息展示行（永远 pass） */
+function doctorCheckVersion() {
+  const v = window.dsh?.versions || {};
+  return { name: '版本 / 平台', status: 'pass', detail: `${window.dsh?.platform || '未知平台'} · Electron ${v.electron || '?'} · Chrome ${v.chrome || '?'} · Node ${v.node || '?'}` };
+}
+
+/** MetaHarness 配置评分（纯函数，探针直接调用）：
+    baseUrl 合法 40 / 模型已选 20 / 密钥已保管 20 / 名称非默认 10 / 上次探活成功 10 = 100。 */
+function scoreProfile(p) {
+  const parts = [];
+  const add = (ok, weight, label) => parts.push({ label, weight, got: ok ? weight : 0 });
+  add(typeof p?.baseUrl === 'string' && /^https?:\/\/\S+$/i.test(p.baseUrl.trim()), 40, 'baseUrl 合法');
+  add(validModel(p?.model), 20, '模型已选');
+  add(p?.hasKey === true || (typeof p?.key === 'string' && p.key !== '' && !isMaskedKey(p.key)), 20, '密钥已保管');
+  add(typeof p?.name === 'string' && p.name.trim() !== '' && p.name.trim() !== '连接', 10, '名称非默认');
+  add(p?.lastProbeOk === true, 10, '上次探活成功');
+  return { score: parts.reduce((sum, x) => sum + x.got, 0), parts };
+}
+
+const DOCTOR_STATUS_ICON = { pass: '✓', warn: '!', fail: '×', skip: '–' };
+
+function doctorRowHtml(c) {
+  return `<div class="doctor-item is-${c.status}">
+    <i class="doctor-ico">${DOCTOR_STATUS_ICON[c.status] || '?'}</i>
+    <span class="doctor-main"><b>${esc(c.name)}</b><small>${esc(c.detail)}</small>${c.fix ? `<small class="doctor-fix">修复建议：${esc(c.fix)}</small>` : ''}</span>
+  </div>`;
+}
+
+/* 评分条渲染：活动配置并入探活结果（c.verified），其余 profile 只能评静态项 */
+function doctorScoreRowHtml(p) {
+  const merged = p.id === state.activeProfileId ? { ...p, lastProbeOk: state.connection?.verified === true } : p;
+  const { score, parts } = scoreProfile(merged);
+  const low = score < 60;
+  return `<div class="doctor-item is-score${low ? ' is-low' : ''}">
+    <span class="doctor-main"><b>${esc(p.name || p.id)}</b><small>${parts.map((x) => `${x.label} ${x.got}/${x.weight}`).join(' · ')}</small></span>
+    <span class="doctor-score"><i class="doctor-bar"><i class="doctor-bar-fill" style="width:${Math.min(100, score)}%"></i></i><b>${score}</b></span>
+  </div>`;
+}
+
+/* 体检执行：force=true 由「重新体检」按钮触发；结果 pane 级缓存 */
+async function runDoctorChecks(force) {
+  if (doctorRunning) return;
+  if (doctorCache && !force) { renderDoctorPane(); return; }
+  doctorRunning = true;
+  const list = $('#doctorList');
+  if (list) list.innerHTML = '<div class="doctor-item">体检中…</div>';
+  const checks = [
+    doctorCheckStorage(),
+    doctorCheckConn(),
+    doctorCheckMasked(),
+    await doctorCheckWorkspace(),
+    doctorCheckSessions(),
+    doctorCheckTodos(),
+    await doctorCheckRuntime(),
+    await doctorCheckMcp(),
+    doctorCheckLessons(),
+    doctorCheckVersion(),
+  ];
+  doctorCache = { checks, at: Date.now() };
+  doctorRunning = false;
+  renderDoctorPane();
+}
+
+function renderDoctorPane() {
+  const list = $('#doctorList');
+  if (list) {
+    list.innerHTML = doctorCache
+      ? doctorCache.checks.map(doctorRowHtml).join('')
+      : '<div class="doctor-item">尚未体检，点击「重新体检」开始</div>';
+  }
+  const scores = $('#doctorScores');
+  if (scores) {
+    const profiles = state.profiles?.length ? state.profiles : [];
+    scores.innerHTML = profiles.length
+      ? profiles.map(doctorScoreRowHtml).join('')
+      : '<div class="doctor-item">还没有 API 配置，到「模型与连接」添加后这里会评分</div>';
+  }
+  const fine = $('#doctorFine');
+  if (fine && doctorCache) {
+    const bad = doctorCache.checks.filter((c) => c.status === 'fail').length;
+    const warn = doctorCache.checks.filter((c) => c.status === 'warn').length;
+    fine.textContent = `${new Date(doctorCache.at).toLocaleTimeString('zh-CN')} 完成：${bad} 失败 · ${warn} 警示 · ${doctorCache.checks.length - bad - warn} 正常/跳过`;
+  }
 }
 
 /* ───────── 设置页：MCP 服务器 pane ─────────
@@ -6007,6 +6313,16 @@ function bind() {
     const b = e.target.closest('button');
     if (b) applyTheme(b.dataset.theme);
   });
+
+  /* 协作模式 seg（对话 pane）+ composer 左下徽标（点击回对话 pane） */
+  $('#pairSeg').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (b) setPairMode(b.dataset.pair);
+  });
+  $('#pairBadge').addEventListener('click', () => openSettings('chat'));
+
+  /* 体检 pane：手动强制重跑 */
+  $('#doctorRerun').addEventListener('click', () => runDoctorChecks(true));
   $('#accentRow').addEventListener('click', (e) => {
     const b = e.target.closest('.accent');
     if (b) applyAccent(b.dataset.accent);
@@ -6348,6 +6664,7 @@ function boot() {
   renderSessions();
   renderHeader();
   renderHost();
+  syncPairUi(); // 协作模式徽标按 localStorage 状态复位
   renderChat();
   bind();
   restoreDraft(); // 启动时恢复当前会话的未发送草稿
@@ -6355,6 +6672,7 @@ function boot() {
   updateSendState();
   renderAttachments();
   renderToolsSetting();
+  updateStatusline(); // 状态条首帧：模型 / 智能体 / 上下文占用即刻可见
 
   // 启动即加载工具定义并解析默认工作目录，API 面板不再停在「加载中…」
   if (window.dsh?.tools) {
@@ -6364,6 +6682,7 @@ function boot() {
   window.dsh?.model?.onEvent((e) => {
     // 严格按 id 路由：旧回合迟到的 done 绝不能落到刚发起的新回合上
     if (!e || !e.id) return;
+    scheduleStatusline(); // 模型事件（usage/done 等）驱动状态条 150ms 去抖刷新
     const handler = state.turns.get(e.id);
     if (handler) handler.onEvent(e);
   });
@@ -6371,6 +6690,8 @@ function boot() {
   // 运行检查器实时跟随当前 Run 的事件
   window.dsh?.runtime?.events?.onEvent?.((event) => {
     handleDelegationApprovalEvent(event);
+    // 状态条：runtime 事件（step.*/tool.*/delegation.*）到达时去抖刷新活动数与上下文
+    scheduleStatusline();
     // 架构页实时化：runtime 事件（tool.* / step.* / delegation.* / run.* 等）
     // 触发 150ms 去抖即时刷新（scheduleArchLiveRefresh），轮询降为 3s 兜底
     scheduleArchLiveRefresh(event);

@@ -3052,3 +3052,101 @@ input.tint-range::-webkit-slider-thumb {
 .prose .tok-com { color: var(--tok-com); font-style: italic; }
 .prose .tok-num { color: var(--tok-num); }
 .prose .tok-fn { color: var(--tok-fn); }
+
+/* ───────── 状态条（Statusline）：顶栏下常驻一行，视觉融入顶栏 ───────── */
+.statusline {
+  flex: none;
+  display: flex; justify-content: flex-end; align-items: center;
+  height: 18px; padding: 0 14px 2px;
+  font-size: 10.5px; letter-spacing: 0;
+  color: var(--text-4);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: transparent;
+  user-select: none;
+}
+
+/* ───────── 协作模式徽标（composer 左下，permBtn 旁） ───────── */
+.pair-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 26px; padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
+  font-size: 12px;
+  cursor: pointer;
+}
+.pair-badge:hover { background: color-mix(in srgb, var(--warn) 18%, transparent); }
+
+/* ───────── 体检 pane（Doctor） ───────── */
+.doctor-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.doctor-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 8px 11px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--fill) 60%, transparent);
+  animation: doctorIn 180ms var(--ease-lively, ease) both;
+}
+.doctor-item:nth-child(2) { animation-delay: 20ms; }
+.doctor-item:nth-child(3) { animation-delay: 40ms; }
+.doctor-item:nth-child(4) { animation-delay: 60ms; }
+.doctor-item:nth-child(5) { animation-delay: 80ms; }
+.doctor-item:nth-child(6) { animation-delay: 100ms; }
+.doctor-item:nth-child(7) { animation-delay: 120ms; }
+.doctor-item:nth-child(8) { animation-delay: 140ms; }
+.doctor-item:nth-child(9) { animation-delay: 160ms; }
+.doctor-item:nth-child(10) { animation-delay: 180ms; }
+@keyframes doctorIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+/* pass 绿勾 / warn 黄! / fail 红× / skip 灰–（差异化：形状+颜色双通道） */
+.doctor-ico {
+  flex: none; width: 20px; height: 20px;
+  display: grid; place-items: center;
+  border-radius: 999px;
+  font-style: normal; font-size: 12px; font-weight: 700;
+}
+.doctor-item.is-pass .doctor-ico { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.doctor-item.is-warn .doctor-ico { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); animation: doctorPulse 1.6s ease-in-out infinite; }
+.doctor-item.is-fail .doctor-ico { color: var(--bad); background: color-mix(in srgb, var(--bad) 16%, transparent); animation: doctorPulse 1.1s ease-in-out infinite; }
+.doctor-item.is-skip .doctor-ico { color: var(--text-4); background: var(--fill); }
+@keyframes doctorPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+}
+.doctor-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.doctor-main b { font-size: 13px; color: var(--text-1); }
+.doctor-main small { font-size: 11.5px; color: var(--text-3); }
+.doctor-main small.doctor-fix { color: var(--warn); }
+
+/* MetaHarness 评分条 */
+.doctor-item.is-score { align-items: center; }
+.doctor-score { flex: none; display: flex; align-items: center; gap: 8px; }
+.doctor-score b { font-size: 13px; min-width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+.doctor-bar {
+  width: 90px; height: 6px; border-radius: 999px;
+  background: var(--fill);
+  display: block; overflow: hidden;
+}
+.doctor-bar-fill {
+  display: block; height: 100%; border-radius: 999px;
+  background: var(--ok);
+  transition: width 260ms var(--ease-lively, ease);
+}
+.doctor-item.is-low .doctor-bar-fill { background: var(--warn); }
+.doctor-item.is-low .doctor-score b { color: var(--warn); }
+
+/* 任务清单扩展态圆点：verifying 琥珀 / blocked 红（沿用 todo-dot 配色体系） */
+.todo-dot.verifying { background: var(--warn); }
+.todo-dot.blocked { background: var(--bad); animation: pulse 1.2s ease-in-out infinite; }
+.todo-item.is-blocked .todo-text { color: var(--bad); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bad) 55%, transparent); }
+.todo-act.todo-block { color: var(--bad); }
+.todo-act.todo-block.is-unblock { color: var(--ok); }
+
+/* reduced-motion 兜底：状态条 / 体检 / 阻塞圆点的全部动效一并关闭 */
+@media (prefers-reduced-motion: reduce) {
+  .doctor-item, .doctor-item.is-warn .doctor-ico, .doctor-item.is-fail .doctor-ico,
+  .todo-dot.blocked { animation: none !important; }
+  .doctor-bar-fill { transition: none; }
+}
