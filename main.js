@@ -14,6 +14,7 @@ const guard = require('./lib/instance-guard');
 const localTools = require('./lib/tools');
 const mcpModule = require('./lib/mcp');
 const skillsModule = require('./lib/skills');
+const backup = require('./lib/backup');
 const runtimeModule = require('./runtime');
 
 // 测试模式（--script/--shot）禁用硬件加速：本机 GPU 驱动间歇性导致渲染进程启动即崩
@@ -376,6 +377,8 @@ app.on('before-quit', () => {
   try { runtimeSvc?.close(); } catch { /* 已关闭 */ }
   // 退出时停掉所有 MCP server（杀整棵进程树，避免遗留子进程）
   try { mcpManager.stopAll(); } catch { /* 尽力停止即可 */ }
+  // 退出前轮换备份经验库与运行时水位（userData/runtime/{lessons.jsonl,runtime.json} → userData/backups，保留 7 份；尽力而为，失败不影响退出）
+  try { backup.rotateBackup([path.join(app.getPath('userData'), 'runtime', 'lessons.jsonl'), path.join(app.getPath('userData'), 'runtime', 'runtime.json')], path.join(app.getPath('userData'), 'backups'), { keep: 7 }); } catch { /* 备份失败不阻塞退出 */ }
   // 托盘先销毁再退出，防止图标残留在任务栏托盘区
   destroyTray();
 });

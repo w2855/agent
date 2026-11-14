@@ -4,9 +4,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const policy = require('./policy');
 const { listManifests } = require('./tool-registry');
+const budgetFile = require('../lib/budget-file');
 
 /* Phase 5 委派约束：深度、环、并发、总量、预算、权限与工具收窄。
    子任务通过 StateStore.createTask({parentTaskId}) 进入同一队列。 */
+/* 预算分两层，正交：
+   第一层（本文件接入的持久总额层，lib/budget-file.js）：跨任务持久总额，
+     budget.json 三窗口滚动（日/周/月），create() 入口先过这道门（硬停/降级），
+     委派创建成功后按子任务预算预扣记账。
+   第二层（既有，computeChildBudget/parentRemaining）：单次父子预算，内存态，
+     决定"这一条委派最多能花多少"，由 executor 在子 Run 运行中逐步校验。
+   入口顺序 = 先第一层总额门，再第二层父子预算，成功后回写第一层记账。 */
 
 const MAX_DEPTH = 2;
 const MAX_ACTIVE_CHILDREN_PER_AGENT = 2;
@@ -89,11 +97,37 @@ function ancestorAgentIds(state, task) {
 }
 
 class DelegationService {
-  constructor({ state, events, workspacePath, now = Date.now } = {}) {
+  constructor({ state, events, workspacePath, budgetPath, now = Date.now } = {}) {
     this.state = state;
     this.events = events;
     this.workspacePath = workspacePath || process.cwd();
     this.now = now;
+    /* 第一层持久预算的 budget.json 路径：调用方可显式覆盖；默认与 state.json
+       同目录（运行时目录内），拿不到（无 state）时为 null → 预算层整体跳过。 */
+    this.budgetPath = budgetPath
+      || (state && state.dir ? path.join(state.dir, 'budget.json') : null);
+  }
+
+  /* 第一层持久预算门：读 budget.json → 滚动过期窗口 → 硬停阶梯判定。
+     返回 { action: 'allow'|'hard-stop'|'fallback', exceededWindows, fallbackModel }。
+     只读文件不写入；任何异常向上抛，由 create() 里的 try/catch 吞掉，
+     保证预算层故障不影响既有事件链与审批逻辑。 */
+  _checkPersistentBudget() {
+    if (!this.budgetPath) return { action: 'allow', exceededWindows: [], fallbackModel: '' };
+    const budget = budgetFile.loadBudget(this.budgetPath);
+    const gate = budgetFile.checkBudget(budget, this.now());
+    return { action: gate.action, exceededWindows: gate.exceededWindows, fallbackModel: budget.fallbackModel || '' };
+  }
+
+  /* 第一层持久预算记账：按本次委派的子任务预算上限预扣 tokens（宁多勿少）。
+     取舍：实际消耗仍以现有 usage 统计为准（finish → mergeChildUsage 并入父 Run
+     usage），持久层不做二次扣减，避免双记账；这里的预扣只用于跨任务总额的
+     硬停/降级判定。去重命中 / 续跑路径不重复记账（首次创建时已按全额预扣）。
+     写失败向上抛，由 create() 里的 try/catch 吞掉。 */
+  _spendPersistentBudget(childBudget) {
+    if (!this.budgetPath) return;
+    const tokens = Math.max(0, Number(childBudget && childBudget.maxTokens) || 0);
+    if (tokens > 0) budgetFile.spend(this.budgetPath, { tokens }, this.now());
   }
 
   /* 自动创建子 Agent：名称取 objective 前缀 + 时间戳后缀，权限继承父 Run 生效档位，模型由主 Agent 指定 */
@@ -150,9 +184,31 @@ class DelegationService {
     if (objective.length > 4000) return this._reject(parentRun, targetAgentId, 'OBJECTIVE_TOO_LONG', 'objective 超过 4000 字符');
     if (!expectedOutput) return this._reject(parentRun, targetAgentId, 'EXPECTED_OUTPUT_REQUIRED', '缺少 expectedOutput');
 
+    /* ── 第一层：持久成本预算总额门（跨任务，budget.json 日/周/月三窗口滚动）──
+       在任何状态变更（含自动创建子 Agent）之前判定；超限 + hardStop → 走现有
+       拒绝返回风格直接拒绝；超限 + 配置 fallbackModel → 记录降级意图，在模型
+       可替换处生效（自动创建 = 模型本可自由指定；既有目标 = 委派记录的 model
+       字段就是子运行实际使用的模型，agent-runner 读取它）。预算层任何异常都在
+       这里吞掉，不影响主链路。 */
+    let budgetFallback = '';      /* 非空 = 本次委派模型应降级为该值（已通过合法性校验） */
+    let budgetExceededDesc = '';  /* 超限窗口描述，拒绝 reason / warning 文案复用 */
+    try {
+      const gate = this._checkPersistentBudget();
+      if (gate.action === 'hard-stop') {
+        return this._reject(parentRun, targetAgentId, 'BUDGET_HARD_STOP',
+          `持久成本预算超限（${gate.exceededWindows.join('、') || '未知'} 窗口），已拒绝新建委派`);
+      }
+      if (gate.action === 'fallback') {
+        budgetExceededDesc = gate.exceededWindows.join('、') || '未知';
+        /* 模型名合法 → 可替换；非法 → 保持原模型，仅在结果/事件附 warning（不可替换分支） */
+        if (budgetFile.MODEL_RE.test(gate.fallbackModel)) budgetFallback = gate.fallbackModel;
+      }
+    } catch { /* 预算层故障：放行，不影响委派主链路 */ }
+
     let autoCreated = null;
     if (autoCreate) {
-      const requestedModel = String(args.model || '').trim().slice(0, 128);
+      /* 持久预算降级时直接用 fallbackModel：新建子 Agent 的模型本来就由本次委派指定 → 可替换 */
+      const requestedModel = budgetFallback || String(args.model || '').trim().slice(0, 128);
       try {
         autoCreated = this._autoCreateAgent(parentRun, { objective, model: requestedModel });
       } catch (err) {
@@ -288,6 +344,14 @@ class DelegationService {
     const parentProfile = ['full', 'ask', 'readonly'].includes(parentRun.effectiveProfile) ? parentRun.effectiveProfile : 'ask';
     const effectiveProfile = policy.stricterProfile(parentProfile, targetVersion.permissionProfileId);
 
+    /* 持久预算降级（在第二层父子预算通过后仍生效）：委派记录的 model 字段就是
+       子运行实际使用的模型（agent-runner 读取 delegation.model），在此替换即可，
+       不改动目标 Agent 版本本身；fallback 名非法（不可替换）时保持原模型。 */
+    const childModel = budgetFallback || (targetVersion.model?.model || parentRun.model);
+    const budgetWarning = budgetFallback
+      ? `持久成本预算超限（${budgetExceededDesc} 窗口），委派模型已降级为 ${budgetFallback}`
+      : (budgetExceededDesc ? `持久成本预算超限（${budgetExceededDesc} 窗口），fallback 模型名非法，保持原模型` : '');
+
     const rootTaskId = parentTask.rootTaskId || parentTask.id;
     let created;
     try {
@@ -297,7 +361,7 @@ class DelegationService {
         agentId: targetAgentId,
         agentVersion: targetVersion.version,
         providerId: parentRun.providerId,
-        model: targetVersion.model?.model || parentRun.model,
+        model: childModel,
         budget: budgetResult.budget,
         workspace,
         parentTaskId: parentTask.id,
@@ -344,10 +408,17 @@ class DelegationService {
     this.state.updateDelegation(record.id, {
       requestedByToolCallId: toolCall.id,
       providerId: parentRun.providerId,
-      model: targetVersion.model?.model || parentRun.model,
+      model: childModel,
       contextRefPaths: refs.map((r) => r.path),
       autoCreated: Boolean(autoCreated),
+      ...(budgetWarning ? { budgetWarning } : {}),
     });
+
+    /* ── 第一层记账：两层预算都通过、委派已实际创建 → 按子任务预算预扣 tokens
+       （宁多勿少；实际消耗以现有 usage 统计为准，持久层不二次扣减）。
+       去重命中 / 续跑路径在上面已提前返回，不会走到这里，不重复记账。
+       记账失败只吞掉，不影响已创建的委派。 */
+    try { this._spendPersistentBudget(budgetResult.budget); } catch { /* 记账失败不影响委派创建 */ }
 
     this.events.append({
       type: 'delegation.requested',
@@ -366,6 +437,7 @@ class DelegationService {
         effectiveProfile,
         contextRefCount: refs.length,
         autoCreated: Boolean(autoCreated),
+        ...(budgetWarning ? { budgetWarning } : {}),
       },
     });
     return {
@@ -378,6 +450,7 @@ class DelegationService {
       targetVersion,
       parentAgent: parentAgent?.agent || null,
       autoCreated: Boolean(autoCreated),
+      ...(budgetWarning ? { budgetWarning } : {}),
     };
   }
 
