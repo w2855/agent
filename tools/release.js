@@ -6,8 +6,9 @@
  *   node tools/release.js                     预检 + 构建 + 后验
  *   node tools/release.js --skip-precheck     跳过预检直接构建（工作区有进行中改动时用）
  *   node tools/release.js --bump patch        升版本号 patch|minor|major（只改版本，不构建）
+ *   node tools/release.js --verify            只校验 release/ 字节与 manifest.json 是否一致（不构建）
  *
- * 退出码: 0 成功 / 1 用法或内部错误 / 2 预检失败 / 3 构建失败(含超时) / 4 后验失败
+ * 退出码: 0 成功 / 1 用法或内部错误 / 2 预检失败 / 3 构建失败(含超时) / 4 后验失败(含发版字节校验)
  *
  * 固化的坑（详见 tools/RELEASE.md）:
  *   坑1: node_modules 缺失时 ^45.3.1 版本范围会让 electron-builder 报错
@@ -27,6 +28,7 @@
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const vr = require('../lib/verify-release'); // 发版字节校验（ruflo verify 模式）
 
 const ROOT = path.resolve(__dirname, '..');
 const RELEASE_DIR = path.join(ROOT, 'release');
@@ -59,10 +61,11 @@ function fmtBytes(n) { return `${n.toLocaleString('en-US')} 字节 (${(n / 1024 
 
 // ———————————————————————————— 参数解析 ————————————————————————————
 function parseArgs(argv) {
-  const opts = { skipPrecheck: false, bump: null };
+  const opts = { skipPrecheck: false, bump: null, verify: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--skip-precheck') { opts.skipPrecheck = true; continue; }
+    if (a === '--verify') { opts.verify = true; continue; }
     if (a === '--bump' || a.startsWith('--bump=')) {
       const val = a.includes('=') ? a.slice('--bump='.length) : argv[++i];
       if (!['patch', 'minor', 'major'].includes(val)) {
@@ -71,7 +74,7 @@ function parseArgs(argv) {
       opts.bump = val;
       continue;
     }
-    die(EXIT_USAGE, `未知参数: ${a}\n用法: node tools/release.js [--skip-precheck] [--bump patch|minor|major]`);
+    die(EXIT_USAGE, `未知参数: ${a}\n用法: node tools/release.js [--skip-precheck] [--bump patch|minor|major] [--verify]`);
   }
   return opts;
 }
@@ -266,6 +269,15 @@ async function main() {
   // --bump: 独立模式，只升版本号不构建
   if (opts.bump) { bumpVersion(opts.bump); process.exit(EXIT_OK); }
 
+  // --verify: 独立模式，只做发版字节校验不构建（对齐 ruflo verify: 安装字节与清单一致才放行）
+  if (opts.verify) {
+    log(`发版字节校验: ${RELEASE_DIR}`);
+    const result = await vr.verifyRelease(RELEASE_DIR);
+    for (const line of vr.formatVerifyReport(result)) console.log(`[release] ${line}`);
+    if (!result.ok) die(EXIT_POSTCHECK, '发版字节校验未通过（见上方报告）');
+    process.exit(EXIT_OK);
+  }
+
   const pkg = JSON.parse(fs.readFileSync(PKG_PATH, 'utf8'));
   const version = pkg.version;
   log(`DSH Desktop 打包流水线 | 目标版本 ${version} | node ${process.version} | ${process.platform}`);
@@ -319,7 +331,20 @@ async function main() {
   }
   for (const other of post.others) warn(`release/ 下还有其他 exe: ${other}（可能是历史产物）`);
   console.log('[release] ==============================================\n');
-  log(`完成: release/DSH-Desktop-${version}.exe 构建成功`);
+
+  // 4) 发版字节校验（ruflo verify 语义）: 构建成功后自动生成 sha256 清单并逐文件复核，
+  //    防止发版产物在打包完成到分发之间被篡改或截断。
+  log('发版字节校验: 生成 manifest.json 并逐文件复核 sha256 ...');
+  const built = await vr.buildManifest(RELEASE_DIR, post.path);
+  if (!built.ok) die(EXIT_POSTCHECK, `发版字节校验清单生成失败: ${built.reason}`);
+  log(`清单已写入: ${built.manifestPath}（共 ${built.count} 个文件）`);
+  const verified = await vr.verifyRelease(RELEASE_DIR, built.manifestPath);
+  for (const line of vr.formatVerifyReport(verified)) console.log(`[release] ${line}`);
+  if (!verified.ok) {
+    die(EXIT_POSTCHECK, `发版字节校验失败（${verified.mismatches.length} 项不一致），产物疑似被篡改或损坏`);
+  }
+
+  log(`完成: release/DSH-Desktop-${version}.exe 构建成功（发版字节校验通过）`);
   process.exit(EXIT_OK);
 }
 
