@@ -1,0 +1,69 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   ⏸ 桌宠功能已暂停（用户决定，2026-11-14）。代码完好可随时恢复：见 docs/pet-paused.md。
+   恢复步骤：①主进程接线（createPetWindow/petBridge，约 30 行，参考 docs/pet-paused.md）
+             ②app.js 事件适配器 emitPetEvent（约 15 行）③设置页开关
+             ④关键帧补漏（tools/pet/pet_generate.py，网关配额恢复后）
+             ⑤渲染 35 GIF（tools/pet/pet_render.py 直出模式）
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* 桌宠窗口：透明无边框、置顶，canvas 播放 512×512 帧序列 */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  /* 整窗可拖拽移动；交互元素用 no-drag */
+  -webkit-app-region: drag;
+  user-select: none;
+  cursor: grab;
+}
+body.pressing { cursor: grabbing; }
+
+#petCanvas {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.pet-fallback {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pet-fallback img { max-width: 90%; max-height: 90%; }
+
+/* 右下角迷你操作条（no-drag），静音期淡出 */
+.pet-mini {
+  position: fixed;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 200ms ease;
+  -webkit-app-region: no-drag;
+}
+body:hover .pet-mini { opacity: 1; }
+.pet-mini button {
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(47, 107, 174, .45);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .82);
+  color: #2F6BAE;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.pet-mini button:hover { background: #2F6BAE; color: #fff; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-mini { transition: none; }
+}

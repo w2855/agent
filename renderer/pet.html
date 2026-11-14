@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<!-- ⏸ 桌宠功能已暂停（用户决定，2026-11-14）。代码完好可随时恢复：见 docs/pet-paused.md。
+     恢复步骤：①主进程接线（createPetWindow/petBridge，约 30 行，参考 docs/pet-paused.md）
+     ②app.js 事件适配器 emitPetEvent（约 15 行）③设置页开关
+     ④关键帧补漏（tools/pet/pet_generate.py，网关配额恢复后）
+     ⑤渲染 35 GIF（tools/pet/pet_render.py 直出模式）。 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:;" />
+  <link rel="stylesheet" href="pet.css" />
+  <title>DSH 桌宠</title>
+</head>
+<body>
+  <canvas id="petCanvas" width="512" height="512"></canvas>
+  <div class="pet-fallback" id="petFallback" hidden><img id="petFallbackImg" alt="" /></div>
+  <script src="../assets/pet/final/manifest.js"></script>
+  <script src="pet.js"></script>
+</body>
+</html>
