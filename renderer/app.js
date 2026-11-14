@@ -540,6 +540,10 @@ function openSessionContextMenu(x, y, sid) {
   const top = (y + 6 + h <= window.innerHeight - 10) ? y + 6 : Math.max(10, y - h - 8);
   menu.style.left = left + 'px';
   menu.style.top = top + 'px';
+  // origin-aware：跟随点击点方向（上翻=底部为锚，贴右=右侧为锚）
+  const flippedY = top < y;
+  const flippedX = left > x;
+  menu.style.transformOrigin = (flippedY ? 'bottom' : 'top') + ' ' + (flippedX ? 'right' : 'left');
 }
 
 function renderSessions() {
@@ -629,6 +633,7 @@ function deleteSession(id) {
     return;
   }
   deleteArmed.delete(id);
+  const rowEl = $('#sessions .session[data-id="' + CSS.escape(String(id)) + '"]');
   state.sessions = state.sessions.filter((x) => x.id !== id);
   if (!state.sessions.length) {
     // 全删光时兜底留一个空会话，与启动时的初始状态一致
@@ -642,6 +647,7 @@ function deleteSession(id) {
   pruneMsgStore();
   saveSessions();
   renderSessions();
+  spawnListGhost(rowEl); // 退场幽灵：侧栏列表合拢的同时旧会话行淡出
   if (wasActive) {
     resetComposer();
     restoreDraft();
@@ -2455,6 +2461,8 @@ function runApiTurn(ctx, opts) {
     draft.body = body;
     const liveNode = liveDraftNode(draft);
     if (liveNode) {
+      // 打断处理：重挂时若入场动画还在播，立即取消 —— 流式正文不该边写边飞
+      node.classList.remove('is-enter');
       painter.mount($('.prose', liveNode));
       painter.paint(body);
       if (stickBottom) scrollToBottom();
@@ -3693,6 +3701,23 @@ function animateOut(el, ms = 200) {
   }, ms);
 }
 
+/* 列表项删除的退场幽灵（Enter/Exit 配对）：原件立即离开布局，兄弟元素先合拢；
+   克隆体 fixed 在原位只播淡出 —— 不用 height 动画，不触发二次重排链 */
+function spawnListGhost(el, ms = 160) {
+  if (!el || !el.isConnected) return;
+  const r = el.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  const ghost = el.cloneNode(true);
+  ghost.classList.add('list-exit-ghost');
+  ghost.classList.remove('is-enter', 'is-new', 'is-dragging');
+  ghost.style.left = r.left + 'px';
+  ghost.style.top = r.top + 'px';
+  ghost.style.width = r.width + 'px';
+  ghost.style.height = r.height + 'px';
+  document.body.appendChild(ghost);
+  setTimeout(() => ghost.remove(), ms);
+}
+
 function hideMenus() { $$('.menu').forEach((m) => animateOut(m, 130)); }
 
 /* ───────── 任务清单面板（右上角，可直接编辑） ───────── */
@@ -3876,10 +3901,12 @@ function todoDelete(i) {
   clearTimeout(todoUi.armedTimer);
   todoUi.armed = -1;
   todoUi.armedRef = null;
+  const rowEl = $('#todoPanelBody .todo-item[data-idx="' + i + '"]');
   const removed = tasks.splice(i, 1)[0];
   noteTodoChange(`删除任务「${todoCut(removed?.content)}」`);
   saveSessions();
   renderTodoPanel();
+  spawnListGhost(rowEl); // 退场幽灵：兄弟行合拢的同时旧行淡出
 }
 
 /* 面板事件全部走 #todoPanelBody 委托（列表 innerHTML 重建不重复注册） */
@@ -3983,6 +4010,10 @@ function openMenu(id, anchor) {
     ? r.bottom + 7 : Math.max(10, r.top - h - 14);
   menu.style.left = left + 'px';
   menu.style.top = top + 'px';
+  // origin-aware：按锚点相对方向写入 transform-origin（从锚点长出来，而不是中心）
+  const flippedY = top < r.bottom; // 上翻（锚点下方放不下）
+  const flippedX = left > r.left;  // 水平被夹持，右缘对齐
+  menu.style.transformOrigin = (flippedY ? 'bottom' : 'top') + ' ' + (flippedX ? 'right' : 'left');
 }
 
 function openSheet(id) {

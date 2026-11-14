@@ -1,0 +1,352 @@
+/* ═══════════════════════════════════════════════════════════════
+   Motion System · Emil 动画方法论重做（2026-11-14）
+   本文件由 tools/patches/apply-anim.py 追加到 styles.css 末尾，
+   并删除 styles.css 中全部旧动画段 —— 最终以本文件为唯一动效事实源。
+
+   设计决策（对应 review-animations 十条军规）：
+   1. 曲线三体系，不再一条弹簧全场景混用：
+      - 进场/微交互 = --ease-out-strong（cubic-bezier(.23,1,.32,1)，强 ease-out）
+        —— 旧 --ease-lively 的过冲弹簧 (.22,1.15) 从全部入场中移除：
+           弹簧的回弹只保留给一次性游戏化反馈（todoPop 上限 1.15）。
+      - 屏内移动/布局重排 = --ease-inout-strong（cubic-bezier(.77,0,.175,1)）
+      - 退场 = --ease-exit（cubic-bezier(.4,0,1,1)，收束不弹跳）
+   2. 时长三档：--dur-fast 130 / --dur-base 200 / --dur-slow 280。
+      例外（都有记录）：退场时长与 app.js animateOut 的毫秒常量一一对应
+      （菜单130 / scrim170 / sheet190 / todo面板150 / inspector·arch·settings 200~220），
+      SVG 架构图线绘制为说明性动效（explanation，允许 >300ms）。
+   3. 高频面一律减负：消息/工具行入场 420ms→200ms 且去弹簧；
+      列表行 hover 位移（translateX/Y lifts）全部删除，只留底色反馈；
+      主按钮 hover 扫光（btnSheen）删除 —— 功能按钮上的装饰性 hover 动效。
+   4. 一容器一次入场：msg 入场时 summary 不再二次延迟入场；
+      架构页整体 fade，画布/侧栏不再三层叠加入场。
+   5. toast 用 transition 不用 keyframes（可打断、可重定向）。
+   6. 状态循环收敛：17 个循环 keyframes → 6 个（pulse/softPulse/haloPulse/
+      archAura/spin/blink/thinkWave/toolScan/float），盒阴影环统一 haloPulse。
+   7. reduced-motion：全局急停 + 关键循环逐元素钉静态（保留终态可读）。
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── A. 动效令牌（唯一事实源） ─────────────────────────────── */
+:root {
+  /* 曲线 */
+  --ease-out-strong: cubic-bezier(.23, 1, .32, 1);     /* 进场 / 微交互 / 一切默认 */
+  --ease-inout-strong: cubic-bezier(.77, 0, .175, 1);  /* 屏内移动：侧栏收展 / 面板让位 */
+  --ease-exit: cubic-bezier(.4, 0, 1, 1);              /* 退场：收束，不弹跳 */
+  /* 时长三档 */
+  --dur-fast: 130ms;   /* 微交互：菜单 / 按压 / 焦点 */
+  --dur-base: 200ms;   /* 常规：行 / 卡 / 面板 */
+  --dur-slow: 280ms;   /* 大面：sheet / 全屏页 / 图节点 */
+  /* 兼容别名：散落在未迁移规则里的旧令牌引用不炸，语义收敛到新曲线
+     （旧弹簧 .22,1.15 的过冲全部消失 —— 别名指向强 ease-out） */
+  --ease-lively: var(--ease-out-strong);
+  --ease-spring: var(--ease-out-strong);
+  --ease-out-soft: var(--ease-out-strong);
+}
+
+/* ── B. 通用 keyframes ─────────────────────────────────────── */
+/* fade：遮罩 / 全屏页底 —— 纯透明度 */
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+/* rowIn：列表行 / 消息 / 工具行统一入场语言 —— 6px 上浮，200ms 强 ease-out
+   （替代旧 rise / msgIn / toolIn 三套不一致的行入场） */
+@keyframes rowIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* cardIn：卡片入场（审批卡 / 技能展开块 / 委派审批）—— 更小位移 + 微缩放 */
+@keyframes cardIn { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
+/* listExit：列表项删除退场幽灵（JS spawnListGhost 配套）——
+   原件立即离开布局让兄弟合拢，克隆体只做 160ms 收束淡出（Enter/Exit 配对） */
+@keyframes listExit { to { opacity: 0; transform: scale(.97); } }
+
+/* ── C. 对话流 ─────────────────────────────────────────────── */
+/* 消息入场：200ms（旧 420ms 弹簧），G5 并行区只动这一条声明 */
+.msg.is-enter { animation: rowIn var(--dur-base) var(--ease-out-strong) both; }
+/* 一容器一次入场：summary 随 msg 整体出现，删除旧的二次延迟入场（summaryIn） */
+/* 工具行入场：与消息同一语言（旧 toolIn 360ms 弹簧 + 左滑） */
+.tool.is-enter { animation: rowIn var(--dur-base) var(--ease-out-strong) both; }
+/* 基础 .tool / .approval / .retry / .queue / .tool-detail 的旧入场已删除：
+   innerHTML 重建（切会话）会整批重放 base 动画造成闪烁；
+   入场一律由 is-enter / 容器入场承载 */
+/* 审批卡待决提示：伪元素静态光环 + 透明度脉冲（盒阴影本身不再逐帧重绘） */
+.approval { position: relative; }
+.approval::before {
+  content: '';
+  position: absolute; inset: -1px;
+  border-radius: inherit;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 13%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  animation: approvalGlow 3.2s ease-in-out infinite;
+}
+@keyframes approvalGlow { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+/* 列表行 hover：只留底色，位移 gimmick 删除（高频面 + 功能数据不为你而动） */
+.task-item { transition: background var(--dur-fast) ease; border-radius: 7px; }
+.task-item:hover { background: var(--fill); }
+.file { transition: background var(--dur-fast) ease; }
+/* 状态点心跳（用途：连接/运行状态指示；保留） */
+.conn.live .dot { animation: pulse 1.8s ease-in-out infinite; }
+
+/* ── D. 浮层：sheet / 菜单 / inspector / toast / 查找条 ────── */
+/* 弹窗：中心缩放（模态豁免 origin-aware），强 ease-out；scale .96 起，不从 0 出现 */
+.sheet { animation: sheetIn var(--dur-slow) var(--ease-out-strong) both; }
+@keyframes sheetIn {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(.96); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes sheetOut {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -48.5%) scale(.97); }
+}
+/* 遮罩：170ms 与 app.js animateOut(scrim, 170) 对齐 */
+.scrim { animation: fade 170ms ease both; }
+/* 菜单：高频面 130ms + origin-aware（transform-origin 由 openMenu 按锚点方向写入；
+   以下为 JS 未生效时的静态兜底：默认从左上长出） */
+.menu {
+  animation: menuIn var(--dur-fast) var(--ease-out-strong);
+  transform-origin: top left;
+}
+@keyframes menuIn { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes menuOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(.97); } }
+/* 检查器：右侧滑入（旧 320ms→200ms，位移 24→18px） */
+.inspector:not([hidden]) { animation: inspectorIn var(--dur-base) var(--ease-out-strong) both; }
+@keyframes inspectorIn { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
+@keyframes inspectorOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(18px); } }
+/* inspector 让位：布局重排类正当例外（内容跟手），曲线统一 */
+.chat, .composer-area { transition: margin-right 260ms var(--ease-inout-strong); }
+/* toast：transition 而非 keyframes —— 快速连发可打断重定向（Sonner 模式）；
+   进出同轴：从底部升起、向底部沉回（spatial consistency） */
+.toast {
+  transition: opacity 180ms ease, transform 200ms var(--ease-out-strong);
+}
+/* 任务清单面板：顶部下拉抽屉（旧的 todoIn 200ms → 130ms 高频面降档） */
+.menu.todo-panel { animation: todoIn var(--dur-fast) var(--ease-out-strong) both; }
+.menu.todo-panel.is-closing { animation: todoOut 150ms var(--ease-exit) both; }
+@keyframes todoIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@keyframes todoOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px); } }
+/* 会话内查找条 */
+.find-bar { animation: findIn var(--dur-fast) var(--ease-out-strong); }
+@keyframes findIn { from { opacity: 0; transform: translateX(-50%) translateY(-4px); } to { opacity: 1; transform: translateX(-50%); } }
+@keyframes findOut { from { opacity: 1; transform: translateX(-50%); } to { opacity: 0; transform: translateX(-50%) translateY(-4px); } }
+/* 选区浮动菜单：上浮 + 微缩放 */
+.selection-menu { animation: selMenuIn var(--dur-fast) var(--ease-out-strong); }
+@keyframes selMenuIn { from { opacity: 0; transform: translateY(2px) scale(.96); } to { opacity: 1; transform: none; } }
+
+/* ── E. 微交互：按压态 / 焦点环 / hover 收敛 ───────────────── */
+/* 按压反馈：scale .97（feedback，合成层零重排；hover 位移 lifts 已全删） */
+.btn:active, button:active:not(.win-btn):not(.no-press), .menu-item:active, .suggest:active, .chip:active {
+  transform: scale(.97);
+}
+/* 可点元素统一微交互过渡：只列明确属性（禁 transition:all） */
+.btn, button, .menu-item, .suggest, .chip, .session, .tool, .profile, .ws-pick, .model-pick {
+  transition: transform var(--dur-fast) var(--ease-out-strong), background var(--dur-fast) ease,
+    color var(--dur-fast) ease, border-color var(--dur-fast) ease, opacity var(--dur-fast) ease;
+}
+.btn { transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease, color var(--dur-fast) ease,
+  transform var(--dur-fast) var(--ease-out-strong), box-shadow var(--dur-fast) ease, filter var(--dur-fast) ease; }
+/* 发送按钮 hover：只留阴影加深，位移 lift 删除 */
+.send:not(:disabled):hover { box-shadow: 0 10px 22px -12px color-mix(in srgb, var(--accent) 95%, transparent); }
+/* hover 位移 lifts 显式归零（覆盖文件前段旧规则，等同名选择器后来居上） */
+.new-chat:hover, .suggest:hover { transform: none; }
+.send:hover:not(:disabled) { transform: none; filter: brightness(1.06); }
+/* 键盘焦点环：可访问性一致性（此前零散 outline） */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ── F. 编排：入场 stagger（非均匀、封顶 120ms、不阻塞交互） ─ */
+/* 空状态：首访/罕见面允许一点愉悦预算；旧 520ms→280ms，建议项 0/50/100/150 */
+.empty { animation: emptyIn var(--dur-slow) var(--ease-out-strong) both; }
+.empty .suggest { animation: suggestIn var(--dur-base) var(--ease-out-strong) both; }
+.empty .suggest:nth-child(2) { animation-delay: 50ms; }
+.empty .suggest:nth-child(3) { animation-delay: 100ms; }
+.empty .suggest:nth-child(4) { animation-delay: 150ms; }
+@keyframes emptyIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes suggestIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* 子代理列表：封顶 120ms（旧 40..200ms 线性队列 → 收敛，第 5 行起同到） */
+.agent-row { animation: rowIn var(--dur-base) var(--ease-out-strong) both; }
+.agent-row:nth-child(2) { animation-delay: 40ms; }
+.agent-row:nth-child(3) { animation-delay: 80ms; }
+.agent-row:nth-child(n+4) { animation-delay: 120ms; }
+.agent-row:hover { background: var(--fill-hover); }
+/* 委派审批卡片（右下浮层） */
+.deleg-approval { animation: cardIn var(--dur-base) var(--ease-out-strong) both; }
+.deleg-approval button { transition: background var(--dur-fast) ease, color var(--dur-fast) ease, border-color var(--dur-fast) ease; }
+
+/* ── G. 状态循环（收敛后 6+3 个，原 17 个） ────────────────── */
+/* pulse：纯透明度心跳 —— 状态点通用（用途：运行/等待状态指示） */
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+/* softPulse：低对比文字/小点呼吸（旧 retryPulse/toolPulse/archPulse/inspPulse/rp-breathe 合并） */
+@keyframes softPulse { 0%, 100% { opacity: .85; } 50% { opacity: .5; } }
+/* haloPulse：静态色环 + 透明度脉冲（旧 dotPulse/mcpPulse/archBadgeBreathe 合并；
+   颜色走 --halo-c，各上下文自行设色；opacity 轴替代盒阴影逐帧扩张） */
+@keyframes haloPulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, var(--halo-c, var(--accent)) 20%, transparent); }
+  50% { opacity: .55; box-shadow: 0 0 0 6px color-mix(in srgb, var(--halo-c, var(--accent)) 6%, transparent); }
+}
+/* 常驻 spin/blink/float：canonical 保留（thinkWave/toolScan 原定义仍在 styles.css
+   原位，此处不再重复定义 —— 见 apply-anim.py 删除清单范围） */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+/* 重试原因 / 工具目标文字呼吸：统一 softPulse（旧两套 1.2s 同值异名） */
+.retry b { animation: softPulse 1.2s ease-in-out infinite; }
+.tool.is-running .t-verb,
+.tool.is-running .t-target { animation: softPulse 1.2s ease-in-out infinite; }
+/* 会话级并行轻提示（G5 区：只改动画引用，结构不动） */
+.running-pill .rp-dot { animation: softPulse 2.6s ease-in-out infinite; }
+#runningMenu .rm-dot { animation: softPulse 2.6s ease-in-out infinite; }
+/* 检查器实时点 */
+.insp-node.is-live .insp-node-dot { background: var(--accent); animation: softPulse 1.4s ease-in-out infinite; }
+/* 体检 warn/fail 图标缩放脉冲（保留独立 keyframe：scale 轴与透明度轴语义不同） */
+@keyframes doctorPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+/* 状态点光环消费者（旧 dotPulse/mcpPulse/archBadgeBreathe → haloPulse） */
+.arch-agent-dot.is-live { animation: haloPulse 1.8s ease-in-out infinite; }
+.arch-task.is-session .arch-chip.is-live { animation: haloPulse 1.8s ease-in-out infinite; }
+.mcp-dot.is-connected { animation: haloPulse 2.4s ease-in-out infinite; }
+.mcp-dot.is-starting { animation: haloPulse 1.1s ease-in-out infinite; }
+.mcp-dot.is-connected, .mcp-dot.is-starting { --halo-c: var(--mcp-dot-c, var(--accent)); }
+.arch-live-badge.is-live .arch-live-badge-dot { animation: haloPulse 1.8s ease-in-out infinite; --halo-c: var(--ok, #157452); }
+
+/* ── H. 架构图（SVG 说明性动效，允许超出 300ms） ───────────── */
+/* 节点入场：520ms 弹簧 → 280ms 强 ease-out（scale .965 起，不从 0 出现） */
+.arch-node-body.is-enter, .arch-hub-body.is-enter {
+  animation: archNodeIn var(--dur-slow) var(--ease-out-strong) both;
+}
+.arch-svg-hub.is-main .arch-hub-body { animation-duration: 300ms; }
+@keyframes archNodeIn {
+  0% { opacity: 0; transform: translateY(8px) scale(.965); }
+  100% { opacity: 1; transform: none; }
+}
+/* 变更节点闪烁：drop-shadow+brightness 滤镜逐帧重绘 → stroke 描边脉冲（一次） */
+.arch-svg-node.is-flash .arch-node-card { animation: archFlash 500ms var(--ease-out-strong); }
+@keyframes archFlash { 0%, 100% { stroke-width: 1; } 40% { stroke-width: 2.2; } }
+/* 实时点/光环：opacity+scale 双轴合并为 archAura（旧 archPulse/archHaloPulse/archAuraBreathe） */
+.arch-live-dot { animation: softPulse 1.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+.arch-live-halo { animation: archAura 1.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+.arch-live-aura { animation: archAura 2.6s ease-in-out infinite; transform-box: fill-box; transform-origin: center; pointer-events: none; }
+@keyframes archAura {
+  0%, 100% { opacity: .16; transform: scale(1); }
+  50% { opacity: .03; transform: scale(1.5); }
+}
+/* 外圈呼吸环：旧 archRing（stroke-opacity）→ 元素透明度，视觉等效、走合成层 */
+.arch-node-ring { animation: softPulse 2.4s ease-in-out infinite; }
+/* 边：淡入 / 调用线绘制（explanation 用途，允许长时长） */
+.arch-edge.is-enter { animation: archEdgeFade 400ms ease both; }
+@keyframes archEdgeFade { from { opacity: 0; } to { opacity: 1; } }
+.arch-edge.is-call.is-enter { animation: archEdgeDraw 500ms var(--ease-out-strong) 80ms both; }
+@keyframes archEdgeDraw { from { stroke-dashoffset: 1; opacity: .2; } to { stroke-dashoffset: 0; opacity: 1; } }
+@keyframes archDashFlow { to { stroke-dashoffset: -90; } }
+/* SVG 节点 hover：功能性阅读面，位移 lift 删除，只留描边高亮 */
+
+/* ── I. 架构页 / 设置页（全屏覆盖层） ──────────────────────── */
+/* 一容器一次入场：页面整体 fade，顶栏/画布/侧栏不再各自入场三连
+   （旧 archPageIn+archTopIn+archCanvasIn+archCardIn 四层叠加 + 290ms stagger） */
+.arch-page:not([hidden]) { animation: fade var(--dur-base) ease both; }
+.arch-card { transition: border-color var(--dur-fast) ease; }
+.arch-card:hover { border-color: color-mix(in srgb, var(--accent) 24%, var(--panel-border)); }
+.arch-empty-icon { animation: float 4.6s ease-in-out infinite; }
+.arch-agent-row { transition: background var(--dur-fast) ease; border-radius: 8px; }
+.arch-agent-row:hover { background: var(--fill); }
+.arch-agent-row { animation: rowIn var(--dur-base) var(--ease-out-strong) both; }
+.arch-agent-row:nth-child(2) { animation-delay: 40ms; }
+.arch-agent-row:nth-child(3) { animation-delay: 80ms; }
+.arch-agent-row:nth-child(n+4) { animation-delay: 120ms; }
+.arch-stats > div { transition: background var(--dur-fast) ease; }
+.arch-stats > div:hover { background: var(--fill-hover); }
+.arch-mile { transition: border-color var(--dur-fast) ease; }
+.arch-task { transition: border-color var(--dur-fast) ease, background var(--dur-fast) ease; }
+.arch-task:hover { background: var(--fill-hover); }
+/* 详情浮卡：随行入场 */
+.arch-detail.is-enter { animation: cardIn var(--dur-base) var(--ease-out-strong) both; }
+/* 设置页：右侧滑入（与弹窗中心缩放、检查器右滑区分轴），退场收束 */
+@keyframes settingsIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+@keyframes settingsOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(16px); } }
+@keyframes settingsPaneIn { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
+.settings-page:not([hidden]) { animation: settingsIn var(--dur-slow) var(--ease-out-strong) both; }
+.settings-page:not([hidden]) .settings-pane:not([hidden]) { animation: settingsPaneIn var(--dur-fast) var(--ease-out-strong) both; }
+.settings-page.is-closing { animation: settingsOut 200ms var(--ease-exit) both; pointer-events: none; }
+/* 设置页列表：MCP / 技能行 stagger 封顶 80ms（设置低频面，轻编排） */
+.mcp-row:nth-child(2) { animation-delay: 40ms; }
+.mcp-row:nth-child(3) { animation-delay: 80ms; }
+.mcp-row:nth-child(n+4) { animation-delay: 80ms; }
+.skill-row:nth-child(2) { animation-delay: 40ms; }
+.skill-row:nth-child(3) { animation-delay: 80ms; }
+.skill-row:nth-child(n+4) { animation-delay: 80ms; }
+
+/* ── J. 全屏页退场（时长与 app.js animateOut 常量一一对应） ── */
+.arch-page.is-closing { animation: archPageOut 220ms var(--ease-exit) both; pointer-events: none; }
+@keyframes archPageOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(.985); } }
+/* is-closing 统一收束曲线 + 禁指针（旧散落 ease 全部收敛） */
+.sheet.is-closing { animation: sheetOut 190ms var(--ease-exit) both; pointer-events: none; }
+.scrim.is-closing { animation: fadeOut 170ms ease both; pointer-events: none; }
+.menu.is-closing { animation: menuOut var(--dur-fast) var(--ease-exit) both; pointer-events: none; }
+.inspector.is-closing { animation: inspectorOut 220ms var(--ease-exit) both; pointer-events: none; }
+/* 附件 chips：盖章式缩放 .96 起（旧 .82 过猛），130ms 高频面 */
+.attach-bar .attach-chip { animation: stampIn var(--dur-fast) var(--ease-out-strong) both; }
+.attach-bar .attach-chip:nth-child(2) { animation-delay: 30ms; }
+.attach-bar .attach-chip:nth-child(3) { animation-delay: 60ms; }
+.attach-bar .attach-chip:nth-child(n+4) { animation-delay: 90ms; }
+@keyframes stampIn { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: none; } }
+/* 模型列表行：左滑入 130ms + stagger 封顶（旧 22ms×7 线性队列） */
+.model-item { animation: slideLeftIn var(--dur-fast) var(--ease-out-strong) both; }
+.model-item:nth-child(2) { animation-delay: 25ms; }
+.model-item:nth-child(3) { animation-delay: 50ms; }
+.model-item:nth-child(n+4) { animation-delay: 75ms; }
+@keyframes slideLeftIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: none; } }
+/* 体检行：stagger 封顶 75ms（旧 20..180ms 十级队列） */
+.doctor-item:nth-child(2) { animation-delay: 25ms; }
+.doctor-item:nth-child(3) { animation-delay: 50ms; }
+.doctor-item:nth-child(n+4) { animation-delay: 75ms; }
+/* doctorIn：体检行入场（旧规则 .doctor-item 仍引用此名，曲线经 --ease-lively 别名收敛） */
+@keyframes doctorIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* ── K. 任务清单（可编辑面板） ─────────────────────────────── */
+/* 状态点弹跳：一次性反馈（discrete action），上限 1.15 —— 旧 .4→1.5 过弹 */
+.todo-dot.is-bounce { animation: todoPop 260ms var(--ease-out-strong); }
+@keyframes todoPop { 0% { transform: scale(.75); } 55% { transform: scale(1.15); } 100% { transform: scale(1); } }
+/* 行内编辑 / 保存高亮：一次性背景过渡（保留，paint 成本极小） */
+@keyframes todoEditGlow {
+  from { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  to { background: transparent; }
+}
+/* 圆点 hover 放大 1.35 删除：高频面上装饰性 hover 动效 */
+/* 新增行 / 删除退场（spawnListGhost 配套） */
+.todo-item.is-new { animation: rowIn var(--dur-base) var(--ease-out-strong) both; }
+.list-exit-ghost {
+  position: fixed;
+  z-index: 95;
+  margin: 0;
+  pointer-events: none;
+  transform-origin: center;
+  animation: listExit 160ms var(--ease-exit) both;
+}
+
+/* ── L. reduced-motion 全兜底（统一单一来源） ────────────────
+   策略：全局急停到 1ms（既有模式，fill:both 保证终态完整落位），
+   再对呼吸/脉冲类循环逐元素钉静态，保证可读性。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  .running-pill .rp-dot, #runningMenu .rm-dot,
+  .conn.live .dot, .insp-node.is-live .insp-node-dot,
+  .arch-agent-dot.is-live, .arch-task.is-session .arch-chip.is-live,
+  .mcp-dot.is-connected, .mcp-dot.is-starting,
+  .arch-live-badge.is-live .arch-live-badge-dot,
+  .arch-live-dot, .arch-live-halo, .arch-live-aura, .arch-node-ring,
+  .retry b, .tool.is-running .t-verb, .tool.is-running .t-target,
+  .approval::before, .todo-dot.in_progress, .todo-dot.blocked,
+  .doctor-item.is-warn .doctor-ico, .doctor-item.is-fail .doctor-ico,
+  .thinking i {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+  }
+  .thinking i { opacity: .6; }
+  .tool.is-running::after { animation: none !important; content: none; }
+  .approval::before { opacity: 0; }
+  .btn:active, button:active:not(.win-btn):not(.no-press),
+  .menu-item:active, .suggest:active, .chip:active { transform: none; }
+}
