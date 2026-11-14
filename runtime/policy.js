@@ -49,7 +49,7 @@ function actionHash(parts) {
   }));
 }
 
-const PATH_TOOLS = new Set(['list_dir', 'read_file', 'write_file', 'search_files']);
+const PATH_TOOLS = new Set(['list_dir', 'read_file', 'write_file', 'edit_file', 'search_files', 'find_files']);
 
 /* 下载后执行检测：三条均为线性正则（无嵌套量词），匹配前做与 hardDenyCommand
    一致的空白归一化（\s+ → 单空格），避免 tab/换行变体绕过。
@@ -161,7 +161,7 @@ function evaluatePolicy(input) {
 
   try {
     if (PATH_TOOLS.has(tool)) {
-      const rawPath = args.path ?? (tool === 'list_dir' || tool === 'search_files' ? '.' : '');
+      const rawPath = args.path ?? (tool === 'list_dir' || tool === 'search_files' || tool === 'find_files' ? '.' : '');
       targetPath = resolvePath(rawPath, workspace);
       normalizedArgs = { ...args, path: targetPath };
       const rel = path.relative(workspace, targetPath);
@@ -169,7 +169,7 @@ function evaluatePolicy(input) {
         ? `path:${rel ? rel.split(path.sep).join('/') : '.'}`
         : `path:out:${sha256(targetPath)}`;
       if (tool === 'read_file' && SECRET_FILE.test(targetPath)) risk = elevateRisk(risk, 'high');
-      if (tool === 'write_file' && EXECUTABLE_FILE.test(targetPath)) risk = elevateRisk(risk, 'high');
+      if ((tool === 'write_file' || tool === 'edit_file') && EXECUTABLE_FILE.test(targetPath)) risk = elevateRisk(risk, 'high');
       if (manifest.sideEffect === 'read' && !isWithinWorkspace(workspace, targetPath)) {
         baseRules.push('out-of-workspace-read');
         risk = elevateRisk(risk, 'medium');

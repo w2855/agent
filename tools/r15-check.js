@@ -137,6 +137,13 @@ function makeRuntime(root) {
       /COMPACT_MAX_CHARS = 24000/.test(appSrc) && /clampCompacted/.test(appSrc));
     add('A4 压缩摘要保留工具名与目标锚点',
       /compactAnchors/.test(appSrc) && /工具 \$\{names\.join/.test(appSrc));
+    /* A18：压缩不得把界面历史一起删掉（长会话压缩后「token 花了、字没了」的实际故障） */
+    const compactFn = (appSrc.split('function performCompact')[1] || '').split('\nfunction ')[0];
+    add('A4/A18 压缩只标记 compacted，不重置消息表',
+      /m\.compacted = true/.test(compactFn) && !/s\.messages\s*=\s*\[/.test(compactFn));
+    add('A4/A18 摘要池随会话持久化（重启不截断）',
+      /function setCompacted/.test(appSrc) && /session\.compactSummary = text/.test(appSrc)
+      && /s\.compactSummary && !state\.compacted\.has/.test(appSrc));
   }
 
   /* ── 6. A5：上下文预算口径修正 ────────────────────────────────── */

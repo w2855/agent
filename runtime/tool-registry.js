@@ -23,6 +23,34 @@ const MANIFESTS = {
     limits: { maxInputChars: 500000 },
     resource: { workspaceOnly: true, network: false },
   },
+  edit_file: {
+    title: '编辑文件', sideEffect: 'local_write', risk: 'medium', defaultApproval: 'ask', idempotency: 'unsafe',
+    timeout: { default: 15000, max: 60000 },
+    limits: { maxInputChars: 500000, maxOccurrences: 200 },
+    resource: { workspaceOnly: true, network: false },
+  },
+  find_files: {
+    title: '查找文件', sideEffect: 'read', risk: 'low', defaultApproval: 'never', idempotency: 'safe',
+    timeout: { default: 20000, max: 60000 },
+    limits: { maxResults: 300, maxEntries: 20000 },
+    resource: { workspaceOnly: false, network: false },
+  },
+  task_output: {
+    title: '读取后台输出', sideEffect: 'read', risk: 'low', defaultApproval: 'never', idempotency: 'safe',
+    timeout: { default: 10000, max: 35000 },
+    limits: { maxOutputChars: 60000 },
+    resource: { workspaceOnly: false, network: false },
+  },
+  task_stop: {
+    title: '停止后台任务', sideEffect: 'process_exec', risk: 'medium', defaultApproval: 'never', idempotency: 'keyed',
+    timeout: { default: 10000, max: 10000 },
+    resource: { workspaceOnly: false, network: false },
+  },
+  task_list: {
+    title: '后台任务列表', sideEffect: 'read', risk: 'low', defaultApproval: 'never', idempotency: 'safe',
+    timeout: { default: 5000, max: 5000 },
+    resource: { workspaceOnly: false, network: false },
+  },
   search_files: {
     title: '搜索内容', sideEffect: 'read', risk: 'low', defaultApproval: 'never', idempotency: 'safe',
     timeout: { default: 30000, max: 120000 },

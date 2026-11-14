@@ -14,10 +14,15 @@ function argsSummary(name, args) {
   const a = args && typeof args === 'object' ? args : {};
   const cut = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').slice(0, 160);
   if (name === 'write_file') return `path=${cut(a.path)} · ${String(a.content || '').length} 字符`;
-  if (name === 'read_file' || name === 'list_dir' || name === 'search_files') {
+  if (name === 'edit_file') {
+    return `path=${cut(a.path)} · -${String(a.old_string || '').length} +${String(a.new_string || '').length} 字符${a.replace_all === true ? ' · 全部替换' : ''}`;
+  }
+  if (name === 'read_file' || name === 'list_dir' || name === 'search_files' || name === 'find_files') {
     return `path=${cut(a.path || '.')}${a.query ? ` · query=${cut(a.query)}` : ''}`;
   }
-  if (name === 'run_command') return `command=${cut(a.command)}`;
+  if (name === 'run_command') return `command=${cut(a.command)}${a.background === true ? ' · 后台' : ''}`;
+  if (name === 'task_output' || name === 'task_stop') return `task=${cut(a.task_id)}`;
+  if (name === 'task_list') return '后台任务列表';
   if (name === 'fetch_url') return `url=${cut(a.url)}`;
   if (name === 'todo_write') return `tasks=${Array.isArray(a.tasks) ? a.tasks.length : 0}`;
   if (name === 'delegate_task') return `agent=${cut(a.agentId)} · ${cut(a.objective)}`;
@@ -497,7 +502,7 @@ class ToolExecutor {
     if (['succeeded', 'failed', 'canceled', 'denied'].includes(status)) {
       return { ok: false, code: 'ABORTED', toolCallId: call.id, content: String(result?.content || ''), error: '任务已取消', status };
     }
-    const sideEffect = ['write_file', 'run_command', 'delegate_task', 'project_architecture'].includes(call.name);
+    const sideEffect = ['write_file', 'edit_file', 'run_command', 'task_stop', 'delegate_task', 'project_architecture'].includes(call.name);
     const to = sideEffect ? 'unknown' : 'canceled';
     try {
       this.state.setToolCallStatus(call.id, to, {

@@ -603,6 +603,9 @@ app.on('before-quit', () => {
   // 退出时停掉所有 MCP server（杀整棵进程树，避免遗留子进程）；
   // 注意用 if 而非 getMcpManager()：退出路径不允许懒建出一个新管理器
   if (mcpManager) { try { mcpManager.stopAll(); } catch { /* 尽力停止即可 */ } }
+  /* 后台任务同样要收尾：run_command background:true 起的是真实进程，
+     不杀就会在关窗后继续跑（dev server / watch 最典型）。 */
+  try { localTools.backgroundTasks.stopAll(); } catch { /* 尽力停止即可 */ }
   /* 退出前轮换备份（R15/A7）：源从「经验库 + 水位」扩到「用户真正在乎的全部状态」——
      · dsh-storage.json：会话历史 / 设置 / 连接配置（真值源）
      · state.json：任务 / Run / 审批 / 委派快照

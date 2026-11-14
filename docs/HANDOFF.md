@@ -53,6 +53,33 @@
     网关日志改写到 `os.tmpdir()`；清理改为「回读校验 + 清不掉就整目录改名让开」；
     并把「隔离 userData 已清空」作为一条门禁行暴露（全量由 24 项变 25 项）。
 
+### 工具集补全（审计收尾后追加，v1 工具从 9 个到 14 个）
+用户实测反馈「工具不全，比如读任务输出」——对照 ZCode 3.17.2（内置 33 个，本机实跑发 35 个 + 250 个 MCP）
+补了三类最缺的：
+
+| 新增 | 为什么必须有 |
+|---|---|
+| `edit_file` | 改一行不用整篇重写。以前只能 `write_file` 全量覆盖 3000 行文件：贵、且记错内容就静默改坏 |
+| `find_files` | `search_files` 搜内容、`list_dir` 只看一层，「项目里所有 *.test.js 在哪」无法回答 |
+| `run_command` `background:true` | 同步上限 180 秒，dev server / watch / 长测试只能超时被杀、输出丢失 |
+| `task_output` / `task_stop` / `task_list` | 后台任务的读输出（游标续读）、停止、列表——即用户说的「读任务输出」 |
+
+实现要点：
+- `lib/tasks.js` 新模块：绝对偏移记账（环形裁剪后 offset 仍有效）、每任务 200KB 上限、结束保留 30 分钟、
+  最多 16 个、2 小时生命上限、`before-quit` 统一 `stopAll`（否则关窗留孤儿进程）。
+- `edit_file` 三条硬规则：找不到 → 报错不动文件；多处匹配 → 报错要求扩大上下文或 `replace_all`；
+  换行风格跟随文件（CRLF 文件里不混入孤立 LF）。
+- 权限分层：`edit_file` 需审批（同 write_file）；`task_output`/`task_list` 属只读；
+  `task_stop` 只读模式拒绝、ask 模式不弹框（只能停本应用起的任务）。
+- 治理元数据两处都要补：`TOOL_META`（UI 显示）+ `runtime/tool-registry.js`（策略层）。
+  漏了后者会退化成 risk=high + defaultApproval=ask —— 读工具也会莫名弹审批。
+- 自检：`tools/tools-check.js`（36 断言，含真实文件与真实后台进程）；
+  `runtime-foundation-check` 的「注册表含 9 个工具」改为「覆盖全部内置工具」，新增工具不该靠改数字过门禁。
+
+仍未对齐 ZCode 的能力（未做，按价值排序）：`AskUserQuestion`（agent 无法在回合中提问，只能猜）、
+`WebSearch`（只有 `fetch_url`，无法发现 URL）、`TodoRead`（清单只能写不能读）、
+`LSP` / `NotebookEdit` / 计划模式（`EnterPlanMode` / `ExitPlanMode`）/ `Cron*`。
+
 ### R15 行为变化（交付说明）
 - 切到「完全权限」会弹一次主进程原生确认框；无头模式提权一律被拒（v2-check 已按新语义断言）。
 - 上下文窗口默认 120000 字符；存过 700000 的老用户会回落新默认（避免继续撞上限）。
@@ -90,6 +117,7 @@
 
 ## 六、专项探针（tools/，均绿）
 - 新增 governance 36/36（治理/取消/对账/分页/容量/Autopilot/SSRF/环境变量/队列）
+- 新增 tools-check 36/36（工具清单/元信息/edit_file/find_files/后台任务全链路）
 - f1 17/17、g5 29/29、g3 44/44、dyn 36/36（两相位：arch 14 + todo 22）、tool-e2e 75/75、effort-probe 3/3
 - arch-iso 7/7、narrate-live 4/4、narrate-gap 5/5、persist-write/read、storage-check 8/8、storage-probe 20/20、abort-check 11/11
 
@@ -121,11 +149,12 @@
 
 ## 十、验收命令速查
 ```bash
-node tools/run-all.js                    # 全量门禁（25 项：24✓ + runtime-ipc 跳过）
+node tools/run-all.js                    # 全量门禁（26 项：25✓ + runtime-ipc 跳过）
 node tools/runtime-governance-check.js   # 只跑治理/一致性 36 断言
-node tools/r15-check.js                  # 只跑 R15 整改 48 断言
+node tools/r15-check.js                  # 只跑 R15 整改 50 断言
+node tools/tools-check.js                # 只跑工具集 36 断言（含真实后台进程）
 node tools/release.js                    # 打包+字节校验（先关应用）
 env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron . --user-data-dir=.s-x --shot --script=tools/xxx-probe.js
 node tools/mock-gateway.js               # mock 网关 127.0.0.1:57321（[[slow]] [[narrslow]] [[narr]] [[many]] [[write]] [[read]] [[arch]] [[force]] [[tamper]]）
-git -c http.proxy=http://127.0.0.1:7877 push origin main   # 推送（走代理）
+git -c http.proxy= -c https.proxy= push origin main   # 推送（直连；7877 代理已不可用）
 ```

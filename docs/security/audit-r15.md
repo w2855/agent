@@ -37,6 +37,7 @@ Context Engine 的三处问题（A4/A5/A6）会导致**长会话在真实模型�
 | A15 | P3 | `dataset.segHtml` 存整段 HTML | 长消息 |
 | A16 | P3 | 工具描述无长度上限（MCP 外部来源） | 异常 MCP server |
 | A17 | P1 | 门禁隔离目录清不干净，`dsh.perm` 跨轮泄漏（收尾验证时发现） | 任意一次上一轮失败
+| A18 | P0 | 自动压缩把聊天记录整表删掉（token 花了、界面空了）；摘要重启后截断到 2000 字符 | 历史 > 预算 75%
 
 ---
 
@@ -387,6 +388,7 @@ A1/A2 建议与 R14 的 `docs/security/policy-model.md` 合并成一份「治理
 | A12 | 子代理退避改用可中断 `retry.sleep(ms, signal)` | `runtime/agent-runner.js:requestModel` | r15-check §9 |
 | A13 | 取消跟踪 `tools/patches/__pycache__` 与 `tools/patches/backup/`；`.gitignore` 去重并补规则 | `.gitignore`、git index | git status 干净 |
 | A17 | **门禁隔离失效（收尾验证时发现）**：`.runall-probe` 依赖 `fs.rmSync` 静默清空，但网关日志句柄与 Chromium 缓存锁让删除失败，上一轮的 `dsh-storage.json`（尤其 `dsh.perm`）跨轮泄漏。修法：网关日志移出隔离目录（`os.tmpdir()`）；清理改为「清完回读校验 → 清不掉则整目录改名让开」，并把可清空性作为一条门禁行暴露出来 | `tools/run-all.js`（resetProbeDir / 隔离行）、`.gitignore` | run-all 新增「隔离 userData 已清空」行；tool-e2e 75/75、g3-probe 44/44 |
+| A18 | **压缩即删库（用户报障后定位）**：`performCompact` 用 `s.messages = [摘要]` 整表替换，40 条历史的会话压缩一次只剩 4 条节点——聊天框看起来「没字了」，而 token 已全额花掉。R15 把预算降到 120000、阈值降到 75%（A5）后，这条路径从「几乎不触发」变成「9 万字符必触发」，所以是 R15 之后才暴露的既有缺陷。修法：只给历史消息打 `compacted` 标记（`buildApiMessages` 本就跳过它们并把摘要当 system 注入），界面保留可回看并加「已折叠」弱化标记；摘要改用 `s.compactSummary` 随会话持久化（旧格式存在占位消息 body 里只留前 2000 字符，重启即截断） | `renderer/app.js`（performCompact / setCompacted / maybeAutoCompact / 恢复逻辑）、`renderer/styles.css` | r15-check 新增 2 条（只标记不重置、摘要随会话持久化）；探针：40 条历史 → 压缩后 43 条节点仍在、上下文用量 100340→61 字符 |
 
 > A17 的成因值得记一笔：它先伪装成业务回归——`tool-e2e` 因档位被降级而拿不到任务卡，
 > 又在 `.tasks-head span` 上空指针崩溃，把前面那条「请求没带上 tools」的解释性断言一起吞掉。

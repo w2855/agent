@@ -435,11 +435,16 @@ function loadSavedSessions(source) {
     for (const s of data.sessions) {
       if (!Array.isArray(s.messages)) s.messages = [];
       for (const m of s.messages) registerMsg(m);
-      /* 重启后重建压缩/载入上下文的 system 注入池：/compact 与 /load 都把摘要写进
-         最后一条 compacted 占位消息的 body，这里按 body 回填 state.compacted，
-         否则重启后「上下文」只在界面上可见、不再注入后续请求。 */
-      const lastCompacted = [...s.messages].reverse().find((m) => m.compacted && m.body);
-      if (lastCompacted && !state.compacted.has(s.id)) state.compacted.set(s.id, lastCompacted.body);
+      /* 重启后重建压缩/载入上下文的 system 注入池。
+         新格式：摘要随会话持久化在 s.compactSummary（完整，不截断）；
+         旧数据：摘要存在最后一条 compacted 占位消息的 body 里（只留前 2000 字符），按 body 兜底回填。 */
+      if (s.compactSummary && !state.compacted.has(s.id)) state.compacted.set(s.id, s.compactSummary);
+      if (!state.compacted.has(s.id)) {
+        const notice = [...s.messages].reverse().find((m) => m.compactNotice && m.body);
+        const legacy = [...s.messages].reverse().find((m) => m.compacted && m.body);
+        const src = notice || legacy;
+        if (src) state.compacted.set(s.id, src.body);
+      }
     }
     return data;
   } catch { return null; }
@@ -1502,6 +1507,11 @@ function renderChat() {
   for (const m of s.messages) {
     const node = m.role === 'user' ? userNode(m) : assistantNode(m);
     if (m.role === 'assistant') renderTools(node, m); // 分段渲染投影：段文字+卡片（重建节点后的唯一渲染入口，流式回合随后 repaint 接管）
+    /* 已被压缩归档的历史：保留在时间线里可回看，但要看起来「不再逐条发给模型」 */
+    if (m.compacted && m.compactedAt) {
+      node.classList.add('is-compacted');
+      node.title = '已折叠为摘要：内容不再逐条发给模型，仅本机可回看';
+    }
     if (!enteredMessages.has(m)) {
       enteredMessages.add(m);
       node.classList.add('is-enter');
@@ -1778,7 +1788,10 @@ function buildApiMessages(session, currentText, draft, skipUser) {
     role: 'system',
     content: '你是 DSH 桌面助手，用简体中文回答。回复简洁、结构化，可用 Markdown。'
       + '你可以使用系统提供的工具读写本地文件、搜索、执行命令或访问网页；需要时直接调用工具，'
-      + '工具结果由系统返回。任务清单（todo_write）由你自行判断是否使用：任务复杂、步骤较多时可以建立清单并更新进度。'
+      + '工具结果由系统返回。改已有文件优先用 edit_file 做精确替换，只有新建文件或整篇重写才用 write_file。'
+      + '长跑命令（dev server、watch、长测试）用 run_command 的 background:true 启动，之后用 task_output 读输出、task_stop 收尾；'
+      + '同步模式最长 180 秒，超时会被杀掉且输出丢失。'
+      + '任务清单（todo_write）由你自行判断是否使用：任务复杂、步骤较多时可以建立清单并更新进度。'
       + '不要虚构工具调用、工具结果或文件产出。'
       + '【硬性要求】每次调用工具前先用一句短句说明这一步要做什么（不超过 15 字，例如：先看一下目录结构。）；'
       + '多步工具循环中每一步都先说明再调用，不要逐句复述同样的措辞；工具全部结束后只报告一次最终结果，'
@@ -2482,7 +2495,7 @@ function renderInspector() {
   const auditOk = health?.audit?.ok === true;
   const pending = (d?.approvals || []).filter((a) => a.status === 'pending').length;
   const providerCount = health?.providers?.length || 0;
-  const toolCount = state.toolSpecs?.length || 7;
+  const toolCount = state.toolSpecs?.length || Object.keys(state.toolMeta || {}).length || 0;
   const permLabel = state.permission === 'full' ? '完全权限' : state.permission === 'ask' ? '每次询问' : '只读';
   const agentName = inspector.agent?.name || '默认 Agent';
   const agentVer = inspector.agent?.currentVersion ? `v${inspector.agent.currentVersion}` : 'v1';
@@ -3872,6 +3885,8 @@ function handleLoadSession(idArg) {
      占位消息同时入时间线与持久化，compacted:true 保证它不进 API 历史、也不会被下轮再压缩。 */
   const payload = `以下上下文载入自会话「${target.title || '未命名'}」（${target.id}，${msgs.length} 条消息）：\n\n${sample}\n\n${recent}`;
   state.compacted.set(cur.id, state.compacted.has(cur.id) ? `${state.compacted.get(cur.id)}\n\n${payload}` : payload);
+  // 同写会话字段：重启后摘要按完整内容注入（占位消息 body 只用于界面展示）
+  cur.compactSummary = state.compacted.get(cur.id);
   const loadedMsg = {
     role: 'assistant',
     summary: { label: '已载入会话上下文', tools: 0, messages: 0 },
@@ -3934,9 +3949,19 @@ function clampCompacted(text) {
   return `${text.slice(0, head)}\n…（中间 ${omitted} 字符已省略）…\n${text.slice(-tail)}`;
 }
 
-/** 压缩核心：把会话未压缩的历史折叠成摘要，写入 compacted 池并把消息列表重置为一条占位消息。
-    返回 { count }；没有可压缩内容时返回 null。手动 /compact 与自动压缩共用此核心，UI 反馈由调用方负责。 */
-function performCompact(s) {
+/** 摘要池写入：内存 Map 与「随会话持久化」双写。
+    Map 不落盘，以前靠占位消息 body 回填，而 body 只留前 2000 字符 → 重启后摘要被截断。 */
+function setCompacted(session, text) {
+  state.compacted.set(session.id, text);
+  session.compactSummary = text;
+}
+
+/** 压缩核心：把会话未压缩的历史折叠成摘要，**只标记不删**，再追加一条摘要卡。
+    返回 { count, chars }；没有可压缩内容时返回 null。手动 /compact 与自动压缩共用此核心。
+    R15/A4 续：此前是 `s.messages = [摘要]` 整表替换——长会话压缩一次，聊天框里的历史就全没了
+    （用户视角是「token 花了，字没了」）。而 buildApiMessages 本来就跳过 compacted 消息并把
+    摘要当 system 注入，所以标记即可：省 token 的同时界面仍能回看。 */
+function performCompact(s, opts = {}) {
   const usable = s.messages.filter((m) => !m.compacted);
   if (usable.length < 2) return null;
 
@@ -3952,17 +3977,23 @@ function performCompact(s) {
   const prev = state.compacted.get(s.id);
   const merged = prev ? `${prev}\n\n--- 后续对话 ---\n${lines}` : lines;
   const summary = clampCompacted(merged);
-  state.compacted.set(s.id, summary);
+  setCompacted(s, summary);
 
-  const shown = summary.length > 2000 ? `${summary.slice(0, 2000)}\n…（完整摘要已注入后续请求，界面只显示前 2000 字符）` : summary;
-  s.messages = [{
+  const at = Date.now();
+  for (const m of usable) { m.compacted = true; m.compactedAt = at; }
+
+  const notice = {
     role: 'assistant',
-    summary: { label: '上下文已压缩', tools: 0, messages: 0 },
-    tools: [], files: [], approval: null, metrics: '', compacted: true,
-    body: `已将 ${usable.length} 条历史消息压缩为摘要（累计 ${summary.length} 字符），后续请求会带上这段上下文。\n\n${shown}`,
-    startedAt: Date.now(), finishedAt: Date.now(),
-  }];
-  return { count: usable.length };
+    summary: { label: opts.label || '上下文已压缩', tools: 0, messages: 0 },
+    tools: [], tasks: [], files: [], approval: null, metrics: '',
+    compacted: true, compactNotice: true,
+    body: `已将 ${usable.length} 条历史消息折叠为摘要（累计 ${summary.length} 字符），后续请求会带上这段上下文；`
+      + `上方历史仍可回看，但不再逐条发给模型。${opts.note ? '\n\n' + opts.note : ''}`,
+    startedAt: at, finishedAt: at,
+  };
+  s.messages.push(notice);
+  registerMsg(notice);
+  return { count: usable.length, chars: summary.length };
 }
 
 /** 真实上下文压缩：把历史消息折叠成摘要，后续请求以 system 消息注入 */
@@ -3991,18 +4022,12 @@ function maybeAutoCompact(session) {
   const used = sessionContextChars(session);
   if (used <= LIMITS.maxContextChars * 0.75) return false;
   const pct = Math.round((used / LIMITS.maxContextChars) * 100);
-  if (!performCompact(session)) return false;
-  /* 时间线插入一条系统提示；compacted 标记保证它不进 API 请求、也不会被下一轮再次压缩 */
-  session.messages.push({
-    role: 'assistant',
-    summary: { label: '自动压缩', tools: 0, messages: 0 },
-    tools: [], files: [], approval: null, metrics: '', compacted: true,
-    body: `上下文已自动压缩（占用 ${pct}%）。`,
-    startedAt: Date.now(), finishedAt: Date.now(),
-  });
+  /* 摘要卡由 performCompact 追加（带 compactNotice 标记），这里不再重复插一条 */
+  const done = performCompact(session, { label: '自动压缩', note: `自动压缩：压缩前占用约 ${pct}%。` });
+  if (!done) return false;
   pruneMsgStore();
-  renderChat(); // 消息列表已被整体替换，先重绘时间线，本轮 user/assistant 节点再往后追加
-  toast(`上下文已自动压缩（占用 ${pct}%）`);
+  renderChat(); // 历史被标记 + 追加摘要卡，整表重绘一次（本轮 user/assistant 节点随后追加）
+  toast(`上下文已自动压缩（占用 ${pct}%，历史仍可在上方回看）`);
   return true;
 }
 

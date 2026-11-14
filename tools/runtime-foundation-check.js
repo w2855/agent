@@ -11,6 +11,7 @@ const ids = require('../runtime/ids');
 const model = require('../runtime/model');
 const registry = require('../runtime/tool-registry');
 const policy = require('../runtime/policy');
+const localTools = require('../lib/tools');
 const { EventStore } = require('../runtime/events');
 const { KEEP_TASKS } = require('../runtime/state');
 const runtimeModule = require('../runtime');
@@ -45,7 +46,11 @@ function tempDir(tag) {
 
   /* 3. 工具注册表 */
   const manifests = registry.listManifests();
-  add('注册表含 9 个工具', manifests.length === 9, manifests.map((m) => m.name).join(','));
+  /* 断言「覆盖」而不是「等于 9」：新增工具时不该靠改数字过门禁，
+     真正要守的是「每个内置工具都有治理元数据」（否则策略层会退化成 high + 每次审批）。 */
+  const specNames = localTools.TOOL_SPECS.map((s) => s.function.name);
+  add('注册表覆盖全部内置工具', manifests.length === specNames.length && specNames.every((n) => manifests.some((m) => m.name === n)),
+    `${manifests.length} 条 / ${specNames.length} 个工具`);
   add('write_file 声明为 local_write/ask', manifests.some((m) => m.name === 'write_file' && m.sideEffect === 'local_write' && m.defaultApproval === 'ask'), 'ok');
   add('delegate_task 声明为 delegation/ask', manifests.some((m) => m.name === 'delegate_task' && m.sideEffect === 'delegation' && m.defaultApproval === 'ask'), 'ok');
   add('project_architecture 声明为低风险元数据写入', manifests.some((m) => m.name === 'project_architecture' && m.sideEffect === 'none' && m.defaultApproval === 'never'), 'ok');

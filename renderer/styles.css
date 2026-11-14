@@ -705,6 +705,19 @@ input.tint-range::-webkit-slider-thumb {
 }
 
 .msg { display: flex; flex-direction: column; margin-bottom: 20px; }
+/* 已被压缩归档的历史：留在时间线可回看，视觉上弱化并提示「不再发给模型」 */
+.msg.is-compacted { opacity: .58; }
+.msg.is-compacted:hover { opacity: .9; }
+.msg.is-compacted .prose::after,
+.msg.is-compacted .bubble::after {
+  content: '已折叠';
+  margin-left: 8px; padding: 1px 6px;
+  font-size: 10.5px; vertical-align: 2px;
+  color: var(--text-2);
+  border: 1px solid color-mix(in srgb, var(--text-2) 35%, transparent);
+  border-radius: 999px;
+  user-select: none;
+}
 .msg.user { align-items: flex-end; }
 .msg.user .bubble {
   max-width: min(560px, 76%);
