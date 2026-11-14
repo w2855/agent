@@ -285,6 +285,32 @@ class StateStore {
     return Object.values(this.state.projects).find((p) => p.workspace && path.resolve(p.workspace) === normalized) || null;
   }
 
+  /* ---------------- 会话隔离（参考 ruflo missions 的按实例键控） ----------------
+     带 sessionId 的项目按 workspace+sessionId 键控：同一工作区不同会话各持一份架构。
+     旧数据（无 sessionId 字段）不会命中会话键查询，老调用路径完全兼容。 */
+
+  findProjectBySession(workspace, sessionId) {
+    const raw = String(workspace || '').trim();
+    const sid = String(sessionId || '').trim();
+    if (!raw || !sid) return null;
+    const normalized = path.resolve(raw);
+    return Object.values(this.state.projects)
+      .find((p) => p.sessionId === sid && p.workspace && path.resolve(p.workspace) === normalized) || null;
+  }
+
+  listProjectsBySession(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return [];
+    return Object.values(this.state.projects)
+      .filter((p) => p.sessionId === sid)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
+
+  /* 供渲染层 /load 使用：返回该会话的项目数组（与 listProjectsBySession 同一结果）。 */
+  getProjectBySession(sessionId) {
+    return this.listProjectsBySession(sessionId);
+  }
+
   listProjects() {
     return Object.values(this.state.projects).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   }
@@ -295,17 +321,26 @@ class StateStore {
 
   createProject(input = {}) {
     const workspace = path.resolve(String(input.workspace || ''));
-    const existing = this.findProjectByWorkspace(workspace);
+    // 会话短码：sessionId 前 6 位的 id 安全形式，用于区分同工作区不同会话的项目
+    const sid = String(input.sessionId || '').trim();
+    // 去重与 ensure 同键：带会话键时按 workspace+sessionId 去重；不带时保持按 workspace 共享（老行为）
+    const existing = sid
+      ? this.findProjectBySession(workspace, sid)
+      : this.findProjectByWorkspace(workspace);
     if (existing) return existing;
     const now = this.now();
     const wantedMain = String(input.mainAgentId || '');
     const mainAgent = this.state.agents[wantedMain]?.status === 'active'
       ? this.state.agents[wantedMain]
       : this.getDefaultAgent();
+    const sessionShort = sid.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 6);
     const project = {
-      id: newId('prj', now),
+      // 带会话键时 id 追加会话短码（如 prj_01ABC…_a1b2c3）；老路径保持纯 ULID 格式
+      id: sessionShort ? `${newId('prj', now)}_${sessionShort}` : newId('prj', now),
       workspaceId: this.events.workspaceId,
       workspace,
+      // 会话归属：null 表示无会话键（老行为，全工作区共享）
+      sessionId: sid || null,
       name: String(input.name || path.basename(workspace) || '未命名项目').slice(0, 80),
       description: String(input.description || '').slice(0, 300),
       goal: String(input.goal || '').slice(0, 2000),

@@ -281,6 +281,8 @@ class Runtime {
       const workspace = typeof input.workspace === 'string' && input.workspace ? input.workspace : this.workspacePath;
       const project = this.projects.ensure(workspace, {
         mainAgentId: typeof input.mainAgentId === 'string' ? input.mainAgentId : undefined,
+        // 会话隔离：渲染层可带 sessionId 让每个会话独享架构；省略时保持共享行为
+        sessionId: typeof input.sessionId === 'string' ? input.sessionId : undefined,
       });
       return ok(this.projects.get(project.id));
     } catch (err) { return fail('PROJECT_ENSURE_FAILED', err); }
@@ -610,7 +612,9 @@ class Runtime {
     let result;
     try {
       if (run.delegationId) throw new Error('子 Agent 不能修改项目整体架构');
-      const project = this.projects.ensure(workspace, { mainAgentId: run.agentId });
+      // 会话隔离：工具 args 里带 sessionId 时按「工作区+会话」定位项目；省略时保持共享行为
+      const argsSessionId = typeof call.args?.sessionId === 'string' ? call.args.sessionId : undefined;
+      const project = this.projects.ensure(workspace, { mainAgentId: run.agentId, sessionId: argsSessionId });
       if (project.mainAgentId !== run.agentId) {
         throw new Error(`只有主控 Agent（${project.mainAgentId}）可以更新项目架构`);
       }

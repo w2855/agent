@@ -137,9 +137,19 @@ class ProjectService {
 
   /* ---------------- 项目生命周期 ---------------- */
 
-  ensure(workspace, { mainAgentId } = {}) {
+  /* 会话短码：sessionId 前 6 位并清理为 id 安全字符（用于项目 id 后缀）。 */
+  _sessionShort(sessionId) {
+    return String(sessionId || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 6);
+  }
+
+  ensure(workspace, { mainAgentId, sessionId } = {}) {
     const root = path.resolve(String(workspace || this.workspacePath));
-    const existing = this.state.findProjectByWorkspace(root);
+    const sid = typeof sessionId === 'string' ? sessionId.trim() : '';
+    // 带 sessionId：按 workspace+sessionId 查找/创建（同会话独占架构，同工作区不同会话互不影响）；
+    // 不带 sessionId：保持旧行为，按 workspace 查找共享项目（兼容旧调用路径与旧数据）。
+    const existing = sid
+      ? this.state.findProjectBySession(root, sid)
+      : this.state.findProjectByWorkspace(root);
     if (existing) {
       const main = this.state.state.agents[existing.mainAgentId];
       if (!main || main.status !== 'active') {
@@ -155,12 +165,16 @@ class ProjectService {
       return existing;
     }
     const discovery = this.discover(root);
+    // 会话项目的默认名带「·<sessionId 前 6 位>」后缀，便于 UI 区分同工作区的多份架构
+    const short = this._sessionShort(sid);
+    const name = sid && short ? `${discovery.name} · ${short}` : discovery.name;
     return this.state.createProject({
       workspace: root,
-      name: discovery.name,
+      name,
       description: discovery.description,
       mainAgentId: mainAgentId || this.state.defaultAgentId,
       discovery,
+      sessionId: sid || undefined,
     });
   }
 
@@ -172,6 +186,11 @@ class ProjectService {
 
   list() {
     return this.state.listProjects().map((project) => this._withLive(project));
+  }
+
+  /* 按会话列出项目（UI 侧按 activeId 过滤的辅助入口），返回带实时叠加的完整视图。 */
+  listBySession(sessionId) {
+    return this.state.listProjectsBySession(sessionId).map((project) => this._withLive(project));
   }
 
   update(projectId, input = {}) {
@@ -286,7 +305,8 @@ class ProjectService {
   }
 
   applyArchitecture({ workspace, agentId, args = {} } = {}) {
-    const project = this.ensure(workspace, { mainAgentId: agentId });
+    // args.sessionId 可选：由 project_architecture 工具参数透传；省略时走共享项目（老行为）
+    const project = this.ensure(workspace, { mainAgentId: agentId, sessionId: args.sessionId });
     if (!project.mainAgentId) throw new Error('项目缺少主控 Agent');
     if (project.mainAgentId !== agentId) {
       throw new Error(`只有主控 Agent（${project.mainAgentId}）可以更新项目架构`);
