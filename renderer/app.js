@@ -182,6 +182,8 @@ const state = {
   profiles: [],
   activeProfileId: '',
   formProfileId: '',
+  /* F2 跨接入点委派：profileId → 该连接的可用模型 ID 列表（refreshProfileModels 维护） */
+  profileModels: {},
   vaultOk: false,
   /* 个性化提示词（每轮注入；持久化到 localStorage） */
   customPrompt: readStorage('dsh.customPrompt', ''),
@@ -239,8 +241,8 @@ const SESSION_SAVE_L3_KEEP = 10;
 /* localStorage 容量口径（字符数）：Doctor「本地存储用量」检查与分级提示共用同一预算 */
 const STORAGE_BUDGET_CHARS = 5 * 1024 * 1024;
 
-/* dirty 标记：发消息 / 工具结果落定 / 编辑会话等变更时置位；
-   周期自动保存只在 dirty 时落盘，saveSessions 成功后清位。 */
+/* dirty 标记：发消息与工具事件均已改为立即 saveSessions（成功即清位）；
+   现仅剩流式正文增量等高频变更走「置位 + 30s 周期保存」兜底，避免每个 chunk 都序列化。 */
 let sessionsDirty = false;
 let autoSaveTimer = null;
 let autoSaveIntervalMs = 30000; // 可被探针改小，验证周期保存路径
@@ -1087,12 +1089,18 @@ function renderTasks(node, msg) {
 }
 
 /* ───────── 工具叙述行（UI 层保底） ─────────
-   系统提示已硬性要求模型「调用工具前先说一句话」，但模型不总遵守——这里在工具列表
-   上方数据驱动地补一行「🛠 正在 <动词> <目标>…」：只要有 pending/running 的工具就显示，
-   全部落定后淡出移除。切会话重建节点时按消息状态投影，不会残留历史叙述。 */
+   模型的文字说明优先：只要本回合已有模型正文（body 非空），就不再叠加 UI 叙述行，
+   避免「正在 …」行与模型自己的播报同时显示造成双重观感。模型全程沉默（静默调用工具）时，
+   叙述行才数据驱动地补一行「🛠 正在 <动词> <目标>…」；全部落定后淡出移除。
+   切会话重建节点时按消息状态投影，不会残留历史叙述。 */
 function renderNarrate(node, msg) {
   const slot = $('.slot-narrate', node);
   if (!slot) return;
+  if (String(msg.body || '').trim()) { // 模型已经说过话：叙述行退场，不再重复同一信息
+    const leaving = $('.tool-narrate:not(.is-leaving)', slot);
+    if (leaving) { leaving.classList.add('is-leaving'); setTimeout(() => leaving.remove(), 300); }
+    return;
+  }
   const tools = msg.tools || [];
   // 取最近一个未落定的工具（一轮并行多个时播报最新发起的一个）
   const running = [...tools].reverse().find((t) => t.status === 'running' || t.status === 'pending');
@@ -1544,9 +1552,9 @@ function buildApiMessages(session, currentText, draft, skipUser) {
       + '你可以使用系统提供的工具读写本地文件、搜索、执行命令或访问网页；需要时直接调用工具，'
       + '工具结果由系统返回。任务清单（todo_write）由你自行判断是否使用：任务复杂、步骤较多时可以建立清单并更新进度。'
       + '不要虚构工具调用、工具结果或文件产出。'
-      + '【硬性要求】每次调用工具前，必须先用一句不超过 15 字的话告诉用户你要做什么'
-      + '（例如：先看一下目录结构。），然后再发起工具调用；工具结束后用一句话报告结果。'
-      + '不要跳过这句话直接发起工具调用。',
+      + '【硬性要求】整个回合只在第一次调用工具前播报一句意图（不超过 15 字，例如：先看一下目录结构。）；'
+      + '之后继续调用其他工具时直接调用，不再重复播报；工具全部结束后只报告一次最终结果，'
+      + '不要每完成一个工具就单独汇报一遍。',
   }, {
     role: 'system',
     content: PERM_PROMPT[state.permission],
@@ -1572,12 +1580,23 @@ function buildApiMessages(session, currentText, draft, skipUser) {
   if (state.toolSpecs.some((s) => s.function?.name === 'delegate_task')) {
     const lines = delegateTargets.map((a) => `- ${a.id} · ${a.name} · 权限 ${a.version?.permissionProfileId || '?'}`);
     const models = (state.models || []).map((m) => m.id).filter(validModel).slice(0, 12);
+    // F2 跨接入点委派：按全部已保存连接汇总模型清单，标注来源连接名与 profileId，
+    // 主代理可任意组合（连接 × 模型）委派；没有清单的连接只列出连接名。
+    const connLines = (state.profiles || []).map((p) => {
+      const ids = (state.profileModels?.[p.id] || []).slice(0, 10);
+      const label = p.name || p.baseUrl;
+      return ids.length
+        ? `- ${p.id} · 「${label}」模型：${ids.join(', ')}`
+        : `- ${p.id} · 「${label}」（模型列表未获取，委派时不要选这个连接）`;
+    });
     out.push({
       role: 'system',
       content: `可委派 Agent：\n${lines.length ? lines.join('\n') + '\n' : ''}`
-        + `可用模型：${models.length ? models.join(', ') : '（未获取到模型列表，委派时不要传 model）'}\n`
+        + `可用模型（当前连接）：${models.length ? models.join(', ') : '（未获取到模型列表，委派时不要传 model）'}\n`
+        + `可用连接（delegate_task 的 profileId 取这里的 ID）：\n${connLines.length ? connLines.join('\n') + '\n' : ''}`
         + 'delegate_task 用法：agentId 省略或传 "new"/"auto" 时会自动创建一个新子 Agent（名称取自目标、权限继承当前档位、模型由你通过 model 参数从上面的可用模型中选择）；'
-        + '也可以指定上面已有 Agent 的 ID。多个 delegate_task 可以在同一轮并行发起，子任务会同时运行。'
+        + '也可以指定上面已有 Agent 的 ID。跨接入点委派：profileId 传某个连接的 ID 时，子 Agent 改用该连接与它清单里的 model（此时必须传 model）；省略 profileId 则沿用当前会话连接。'
+        + '多个 delegate_task 可以在同一轮并行发起，子任务会同时运行。'
         + '仅当子任务自包含、适合独立 Agent 时使用。子 Agent 看不到当前对话；'
         + 'objective 必须写清背景、输入与目标，expectedOutput 写清验收标准，contextRefs 只放确实需要共享的工作区文件。',
     });
@@ -1676,9 +1695,7 @@ async function runTurn(rawText, target = null) {
   if (isActive) state.busy = true; // 派生值即刻可用；renderSessions 会再校准
   if (isActive && !s.messages.length) $('#chat').innerHTML = '<div class="chat-inner"></div>';
   if (s.title === '新对话') s.title = text.replace(/\s+/g, ' ').slice(0, 18) || '新对话';
-  saveSessions();
-  // 发消息即置 dirty：本轮流式输出与工具结果由周期自动保存（30s）兜底，回合结束 finish 再统一保存
-  markSessionsDirty();
+  saveSessions(); // 此刻只保存标题变更；用户消息与运行中草稿在下方 push 后立即落盘
 
   // 自动压缩：发送前历史超过上下文预算 90% 时先折叠，再走本轮请求（开关见对话页设置）
   maybeAutoCompact(s);
@@ -1708,6 +1725,9 @@ async function runTurn(rawText, target = null) {
     sessionId: s.id, // 会话级并行：收尾附言/审批「本次会话都允许」按归属会话记账
   };
   s.messages.push(draft);
+  // 立即落盘（此前只置 dirty 靠 30s 周期保存兜底）：回合刚发起就崩溃/重载时，
+  // 用户消息与运行中草稿也能从 localStorage 读回，聊天记录不再整轮丢失（架构页幸存问题）。
+  saveSessions();
 
   const node = assistantNode(draft);
   if (inner) inner.appendChild(node);
@@ -2490,6 +2510,7 @@ function runApiTurn(ctx, opts) {
      - 切回会话时 renderChat 重建节点并调 ctl.repaint() → painter.mount 重建 + 已有正文一次成型。 */
   const paint = () => {
     draft.body = body;
+    markSessionsDirty(); // 流式正文增量只置位不落盘：交给 30s 周期保存兜底，避免每 chunk 序列化
     const liveNode = liveDraftNode(draft);
     if (liveNode) {
       // 打断处理：重挂时若入场动画还在播，立即取消 —— 流式正文不该边写边飞
@@ -2665,7 +2686,7 @@ function runApiTurn(ctx, opts) {
         if (sessionStepId.get(s.id) === id) sessionStepId.delete(s.id);
         const aborted = !!endOpts.localAbort || !!draft.aborted || ctl.stopRequested;
         if (aborted) draft.aborted = true;
-        resolve({ error: err || null, aborted, text: stepText, toolCalls: handler.toolCalls, usage: handler.usage });
+        resolve({ error: err || null, aborted, text: stepText, toolCalls: handler.toolCalls, usage: handler.usage, streamed: !firstChunk });
       },
     };
 
@@ -2808,7 +2829,14 @@ function runApiTurn(ctx, opts) {
         approvalId,
         profile: state.permission,
         workspace: state.workspace,
-        providerConfig: opts.cfg ? { baseUrl: opts.cfg.baseUrl, key: opts.cfg.key, model: opts.cfg.model, retry: opts.cfg.retry } : undefined,
+        providerConfig: opts.cfg ? {
+          baseUrl: opts.cfg.baseUrl,
+          key: opts.cfg.key,
+          model: opts.cfg.model,
+          retry: opts.cfg.retry,
+          // F2 修复：把当前会话连接的 profileId 带给 runtime，主进程据此把掩码 key 换回明文
+          profileId: opts.cfg.profileId || undefined,
+        } : undefined,
       });
       if (!executed?.ok) {
         tool.status = 'error';
@@ -2876,7 +2904,7 @@ function runApiTurn(ctx, opts) {
       expanded: false,
     };
     draft.tools.push(tool);
-    markSessionsDirty(); // 工具调用入列即置 dirty，30s 周期保存可捕获中途被杀的回合
+    saveSessions(); // 工具调用入列立即落盘：工具事件间隔秒级，序列化开销可接受；30s tick 只兜底流式正文增量
     revealTools(node, draft);
     renderTools(node, draft);
     scrollToBottom();
@@ -3085,8 +3113,9 @@ function runApiTurn(ctx, opts) {
 
       if (r.error) { finishApi(r.error); return; }
       if (r.aborted) { draft.aborted = true; break; }
-      // 工具回合里模型的文字也显示出来：并入回合正文（带分隔，避免和上一段粘在一起）
-      if (r.text && r.toolCalls.length) {
+      // 工具回合里模型的文字已随 chunk 流入 body（此前的重复追加是「说明出现两遍」的根因）；
+      // 仅当本步没有收到任何 chunk（异常的非流式路径）时才兜底并入，避免同一句话出现两次
+      if (r.text && r.toolCalls.length && !r.streamed) {
         body = body ? body + '\n\n' + r.text : r.text;
         schedulePaint();
       }
@@ -3154,7 +3183,7 @@ async function runPreviewTurn(text, ctx) {
   if (!stopped) {
     for (const tool of script.tools || []) {
       draft.tools.push(tool);
-      markSessionsDirty(); // 同上：工具完成/入列置 dirty
+      saveSessions(); // 工具入列立即落盘（预览回合同真实回合口径）
       toolsBox.insertAdjacentHTML('beforeend', toolRow(tool));
       const row = toolsBox.lastElementChild;
       const spin = document.createElement('span');
@@ -4840,6 +4869,29 @@ async function refreshAgentModelList() {
   } catch { /* 列表拉取失败时保留当前选项 */ }
 }
 
+/* F2 跨接入点委派：并发拉取全部已保存连接的模型清单（主进程按 profileId 注入真实 key），
+   缓存到 state.profileModels，供系统提示「可用连接 / 模型」汇总使用。
+   单个连接失败不影响其他连接；进程内去重（在途请求期间重复调用直接复用）。 */
+let profileModelsInFlight = null;
+function refreshProfileModels() {
+  const profiles = (state.profiles || []).filter((p) => p.baseUrl);
+  if (!profiles.length || !window.dsh?.model?.list) return null;
+  if (profileModelsInFlight) return profileModelsInFlight;
+  profileModelsInFlight = Promise.all(profiles.map(async (p) => {
+    if (Array.isArray(state.profileModels[p.id]) && state.profileModels[p.id].length) return; // 已有缓存
+    try {
+      const r = await window.dsh.model.list({
+        baseUrl: p.baseUrl, key: p.key, profileId: p.id, model: p.model || '',
+      });
+      const ids = (r?.ok && Array.isArray(r.models))
+        ? r.models.map((m) => m && m.id).filter(validModel)
+        : [];
+      if (ids.length) state.profileModels = { ...state.profileModels, [p.id]: ids };
+    } catch { /* 单个连接拉取失败：该连接暂不进汇总清单 */ }
+  })).then(() => { profileModelsInFlight = null; });
+  return profileModelsInFlight;
+}
+
 async function openAgentSheet() {
   openSettings('agents');
   await loadAgents();
@@ -6156,6 +6208,7 @@ async function hydrateProfilesFromVault() {
       }
       loadProfile(state.activeProfileId);
       renderProfiles();
+      refreshProfileModels(); // F2：凭据库回填完成后拉取各连接模型清单，供跨接入点委派汇总
     }
     saveProfiles();
   } catch { /* 凭据库不可用时保持 localStorage 降级模式 */ }
@@ -6414,27 +6467,57 @@ function applyVeil(value) {
   return n;
 }
 
+/* 释放视频对壁纸文件的占用（Windows 下主进程删除/覆盖旧壁纸会因句柄未释放而失败） */
+function detachWallpaperVideo() {
+  const video = $('#wallpaper');
+  if (!video) return;
+  try { video.pause(); } catch { /* 尚未播放 */ }
+  video.removeAttribute('src');
+  try { video.load(); } catch { /* 忽略 */ }
+}
+
 async function applyWallpaper(info) {
   const video = $('#wallpaper');
-  if (!info || !info.file) {
-    try { video.pause(); } catch { /* 尚未播放 */ }
-    video.removeAttribute('src');
-    try { video.load(); } catch { /* 忽略 */ }
-    document.documentElement.removeAttribute('data-wallpaper');
-    setWallState('未设置 · 纯色界面，无模糊、无雾感');
-    return false;
-  }
-  wallErrorHandled = false;
-  video.src = '../assets/' + encodeURIComponent(info.file);
-  document.documentElement.dataset.wallpaper = 'on';
-  setWallState(`正在载入 ${info.file} · ${formatBytes(info.size)} · 静音循环`);
+  if (!video) return false;
   try {
-    await video.play();
-    setWallState(`播放中 ${info.file} · ${formatBytes(info.size)} · 静音循环 · 无遮挡`);
-    return true;
+    if (!info || !info.file) {
+      detachWallpaperVideo();
+      document.documentElement.removeAttribute('data-wallpaper');
+      setWallState('未设置 · 纯色界面，无模糊、无雾感');
+      return false;
+    }
+    wallErrorHandled = false;
+    video.src = '../assets/' + encodeURIComponent(info.file);
+    document.documentElement.dataset.wallpaper = 'on';
+    const size = Number(info.size) || 0;
+    setWallState(`正在载入 ${info.file} · ${formatBytes(size)} · 静音循环`);
+    try {
+      await video.play();
+      setWallState(`播放中 ${info.file} · ${formatBytes(size)} · 静音循环 · 无遮挡`);
+      return true;
+    } catch (err) {
+      // NotSupportedError = 文件缺失或编码不受支持（mkv/avi 等 Chromium 解不了），
+      // 不是「自动播放被拦」：立即降级纯色并清掉失效记录，不给用户留一块黑屏
+      const unsupported = err?.name === 'NotSupportedError';
+      if (unsupported) {
+        detachWallpaperVideo();
+        document.documentElement.removeAttribute('data-wallpaper');
+        setWallState(`视频无法加载（文件缺失或编码不支持）· 已回到纯色界面`);
+        toast(`视频壁纸无法加载：${info.file}，已降级为纯色背景`);
+        window.dsh?.wallpaper?.clear?.().catch?.(() => {});
+        return false;
+      }
+      // 真正的自动播放拦截：首帧仍可见，明确告知而不是静默失败
+      setWallState(`已载入 ${info.file}，自动播放被阻止：${err?.message || err}`);
+      return false;
+    }
   } catch (err) {
-    // 静音视频一般可自动播放；被拦时首帧仍可见，明确告知而不是静默失败
-    setWallState(`已载入 ${info.file}，自动播放被阻止：${err?.message || err}`);
+    // 任何未预期异常都不外抛：降级为纯色并给用户可读提示
+    console.warn('[wallpaper] 应用壁纸失败：', err?.message || err);
+    try { detachWallpaperVideo(); } catch { /* 已尽力清理 */ }
+    document.documentElement.removeAttribute('data-wallpaper');
+    setWallState(`壁纸设置出错（${String(err?.message || err).slice(0, 60)}）· 已降级为纯色界面`);
+    toast(`壁纸设置出错：${err?.message || err}，已降级为纯色背景`);
     return false;
   }
 }
@@ -6445,11 +6528,12 @@ async function initWallpaper() {
   video.addEventListener('error', () => {
     if (wallErrorHandled) return;
     wallErrorHandled = true;
-    toast('视频编码不受支持，已回到纯色背景');
+    // 覆盖两类失效：文件被外部删除/改名（current 返回失效路径）与编码不支持
+    toast('视频壁纸加载失败（文件缺失或编码不支持），已回到纯色背景');
     document.documentElement.removeAttribute('data-wallpaper');
     video.removeAttribute('src');
     try { video.load(); } catch { /* 忽略 */ }
-    setWallState('视频无法解码 · 已回到纯色界面（无模糊）');
+    setWallState('视频无法加载 · 已回到纯色界面（无模糊）');
     window.dsh?.wallpaper?.clear?.().catch?.(() => {});
   });
   applyTint(readStorage('dsh.tint', '0'));
@@ -7094,14 +7178,25 @@ function bind() {
     if (!window.dsh?.wallpaper) { toast('当前桌面外壳不支持视频壁纸'); return; }
     const btn = $('#pickWallpaper');
     btn.disabled = true;
+    // pick 前先释放旧壁纸文件句柄（Windows 上主进程删除/覆盖被播放中的文件会失败）；
+    // 用户取消选择时按 current() 恢复原壁纸，状态不残留
+    detachWallpaperVideo();
     try {
       const r = await window.dsh.wallpaper.pick();
-      if (r?.canceled) return;
-      if (!r?.ok) { toast(r?.error || '设置失败'); return; }
+      if (r?.canceled) {
+        await applyWallpaper(await window.dsh.wallpaper.current?.());
+        return;
+      }
+      if (!r?.ok) {
+        toast(r?.error || '设置失败');
+        await applyWallpaper(await window.dsh.wallpaper.current?.()); // 主进程可能已删旧文件，按实际状态恢复
+        return;
+      }
       await applyWallpaper({ file: r.file, size: r.size });
       toast('视频壁纸已启用');
     } catch (err) {
       toast(`设置失败：${err?.message || err}`);
+      await applyWallpaper(await Promise.resolve(window.dsh?.wallpaper?.current?.()).catch(() => null)); // 失败也按实际状态兜底恢复
     } finally {
       btn.disabled = false;
     }
@@ -7334,6 +7429,7 @@ function boot() {
   loadProfiles(false);
   loadProfile(state.activeProfileId);
   hydrateProfilesFromVault();
+  refreshProfileModels(); // F2：启动时按全部连接拉模型清单（localStorage 降级路径也能覆盖到）
   loadModelCache();
   syncSourcePane(sourceOf());
   renderSessions();

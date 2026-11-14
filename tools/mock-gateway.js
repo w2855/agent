@@ -144,6 +144,7 @@ function handleChat(body, res) {
   const isTodoUpdate = String(userText).includes('[[todo-update');
   const isMany = String(userText).includes('[[many');
   const isTamper = String(userText).includes('[[tamper');
+  const isNarr = String(userText).includes('[[narr');
   const delegateMatch = String(userText).match(/\[\[delegate:([A-Za-z0-9_]+)\]\]/);
   const isDelegate = !!delegateMatch;
   const isChildWrite = String(userText).includes('[[child-write]]');
@@ -156,6 +157,11 @@ function handleChat(body, res) {
     // 同一回合里第二次 todo_write：把清单全部置为已完成
     if (isTodoUpdate && toolMsgs.length === 1) {
       return streamToolCall(res, 'todo_write', { tasks: TODO_DONE });
+    }
+    // [[narr]] 第二步工具：也先播报一句再调用，供渲染层「正文去重/叙述行退让」断言
+    if (isNarr && toolMsgs.length === 1) {
+      sse(res, { choices: [{ index: 0, delta: { content: '再读一下文件内容。' } }] });
+      return streamToolCall(res, 'read_file', { path: 'dsh-tool-e2e.txt' });
     }
     const content = toolMsgs.map((m) => String(m.content || '')).join(' | ').slice(0, 300);
     const finishTurn = () => {
@@ -207,6 +213,12 @@ function handleChat(body, res) {
 
   if (isTodoUpdate) {
     return streamToolCall(res, 'todo_write', { tasks: TODO_INITIAL });
+  }
+
+  // [[narr]] 第一步：先流式播报一句，再发起工具调用——模拟「调用工具前先说一句话」的模型行为
+  if (isNarr) {
+    sse(res, { choices: [{ index: 0, delta: { content: '先看一下目录结构。' } }] });
+    return streamToolCall(res, 'list_dir', { path: '.' });
   }
 
   if (String(userText).includes('[[arch')) {
