@@ -445,7 +445,35 @@ class StateStore {
     return false;
   }
 
-  /** 任务收尾（成功/失败/取消）：summary = 任务目标前 120 字 + 结束标签，tags = [agentId] */
+  /**
+   * 验证门计算（ruflo verified-guards）：从该任务（跨全部 Run）的工具执行链推导
+   * { tainted, taintReason, verified, verifiedBy }。
+   * 工具执行记录以状态快照中的 toolCalls 为准（事件链 tool.* 事件的投影，与
+   * _validationChecks 同源；事件 payload 不含 args/exitCode，快照才含完整参数）。
+   * 任何异常都退化为「未验证、未污染」，绝不影响收尾主链路。
+   */
+  _taskGate(task) {
+    const fallback = { tainted: false, taintReason: '', verified: false, verifiedBy: [] };
+    try {
+      if (!task) return fallback;
+      const calls = [];
+      for (const call of Object.values(this.state.toolCalls)) {
+        if (!call || call.taskId !== task.id) continue;
+        calls.push({
+          name: call.name,
+          args: call.args,
+          ok: call.status === 'succeeded',
+          exitCode: Number(call.resultMeta && call.resultMeta.exitCode),
+        });
+      }
+      const taint = lessons.detectTaint(calls);
+      const verify = lessons.detectVerification(calls);
+      return { tainted: taint.tainted, taintReason: taint.reason, ...verify };
+    } catch { return fallback; }
+  }
+
+  /** 任务收尾（成功/失败/取消）：summary = 任务目标前 120 字 + 结束标签，tags = [agentId]；
+      附验证门结果（verified/verifiedBy/tainted/taintReason） */
   _recordTaskOutcome(task, outcome, { runId, errorCode, endedStatus } = {}) {
     if (!task) return;
     const goal = typeof task.input === 'string' && task.input ? task.input : String(task.title || '');
@@ -457,10 +485,12 @@ class StateStore {
       summary: `${goal.slice(0, 120)} [${endedStatus || outcome}]`,
       tags: [task.agentId].filter(Boolean),
       evidence: { runId, errorCode },
+      ...this._taskGate(task),
     });
   }
 
-  /** 委派子任务收尾：用委派记录 id 作幂等键（避免与子任务自身 outcome 撞键），tag 含 'delegation' */
+  /** 委派子任务收尾：用委派记录 id 作幂等键（避免与子任务自身 outcome 撞键），tag 含 'delegation'；
+      验证门用子任务的工具执行链判定 */
   _recordDelegationOutcome(record, status) {
     if (!record) return;
     const outcome = status === 'succeeded' ? 'success' : status === 'canceled' ? 'canceled' : 'failed';
@@ -472,6 +502,7 @@ class StateStore {
       summary: `${String(record.objective || '').slice(0, 120)} [delegation:${status}]`,
       tags: [record.targetAgentId, 'delegation'].filter(Boolean),
       evidence: { runId: record.childRunId, errorCode: record.errorCode },
+      ...this._taskGate(this.state.tasks[record.childTaskId]),
     });
   }
 
