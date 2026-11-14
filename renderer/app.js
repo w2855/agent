@@ -445,7 +445,8 @@ function renderHost() {
 function inline(text) {
   return text
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/(^|[\s(])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    // 边界含中文标点：否则「、*斜体*、」这类紧跟中文标点的斜体不生效
+    .replace(/(^|[\s(、，。！？：；【】（）“”‘’《》—…])\*([^*\n]+)\*/g, '$1<em>$2</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 }
@@ -521,6 +522,10 @@ function createStreamPainter(prose) {
   let stableLen = -1;
   let lastTailPaint = 0;
   return {
+    // 首个 token 到达前的思考指示（三点波浪），第一个 paint 自然把它冲掉
+    think() {
+      liveEl.innerHTML = '<span class="thinking"><i></i><i></i><i></i></span>';
+    },
     paint(body) {
       const cut = stableBoundary(body);
       if (cut !== stableLen) {
@@ -715,6 +720,8 @@ function assistantNode(msg) {
     const tools = $('.tools', node);
     tools.classList.toggle('hidden');
     summary.classList.toggle('collapsed', tools.classList.contains('hidden'));
+    // 标记用户手动操作过折叠区：流式回合中 runApiTurn 的自动收起据此跳过（ZCode 规则）
+    node.dataset.toolsTouched = '1';
   });
   return node;
 }
@@ -960,7 +967,9 @@ function buildApiMessages(session, currentText, draft, skipUser) {
     content: '你是 DSH 桌面助手，用简体中文回答。回复简洁、结构化，可用 Markdown。'
       + '你可以使用系统提供的工具读写本地文件、搜索、执行命令或访问网页；需要时直接调用工具，'
       + '工具结果由系统返回。任务清单（todo_write）由你自行判断是否使用：任务复杂、步骤较多时可以建立清单并更新进度。'
-      + '不要虚构工具调用、工具结果或文件产出。',
+      + '不要虚构工具调用、工具结果或文件产出。'
+      + '调用工具前先用一句话（不超过 20 字）说明你接下来要做什么，让用户知道进展；连续同类工具调用不必反复说明；'
+      + '关键工具结束后用一句话报告结果或下一步。',
   }, {
     role: 'system',
     content: PERM_PROMPT[state.permission],
@@ -1622,7 +1631,10 @@ async function openInspector() {
   inspector.replayCursor = null;
   inspector.nodeDetail = '';
   const panel = $('#inspector');
-  if (panel) panel.hidden = false;
+  if (panel) {
+    panel.classList.remove('is-closing'); // 可能正播出场动画，取消它
+    panel.hidden = false;
+  }
   $('.main')?.classList.add('inspector-open');
   inspector.runId = findSessionRunId();
   const body = $('#inspBody');
@@ -1635,9 +1647,8 @@ function closeInspector() {
   stopReplay();
   clearTimeout(inspector.timer);
   clearTimeout(inspector.seekTimer);
-  const panel = $('#inspector');
-  if (panel) panel.hidden = true;
-  $('.main')?.classList.remove('inspector-open');
+  $('.main')?.classList.remove('inspector-open'); // 侧栏滑出与面板淡出同时进行
+  animateOut($('#inspector'), 220);
 }
 
 async function pickInspectorTask(taskId) {
@@ -1811,6 +1822,7 @@ function runApiTurn(ctx, opts) {
   };
 
   const painter = createStreamPainter(prose);
+  painter.think(); // 首个 chunk 前的思考指示，避免「发出去就没动静」的死寂感
   const paint = () => {
     draft.body = body;
     painter.paint(body);
@@ -1825,6 +1837,19 @@ function runApiTurn(ctx, opts) {
     draft.summary.label = label;
     const summaryEl = $('.summary', node);
     if (summaryEl) summaryEl.innerHTML = summaryText(draft.summary) + ico('i-chevron', 'ico tiny chev');
+  };
+
+  // 工具调用跑完后正文开始返回时，自动收起折叠区一次（ZCode shouldAutoCollapseReasoning 模式）。
+  // 用户本轮手动点过就不再动；中断/出错路径收不到正文 chunk，天然不会触发。
+  let toolsAutoCollapsed = false;
+  const autoCollapseTools = () => {
+    if (toolsAutoCollapsed || node.dataset.toolsTouched) return;
+    const tools = $('.tools', node);
+    if (!tools || tools.classList.contains('hidden')) return;
+    const head = $('.summary', node);
+    toolsAutoCollapsed = true;
+    tools.classList.add('hidden');
+    head?.classList.add('collapsed');
   };
 
   const clearRetry = () => {
@@ -1933,6 +1958,8 @@ function runApiTurn(ctx, opts) {
         else if (e.type === 'chunk') {
           if (retryTick) clearRetry();
           setSummaryLabel('进行中');
+          // 本轮已有工具调用、且是本步首个非空正文 chunk → 自动收起一次（仅 runApiTurn，预览路径不动）
+          if (firstChunk && e.text && draft.tools.length) autoCollapseTools();
           stepText += e.text;
           if (firstChunk) {
             body += body ? '\n\n' + e.text : e.text;
@@ -2814,7 +2841,19 @@ function removeAttachment(i) {
 
 /* ───────── 浮层 ───────── */
 
-function hideMenus() { $$('.menu').forEach((m) => (m.hidden = true)); }
+/* 关闭动效共用：加 .is-closing 播完出场动画再真正隐藏。
+   期间若被重新打开（is-closing 已被移除），超时回调自动作废，不会误关。 */
+function animateOut(el, ms = 200) {
+  if (!el || el.hidden) return;
+  el.classList.add('is-closing');
+  setTimeout(() => {
+    if (!el.classList.contains('is-closing')) return;
+    el.classList.remove('is-closing');
+    el.hidden = true;
+  }, ms);
+}
+
+function hideMenus() { $$('.menu').forEach((m) => animateOut(m, 130)); }
 
 /* ───────── 任务清单面板（右上角） ───────── */
 
@@ -2844,16 +2883,18 @@ function renderTodoPanel() {
 function toggleTodoPanel() {
   const panel = $('#todoPanel');
   if (!panel) return;
-  if (!panel.hidden) { panel.hidden = true; return; }
+  if (!panel.hidden) { animateOut(panel, 150); return; }
   hideMenus();
   renderTodoPanel();
+  panel.classList.remove('is-closing');
   panel.hidden = false;
 }
 
 function openMenu(id, anchor) {
   const menu = document.getElementById(id);
-  if (!menu.hidden) { menu.hidden = true; return; }
+  if (!menu.hidden) { animateOut(menu, 130); return; }
   hideMenus();
+  menu.classList.remove('is-closing'); // 可能正播出场动画，取消它
   menu.hidden = false;
   const r = anchor.getBoundingClientRect();
   const width = menu.offsetWidth || 210;
@@ -2868,14 +2909,18 @@ function openMenu(id, anchor) {
 
 function openSheet(id) {
   hideMenus();
-  $('#scrim').hidden = false;
-  document.getElementById(id).hidden = false;
+  const scrim = $('#scrim');
+  scrim.classList.remove('is-closing');
+  scrim.hidden = false;
+  const sheet = document.getElementById(id);
+  sheet.classList.remove('is-closing');
+  sheet.hidden = false;
 }
 function closeSheets() {
   state.modelReturnSheet = '';
   state.modelSheetFrom = '';
-  $('#scrim').hidden = true;
-  $$('.sheet').forEach((s) => (s.hidden = true));
+  animateOut($('#scrim'), 170);
+  $$('.sheet').forEach((s) => animateOut(s, 190));
 }
 
 /** 从模型列表返回时回到 API 面板，而不是把所有面板一起关掉。 */
@@ -2884,10 +2929,12 @@ function closeSheet(id) {
     const back = state.modelReturnSheet;
     state.modelReturnSheet = '';
     state.modelSheetFrom = '';
-    $('#modelSheet').hidden = true;
+    animateOut($('#modelSheet'), 190);
     const el = document.getElementById(back);
     if (el) {
+      el.classList.remove('is-closing');
       el.hidden = false;
+      $('#scrim').classList.remove('is-closing');
       $('#scrim').hidden = false;
       return;
     }
@@ -3670,7 +3717,11 @@ async function openArchPage() {
   if (!window.dsh?.runtime?.projects?.ensure) { toast('当前不在桌面外壳里运行，无法读取项目架构'); return; }
   state.projectOpen = true;
   archSessionState();
-  $('#archPage').hidden = false;
+  const page = $('#archPage');
+  if (page) {
+    page.classList.remove('is-closing'); // 可能正播出场动画，取消它
+    page.hidden = false;
+  }
   const canvas = $('#archCanvas');
   if (canvas) canvas.innerHTML = `<div class="arch-empty-state"><span class="arch-empty-icon">${ico('i-package')}</span><h3>正在读取项目架构…</h3><p>同步 Runtime 中的项目、任务与 Agent 状态。</p></div>`;
   await ensureWorkspace();
@@ -3684,8 +3735,7 @@ function closeArchPage() {
   resetArchAnimation();
   clearTimeout(archState.refreshTimer);
   clearTimeout(archState.pollTimer);
-  const page = $('#archPage');
-  if (page) page.hidden = true;
+  animateOut($('#archPage'), 220);
 }
 
 async function saveArchGoal(silent = false) {
