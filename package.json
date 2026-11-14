@@ -33,7 +33,7 @@
       "renderer/**",
       "assets/**",
       "package.json",
-      "!assets/pet/**/*.frames"
+      "!assets/pet/**"
     ],
     "win": {
       "icon": "assets/icon.png",
