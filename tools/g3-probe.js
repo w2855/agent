@@ -36,7 +36,8 @@
     const hits = findState.hits;
     const byMsg = {};
     for (const h of hits) byMsg[h.msgId] = (byMsg[h.msgId] || 0) + 1;
-    check('find.hitCount', hits.length === 4, JSON.stringify(byMsg));
+    const segDump = [...($$('#chat .msg')[1] ? $$('.prose', $$('#chat .msg')[1]) : [])].map((el) => el.textContent.slice(0, 24)).join('|');
+    check('find.hitCount', hits.length === 4, JSON.stringify(byMsg) + ' SEG=' + segDump);
     check('find.highlightRegistered', !!CSS.highlights?.get('find-highlight'), CSS.highlights?.get('find-highlight')?.size);
     check('find.activeRegistered', !!CSS.highlights?.get('find-highlight-active'));
     check('find.countText', $('#findCount').textContent === '1/4', $('#findCount').textContent);

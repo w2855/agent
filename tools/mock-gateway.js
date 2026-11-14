@@ -133,7 +133,8 @@ function handleChat(body, res) {
   const userText = [...msgs].reverse().find((m) => m.role === 'user')?.content || '';
   const toolMsgs = msgs.filter((m) => m.role === 'tool');
   const toolDefs = Array.isArray(body.tools) ? body.tools : [];
-  console.log('[mock] chat msgs=%d tools=%d toolMsgs=%d effort=%s trigger=%s', msgs.length, toolDefs.length, toolMsgs.length, body.reasoning_effort || '-', String(userText).slice(0, 40));
+  const nudges = msgs.filter((m) => m.role === 'system' && String(m.content || '').includes('流程提醒')).length;
+  console.log('[mock] chat msgs=%d tools=%d toolMsgs=%d nudges=%d effort=%s trigger=%s', msgs.length, toolDefs.length, toolMsgs.length, nudges, body.reasoning_effort || '-', String(userText).slice(0, 40));
 
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -150,6 +151,26 @@ function handleChat(body, res) {
   const isChildWrite = String(userText).includes('[[child-write]]');
 
   if (toolMsgs.length) {
+    // [[narrslow]] 多步慢速：工具落定后 3 秒间隙（模拟真实 API 首 token 延迟）再播报第二步——
+    // 供「工具调用中途不说话」实时渲染探针逐帧抓 DOM：模型文字到达时界面必须同步出现
+    if (String(userText).includes('[[narrslow]]')) {
+      if (toolMsgs.length === 1) {
+        setTimeout(() => {
+          sse(res, { choices: [{ index: 0, delta: { content: '第二步：再核对文件内容。' } }] });
+          streamToolCall(res, 'read_file', { path: 'dsh-tool-e2e.txt' });
+        }, 3000);
+        return; // 3 秒间隙：响应挂起，什么都不发
+      }
+      if (toolMsgs.length >= 2) {
+        const content2 = toolMsgs.map((m) => String(m.content || '')).join(' | ').slice(0, 200);
+        sse(res, { choices: [{ index: 0, delta: { content: '收尾：' + content2 } }] });
+        sse(res, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+        sse(res, { usage: { prompt_tokens: 12, completion_tokens: 6, total_tokens: 18 } });
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+    }
     // 连续调用 20 次后再收尾，用于验证工具调用没有次数上限
     if (isMany && toolMsgs.length < 20) {
       return streamToolCall(res, 'list_dir', { path: '.' });

@@ -1234,29 +1234,71 @@ function toolSignature(t) {
 
 /* 工具行增量更新：按 data-tool-id 定位，内容签名没变的行不碰 DOM。
    旧实现每次全量 innerHTML 重建，扫光/展开态/悬停态全部重来一次，就是用户看到的闪烁 */
+/* 多步回合分段：按每张工具卡的 bodyAtStart 入列快照把正文切成「说明段 + 卡片」交替。
+   段 k = body.slice(上一卡快照, 本卡快照) —— 即本卡所属步骤的模型说明；
+   卡片显示在说明之后（用户要求「工具调用卡片上面说话」，像人一样边干边说）。
+   最后一段 = 最后一张卡快照到正文尾部（下一步说明流式区 / 最终总结）。
+   旧数据（无快照）：全部文字与卡片归单段，视觉等同旧结构，历史会话不变形。 */
+function bodySegments(msg) {
+  const tools = msg.tools || [];
+  const body = String(msg.body || '');
+  const hasSnap = tools.length > 0 && tools.every((t) => typeof t.bodyAtStart === 'number');
+  if (!hasSnap) return [{ text: body, tools }];
+  const segs = [];
+  let prev = 0;
+  for (const t of tools) {
+    const st = Math.max(prev, Math.min(t.bodyAtStart, body.length));
+    segs.push({ text: body.slice(prev, st), tools: [t] });
+    prev = st;
+  }
+  segs.push({ text: body.slice(prev), tools: [] });
+  return segs;
+}
+
 function renderTools(node, msg) {
-  renderNarrate(node, msg); // 叙述行随工具状态联动（入列/执行中显示，落定淡出）
+  renderNarrate(node, msg); // 叙述行随工具状态联动
   const box = $('.tools', node);
   if (!box) return;
-  const tools = msg.tools || [];
+  const segs = bodySegments(msg);
+  // 流式回合的最后一段由 painter 负责写，这里不碰避免互相覆盖——
+  // 用「该消息的回合正在跑」精确判定：fake/历史消息（无 finishedAt）不会被误判成流式中
+  const liveTurn = !msg.finishedAt && [...state.turns.values()].some((t) => t.draft === msg);
+  // 段组对齐：段数 = segs.length（每段 = .seg > .prose + .tools-seg）
+  while (box.children.length < segs.length) {
+    const seg = document.createElement('div');
+    seg.className = 'seg';
+    seg.innerHTML = '<div class="prose"></div><div class="tools-seg"></div>';
+    box.appendChild(seg);
+  }
+  while (box.children.length > segs.length) box.lastElementChild.remove();
+  // 段文字：定稿段 markdown 一次成型（html 签名跳过重复渲染）；最后段流式回合由 painter 写
+  segs.forEach((sg, i) => {
+    const proseEl = box.children[i].firstElementChild;
+    if (liveTurn && i === segs.length - 1) return;
+    const html = markdown(sg.text);
+    if (proseEl.dataset.segHtml !== html) { proseEl.innerHTML = html; proseEl.dataset.segHtml = html; }
+  });
+  // 卡片分发：每段卡片进自己的 .tools-seg（全局签名增量，行内容没变零 DOM 写入）
   const seen = new Set();
   const existing = new Map();
   $$('.tool-wrap', box).forEach((el) => existing.set(el.dataset.toolId, el));
-  for (const t of tools) {
-    const id = String(t.id || '');
-    seen.add(id);
-    const sig = toolSignature(t);
-    const old = existing.get(id);
-    if (old && old.dataset.sig === sig) continue; // 没变化的行零 DOM 写入
-    const wrap = document.createElement('div');
-    wrap.className = 'tool-wrap';
-    wrap.dataset.toolId = id;
-    wrap.dataset.sig = sig;
-    wrap.innerHTML = toolRow(t);
-    if (old) box.replaceChild(wrap, old);
-    else box.appendChild(wrap);
-  }
-  // 防御：清掉已不存在的工具行（消息数组被替换的场景）
+  segs.forEach((sg, i) => {
+    const segBox = box.children[i].lastElementChild;
+    for (const t of sg.tools) {
+      const id = String(t.id || '');
+      seen.add(id);
+      const sig = toolSignature(t);
+      const old = existing.get(id);
+      if (old && old.dataset.sig === sig && old.parentElement === segBox) continue;
+      const wrap = document.createElement('div');
+      wrap.className = 'tool-wrap';
+      wrap.dataset.toolId = id;
+      wrap.dataset.sig = sig;
+      wrap.innerHTML = toolRow(t);
+      if (old) old.remove();
+      segBox.appendChild(wrap);
+    }
+  });
   for (const [id, el] of existing) if (!seen.has(id)) el.remove();
 }
 
@@ -1350,17 +1392,15 @@ function assistantNode(msg) {
       ${ico('i-chevron', 'ico tiny chev')}
     </button>
     <div class="slot-tasks"></div>
+    <div class="${toolsCls} seg-box"></div>
     <div class="slot-narrate"></div>
-    <div class="${toolsCls}"></div>
     <div class="slot-retry"></div>
     <div class="slot-approval">${approvalCard(msg.approval)}</div>
-    <div class="prose"></div>
     <div class="slot-files">${filesCard(msg.files)}</div>
     <div class="slot-metrics">${msgTailHtml(msg)}</div>
     <div class="msg-actions"><button data-copy-msg title="复制全文"><svg class="ico tiny"><use href="#i-copy"/></svg></button></div>
   `;
 
-  if (msg.body) $('.prose', node).innerHTML = markdown(msg.body);
   renderTasks(node, msg);
   renderTools(node, msg);
 
@@ -1436,6 +1476,7 @@ function renderChat() {
   }
   for (const m of s.messages) {
     const node = m.role === 'user' ? userNode(m) : assistantNode(m);
+    if (m.role === 'assistant') renderTools(node, m); // 分段渲染投影：段文字+卡片（重建节点后的唯一渲染入口，流式回合随后 repaint 接管）
     if (!enteredMessages.has(m)) {
       enteredMessages.add(m);
       node.classList.add('is-enter');
@@ -2595,12 +2636,17 @@ async function loadProject(force = false) {
   if (!window.dsh?.runtime?.projects?.ensure) return null;
   const workspace = state.workspace;
   if (!workspace) return null;
-  if (!force && state.project && state.projectWorkspace === workspace) return state.project;
+  /* 会话维度参与缓存与 ensure：架构按 workspace+sessionId 隔离（R3），
+     切会话时不能命中上一个会话的缓存项目，ensure 也要带当前会话 id——
+     否则无 sid 走共享查找路径，先开架构页的会话会建出共享项目，其他会话全看到它。 */
+  const archSessionId = (active() && active().id) || '';
+  if (!force && state.project && state.projectWorkspace === workspace
+    && ((state.project.project?.sessionId || '') === archSessionId)) return state.project;
   if (state.projectLoading) return state.project;
   state.projectLoading = true;
   state.projectError = '';
   try {
-    const r = await window.dsh.runtime.projects.ensure({ workspace });
+    const r = await window.dsh.runtime.projects.ensure({ workspace, sessionId: archSessionId || undefined });
     if (r?.ok && r.data?.project) {
       state.project = r.data;
       state.projectWorkspace = workspace;
@@ -2667,8 +2713,8 @@ function runApiTurn(ctx, opts) {
     return out;
   };
 
-  const painter = createStreamPainter(prose);
-  painter.think(); // 首个 chunk 前的思考指示，避免「发出去就没动静」的死寂感
+  const painter = createStreamPainter(null); // prose 目标动态取最后段（paint 内 mount），分段渲染下不再绑定固定节点
+  painter.think();
   /* 流式渲染经 data-msg-id 中转（会话级并行关键修复）：
      - 节点在当前 DOM → 必要时把 painter 重挂到新 prose，正常画；
      - 节点不在（会话切走了）→ 只更新 draft 数据，DOM 不碰；
@@ -2680,8 +2726,11 @@ function runApiTurn(ctx, opts) {
     if (liveNode) {
       // 打断处理：重挂时若入场动画还在播，立即取消 —— 流式正文不该边写边飞
       node.classList.remove('is-enter');
-      painter.mount($('.prose', liveNode));
-      painter.paint(body);
+      renderTools(node, draft); // 段组对齐 + 定稿段渲染 + 卡片分发（签名跳过，便宜）
+      const proses = $$('.prose', liveNode);
+      painter.mount(proses[proses.length - 1]); // 挂到最后一段：当前步骤的流式说明区
+      const segs = bodySegments(draft);
+      painter.paint(segs[segs.length - 1].text); // 只画最后一段，历史段说明已定稿渲染
       if (stickBottom) scrollToBottom();
     }
   };
@@ -2778,8 +2827,11 @@ function runApiTurn(ctx, opts) {
             if (head) head.innerHTML = summaryText(draft.summary) + ico('i-chevron', 'ico tiny chev');
             const failed = v.checks.filter((c) => c.status === 'failed');
             const lines = failed.map((c) => `- ${c.name}：${c.detail}`).join('\n');
-            const bodyEl = $('.prose', node);
-            if (bodyEl) bodyEl.insertAdjacentHTML('beforeend', markdown(`**后置校验未通过**\n\n${lines}`));
+            // 改数据再走分段渲染：直接 append 到 DOM 会在切会话重建后丢失（旧缺陷）
+            draft.body = draft.body + '\n\n**后置校验未通过**\n\n' + lines;
+
+            renderTools(node, draft);
+            saveSessions();
             toast('后置校验未通过，任务已标记失败');
           }).catch(() => { /* Runtime 不可用时不影响 UI 收尾 */ });
         }
@@ -2789,15 +2841,15 @@ function runApiTurn(ctx, opts) {
     if (err) {
       draft.error = err;
       draft.body = `**API 调用失败**\n\n\`\`\`\n${err}\n\`\`\``;
-      prose.innerHTML = markdown(draft.body);
+      // prose 直写移除：走 finish 后的 renderTools 分段渲染
       toast('API 调用失败');
       // 发送失败同步一条系统通知；tag 与 finish() 相同，两条路径只会发一条 toast
       osNotify('回合失败', `${s.title}：API 调用失败，回来看看原因`, 'turn:' + s.id);
-      finish(draft, node, s, false, '调用失败');
+      finish(draft, node, s, false, '调用失败');      renderTools(node, draft); // 分段渲染收尾：finish 已置 finishedAt，最后段也可定稿渲染
     } else {
       draft.body = body || '（模型未返回内容）';
       prose.innerHTML = markdown(draft.body);
-      finish(draft, node, s, aborted);
+      finish(draft, node, s, aborted);      renderTools(node, draft);
     }
   };
 
@@ -2855,6 +2907,7 @@ function runApiTurn(ctx, opts) {
       },
     };
 
+    handler.draft = draft; // 精确判定「该消息的回合正在流式」供分段渲染使用
     state.turns.set(id, handler);
     state.activeTurnId = id;
     sessionStepId.set(s.id, id); // 会话级并行：主进程 abort 按「会话 → 当前请求」精确定位
@@ -3311,6 +3364,18 @@ function runApiTurn(ctx, opts) {
         if (ctl.stopRequested) draft.aborted = true;
         break;
       }
+      /* 「边干边说」结构性保证（用户要求模型像人一样每步开口，不能依赖模型自觉）：
+         工具结果回传后、下一步请求前，动态注入一条流程提醒——每一步都重新施加，
+         模型不说明就继续调用会被这条消息拦着。仅进 API 消息流，不落会话历史与正文。
+         先移除上一步的提醒再注入新的：只保留最新一条，长任务不随步数累积膨胀。 */
+      for (let ni = messages.length - 1; ni >= 0; ni--) {
+        if (messages[ni] && messages[ni].__nudge) { messages.splice(ni, 1); break; }
+      }
+      messages.push({
+        role: 'system',
+        __nudge: true, // 防累积标记：每步发起前移除上一步提醒，只保留最新一条
+        content: '（流程提醒）工具结果已返回。请先用一句短句说明结果要点与下一步动作（不超过 20 字），然后再调用下一个工具或给出最终结果；不要跳过说明直接发起下一批工具调用。',
+      });
     }
 
     finishApi(null);
@@ -3415,7 +3480,8 @@ async function streamText(text, prose, draft, ctl) {
     draft.body = text.slice(0, i);
     const liveNode = liveDraftNode(draft);
     if (liveNode) {
-      painter.mount($('.prose', liveNode));
+      renderTools(liveNode, draft); // 预览无快照 → 单段：先建段组，卡片也会被分发进段
+      const proses = $$('.prose', liveNode); painter.mount(proses[proses.length - 1]);
       painter.paint(draft.body);
       if (stickBottom) scrollToBottom();
     }
@@ -3423,7 +3489,11 @@ async function streamText(text, prose, draft, ctl) {
   }
   draft.body = text.slice(0, i);
   const finalNode = liveDraftNode(draft);
-  if (finalNode) $('.prose', finalNode).innerHTML = markdown(draft.body);
+  if (finalNode) {
+    const fps = $$('.prose', finalNode);
+    const last = fps[fps.length - 1];
+    if (last) last.innerHTML = markdown(draft.body);
+  }
 }
 
 function buildMetrics(draft) {
@@ -6752,7 +6822,9 @@ function startRename() {
 const FIND_HL = 'find-highlight';
 const FIND_HL_ACTIVE = 'find-highlight-active';
 /* 非正文区：收集命中时跳过工具行、审批卡、指标等包裹层 */
-const FIND_SKIP = '.tools, .approval, .tool-detail, .metrics, .files, .tasks-card, .msg-actions, .resume-row';
+/* 分段渲染后 .tools 同时是段组容器（.seg-box，内含正文段）——查找要跳过的是工具卡片明细，
+   不是段组本身：用 :not(.seg-box) 保留正文段可搜，卡片明细仍由 .tools-seg/.tool-detail 拒绝 */
+const FIND_SKIP = '.tools:not(.seg-box), .approval, .tool-detail, .metrics, .files, .tasks-card, .msg-actions, .resume-row';
 const findState = { open: false, query: '', lastQuery: '', hits: [], idx: 0, inputTimer: 0 };
 
 function findHighlightSupported() {

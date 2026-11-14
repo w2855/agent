@@ -104,7 +104,8 @@
   const vMsg = lastAssistant();
   const labelOk = await waitUntil(() => lastAssistant()?.summary?.label === '校验失败', 6000);
   add('收尾校验失败后回合标记「校验失败」', okV && vMsg?.summary?.label === '校验失败', `label=${vMsg?.summary?.label}`);
-  add('校验失败后展示失败明细', labelOk && !!lastNode()?.querySelector('.prose')?.textContent.includes('后置校验未通过'), lastNode()?.querySelector('.prose')?.textContent?.slice(-80));
+  const segText = [...(lastNode()?.querySelectorAll('.prose') || [])].map((el) => el.textContent).join('');
+  add('校验失败后展示失败明细', labelOk && segText.includes('后置校验未通过'), segText.slice(-80));
   const vTask = vMsg?.runtime?.taskId ? await window.dsh.runtime.tasks.get(vMsg.runtime.taskId) : null;
   add('Runtime Task/Run 同步标记 failed', vTask?.ok && vTask.data.task.status === 'failed' && vTask.data.runs[0]?.status === 'failed', JSON.stringify({ task: vTask?.data?.task?.status, run: vTask?.data?.runs?.[0]?.status }));
 

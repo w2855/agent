@@ -743,6 +743,13 @@ input.tint-range::-webkit-slider-thumb {
   transition: max-height 240ms ease, opacity 180ms ease, margin 240ms ease;
 }
 .tools.hidden { max-height: 0; opacity: 0; margin-bottom: 0; }
+/* 分段回合：.tools.seg-box = 每步「模型说明段 + 该步工具卡片」交替（卡片上面说话） */
+.tools.seg-box { max-height: none; overflow: visible; }
+.tools.seg-box.hidden { max-height: 0; opacity: 0; margin-bottom: 0; overflow: hidden; }
+.seg { margin: 0 0 10px; }
+.seg .prose { margin: 0 0 7px; }
+.seg .prose:empty { margin: 0; min-height: 0; }
+.tools-seg { display: flex; flex-direction: column; gap: 1px; }
 
 .tool {
   display: flex; align-items: center; gap: 8px;
