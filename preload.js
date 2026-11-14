@@ -5,6 +5,15 @@ const { contextBridge, ipcRenderer } = require('electron');
 // 由 preload 加载后透传给页面（见 lib/session-export.js）。
 const sessionExport = require('./lib/session-export');
 
+/* 文件存储快照：sendSync 一次性取（页面脚本执行前 renderer 就要能同步读）。
+   main.js 模块顶层注册了 storage:bootstrap，加载时序上必然先于本文件执行，不会阻塞。 */
+const STORAGE_SNAPSHOT = (() => {
+  try {
+    const s = ipcRenderer.sendSync('storage:bootstrap');
+    return s && typeof s === 'object' && !Array.isArray(s) ? s : {};
+  } catch { return {}; }
+})();
+
 contextBridge.exposeInMainWorld('dsh', {
   platform: process.platform,
   versions: {
@@ -160,5 +169,16 @@ contextBridge.exposeInMainWorld('dsh', {
   lessons: {
     summary: () => ipcRenderer.invoke('lessons:summary'),
     tail: () => ipcRenderer.invoke('lessons:tail'),
+  },
+  /* 文件存储（userData/dsh-storage.json）：localStorage 按 origin 键控，换构建方式历史必丢，
+     真值源迁到主进程文件。snapshot 必须同步取（页面脚本执行前就要能同步读），
+     之后写走 IPC 异步落盘；flush 供关闭前兜底。 */
+  storage: {
+    snapshot: STORAGE_SNAPSHOT,
+    set: (key, value) => ipcRenderer.invoke('storage:set', { key, value }),
+    setMany: (obj) => ipcRenderer.invoke('storage:set-many', obj),
+    remove: (key) => ipcRenderer.invoke('storage:remove', key),
+    flush: () => ipcRenderer.invoke('storage:flush'),
+    stats: () => ipcRenderer.invoke('storage:stats'),
   },
 });

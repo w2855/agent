@@ -37,6 +37,99 @@ const enteredMessages = new WeakSet();
 const enteredTools = new WeakSet();
 const RETRY_CHOICES = [0, 2, 3, 5];
 
+/* ───────── 持久化：文件真值源 + localStorage 镜像 ─────────
+   深层根因（HANDOFF 四.1）：localStorage 按 origin 键控 —— 开发版 origin = file:///E:/dsh-desktop/...，
+   打包版 = app.asar 内路径，两者是两个 origin、两套 localStorage，换构建方式历史必丢
+   （T4 只统一了 userData 目录，管不到 localStorage）。
+   现在真值源 = userData/dsh-storage.json（主进程持有）：
+     · 启动时 preload 用 sendSync 一次性取快照 → 这里建内存镜像，readStorage 保持同步语义（调用点零改动）；
+     · 写入 = 更新镜像 + IPC 落盘（去抖原子写；退出前主进程 flushSync 兜底）；
+     · localStorage 继续双写：① 兼容既有探针/Doctor 探测 ② 老版本数据首次启动自动迁入文件。 */
+/* 合并策略（纯函数，探针直接断言）：旧 localStorage 先入，文件快照覆盖同键 → 文件优先；
+   legacy 独有的键进 onlyLegacy，用于首次迁移落盘。 */
+function mergeStorageSource(legacy, snapshot) {
+  const merged = new Map();
+  const onlyLegacy = {};
+  for (const [k, v] of legacy) merged.set(k, v);
+  for (const k of Object.keys(snapshot || {})) {
+    if (typeof snapshot[k] !== 'string') continue;
+    merged.set(k, snapshot[k]);
+  }
+  for (const [k, v] of legacy) {
+    if (!Object.prototype.hasOwnProperty.call(snapshot || {}, k)) onlyLegacy[k] = v;
+  }
+  return { merged, onlyLegacy };
+}
+
+const FILE_STORE = (() => {
+  const api = (typeof window !== 'undefined' && window.dsh && window.dsh.storage) || null;
+  const snapshot = api && api.snapshot && typeof api.snapshot === 'object' ? api.snapshot : {};
+  const legacy = new Map();
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (!k || k.indexOf('dsh.') !== 0) continue;
+      legacy.set(k, localStorage.getItem(k));
+    }
+  } catch { /* localStorage 不可用：纯文件模式 */ }
+  const { merged: mem, onlyLegacy } = mergeStorageSource(legacy, snapshot);
+  let migrated = 0;
+  if (api && Object.keys(onlyLegacy).length) {
+    try { api.setMany(onlyLegacy); migrated = Object.keys(onlyLegacy).length; } catch { /* 下次再迁 */ }
+  }
+  const flushLocal = (key, value) => {
+    try { localStorage.setItem(key, value); return true; } catch { return false; }
+  };
+  return {
+    available: !!api,
+    migrated,
+    has: (key) => mem.has(key),
+    get: (key) => (mem.has(key) ? mem.get(key) : null),
+    set(key, value) {
+      mem.set(key, value);
+      const localOk = flushLocal(key, value); // 同步镜像：探针/旧路径仍可读
+      // IPC 是异步的：这里只确认「已投递给主进程」，落盘结果由主进程去抖写入（失败写日志，不阻塞 UI）
+      let fileOk = false;
+      if (api) {
+        try { const p = api.set(key, value); if (p && typeof p.catch === 'function') p.catch(() => {}); fileOk = true; }
+        catch { fileOk = false; }
+      }
+      return localOk || fileOk;
+    },
+    remove(key) {
+      mem.delete(key);
+      try { localStorage.removeItem(key); } catch { /* 忽略 */ }
+      if (api) { try { const p = api.remove(key); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch { /* 忽略 */ } }
+    },
+    flush() {
+      if (!api) return;
+      try { const p = api.flush(); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch { /* 主进程已退 */ }
+    },
+    info: () => ({ keys: mem.size, available: !!api }),
+    stats() { if (!api) return null; try { return api.stats(); } catch { return null; } },
+  };
+})();
+
+function readStorage(key, fallback) {
+  if (FILE_STORE.has(key)) return FILE_STORE.get(key);
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : raw;
+  } catch { return fallback; }
+}
+function readJson(key, fallback) {
+  try { return JSON.parse(readStorage(key, 'null')) ?? fallback; } catch { return fallback; }
+}
+function writeStorage(key, value) {
+  const ok = FILE_STORE.set(key, value);
+  if (!ok) toast('本地存储写入失败：存储不可写');
+  return ok;
+}
+/* 静默写：分级降级保存内部用，失败不立即 toast，由降级链统一决定提示时机 */
+function writeStorageQuiet(key, value) {
+  try { return FILE_STORE.set(key, value); } catch { return false; }
+}
+
 /* 会话上下文窗口（字符）：从 localStorage dsh.ctxLimit 读取，用户可在设置页「对话 → 上下文」卡片修改。
    默认 700000，范围 50000–2000000；非法值（非数字 / 越界）一律回退默认值。 */
 const CTX_LIMIT_DEFAULT = 700000;
@@ -61,25 +154,6 @@ const LIMITS = {
   maxContextChars: readCtxLimit(),
   turnTimeoutMs: 190000,
 };
-
-function readStorage(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw === null ? fallback : raw;
-  } catch { return fallback; }
-}
-function readJson(key, fallback) {
-  try { return JSON.parse(readStorage(key, 'null')) ?? fallback; } catch { return fallback; }
-}
-function writeStorage(key, value) {
-  try { localStorage.setItem(key, value); return true; }
-  catch (err) { toast(`本地存储写入失败：${err?.message || err}`); return false; }
-}
-/* 静默写：分级降级保存内部用，失败不立即 toast，由降级链统一决定提示时机 */
-function writeStorageQuiet(key, value) {
-  try { localStorage.setItem(key, value); return true; }
-  catch { return false; }
-}
 
 const validModel = (m) => typeof m === 'string' && MODEL_RE.test(m.trim());
 
@@ -325,9 +399,10 @@ function startAutoSave() {
   if (autoSaveTimer) clearInterval(autoSaveTimer);
   autoSaveTimer = setInterval(autoSaveTick, autoSaveIntervalMs);
 }
-/* 关闭/刷新前同步兜底保存：localStorage 写入同步完成，窗口关闭前来得及落盘 */
+/* 关闭/刷新前同步兜底保存：localStorage 同步写 + 通知主进程立即 flush 文件落盘 */
 function saveOnExit() {
   try { saveSessions(); } catch { /* 关闭路径上的最后兜底，失败不再打扰 */ }
+  try { FILE_STORE.flush(); } catch { /* 主进程已退或无 IPC：忽略 */ }
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) saveOnExit();

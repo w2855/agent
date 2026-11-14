@@ -22,6 +22,7 @@ const localTools = require('./lib/tools');
 const mcpModule = require('./lib/mcp');
 const skillsModule = require('./lib/skills');
 const backup = require('./lib/backup');
+const persistStoreModule = require('./lib/persist-store');
 const userDataPaths = require('./lib/user-data');
 const { createAutopilot } = require('./lib/autopilot'); // 无人值守任务推进循环（开关经 IPC 控制）
 const runtimeModule = require('./runtime');
@@ -581,6 +582,8 @@ app.on('before-quit', () => {
   // Autopilot：退出前停轮询定时器（unref 过，此处显式停是双保险）
   try { autopilot?.stop(); } catch { /* 已停止 */ }
   try { runtimeSvc?.close(); } catch { /* 已关闭 */ }
+  // 文件存储兜底：去抖窗口内的写入必须在进程退出前落盘（否则丢的正是最后几条聊天）
+  try { storageStore?.flushSync(); } catch { /* 尽力而为 */ }
   // 退出时停掉所有 MCP server（杀整棵进程树，避免遗留子进程）；
   // 注意用 if 而非 getMcpManager()：退出路径不允许懒建出一个新管理器
   if (mcpManager) { try { mcpManager.stopAll(); } catch { /* 尽力停止即可 */ } }
@@ -604,6 +607,41 @@ ipcMain.on('win:toggle-maximize', () => {
 });
 ipcMain.on('win:close', () => { if (win && !win.isDestroyed()) win.close(); });
 ipcMain.handle('win:is-maximized', () => !!(win && !win.isDestroyed() && win.isMaximized()));
+
+/* ---------------- 文件存储（userData/dsh-storage.json） ----------------
+ * 根治「换构建方式聊天记录全丢」：localStorage 按 origin 键控 —— 开发版（file:///E:/dsh-desktop/...）
+ * 与打包版（asar 内路径）是两个 origin，两套存储，历史必然分裂。真相源改为主进程文件：
+ *   · 渲染层启动时 preload 用 sendSync 一次性取快照（保持同步读语义，调用点不必改 async）；
+ *   · 读走内存镜像，写经 IPC → 去抖原子落盘（tmp+rename），退出前 flushSync 兜底；
+ *   · localStorage 退化为镜像：老数据首次启动自动迁入文件，同时继续双写以兼容既有探针。
+ * 密钥不进这里（profiles 仍在 safeStorage 凭据库，本文件只存掩码视图）。
+ */
+let storageStore = null;
+function getStorageStore() {
+  if (!storageStore) {
+    storageStore = persistStoreModule.createPersistStore({
+      filePath: path.join(app.getPath('userData'), 'dsh-storage.json'),
+    });
+  }
+  return storageStore;
+}
+// sendSync 通道：preload 在页面脚本执行前调用，必须同步返回
+ipcMain.on('storage:bootstrap', (event) => {
+  try { event.returnValue = getStorageStore().getAll(); }
+  catch (err) {
+    console.log('[storage] bootstrap 失败：', err && err.message ? err.message : err);
+    event.returnValue = {};
+  }
+});
+ipcMain.handle('storage:set', (_event, payload) => {
+  const r = getStorageStore().set(payload && payload.key, payload && payload.value);
+  if (!r.ok) console.log('[storage] set 被拒：', r.error, payload && payload.key);
+  return r;
+});
+ipcMain.handle('storage:set-many', (_event, payload) => getStorageStore().setMany(payload));
+ipcMain.handle('storage:remove', (_event, key) => getStorageStore().remove(key));
+ipcMain.handle('storage:flush', () => getStorageStore().flushSync());
+ipcMain.handle('storage:stats', () => getStorageStore().stats());
 
 /* ---------------- 系统通知（Windows toast） ----------------
  * 渲染层只在 document.hidden 时发起（前台不打扰），走这里统一展示：
