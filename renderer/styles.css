@@ -67,6 +67,13 @@
   --card: #272D38;
   --code-bg: #14171E;
 
+  /* 代码高亮 token（dark：蓝/绿/灰/橙/紫，与 --tone-* 同族但在深底上更亮） */
+  --tok-key: #7CA9F2;
+  --tok-str: #8FD3A8;
+  --tok-com: #78829A;
+  --tok-num: #E8A96B;
+  --tok-fn: #C9A8F0;
+
   /* 原版深色里「全部」是一枚浅色胶囊（不是蓝底），蓝只留给主按钮 */
   --chip-active-bg: #E9EDF7;
   --chip-active-ink: #171A22;
@@ -115,6 +122,13 @@
   --rule: #DCE0E8;
   --card: #F6F9FE;
   --code-bg: #EDF0F6;
+
+  /* 代码高亮 token（light：对应加深，浅底 4.5:1 起步） */
+  --tok-key: #1D5FD1;
+  --tok-str: #16714A;
+  --tok-com: #8892A4;
+  --tok-num: #A85B10;
+  --tok-fn: #6B3FC4;
 
   /* 原版浅色里「全部」是一枚深墨胶囊 */
   --chip-active-bg: #1E232E;
@@ -2984,3 +2998,57 @@ input.tint-range::-webkit-slider-thumb {
   .find-bar, .selection-menu { animation-duration: 1ms; }
   .find-bar.is-closing { animation-duration: 1ms; }
 }
+
+/* ───────── Markdown 表格（GFM 子集，见 app.js collectTable） ─────────
+   wrap 承担横向 + 纵向滚动：上限 60vh，长表在表格底部滚动——ZCode「长表吸底」的简化实现，
+   不做 JS 测量（参考 markdown-table-scroll-mode-toggle.md：吸底只在表体超出可视区时才有意义）。 */
+.prose .md-table-wrap {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 10px 0 12px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+.prose .md-table-wrap::-webkit-scrollbar { width: 9px; height: 9px; }
+.prose .md-table-wrap::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 8px;
+  background-clip: content-box;
+}
+.prose .md-table-wrap::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); background-clip: content-box; }
+.prose .md-table-wrap::-webkit-scrollbar-corner { background: transparent; }
+
+.prose .md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.prose .md-table th {
+  position: sticky; /* 纵向滚动时表头常驻在 wrap 顶部 */
+  top: 0;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+  text-align: left;
+  padding: 7px 11px;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+.prose .md-table td {
+  padding: 6px 11px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.prose .md-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--fill) 55%, transparent); } /* 斑马纹 */
+.prose .md-table tbody tr:last-child td { border-bottom: 0; }
+
+/* ───────── 代码高亮 token（零依赖 tokenizer，见 app.js highlightCode） ───────── */
+.prose .tok-key { color: var(--tok-key); }
+.prose .tok-str { color: var(--tok-str); }
+.prose .tok-com { color: var(--tok-com); font-style: italic; }
+.prose .tok-num { color: var(--tok-num); }
+.prose .tok-fn { color: var(--tok-fn); }

@@ -369,10 +369,11 @@
           <div class="settings-row">
             <div class="sp-row-main">
               <b>主题</b>
-              <small>深浅两套色阶独立校准，切换全局平滑过渡。</small>
+              <small>跟随系统自动切换，也可固定深浅；两套色阶独立校准，切换全局平滑过渡。</small>
             </div>
             <div class="seg" id="themeSeg">
-              <button data-theme="dark" class="is-active">深色</button>
+              <button data-theme="system" class="is-active">跟随系统</button>
+              <button data-theme="dark">深色</button>
               <button data-theme="light">浅色</button>
             </div>
           </div>
@@ -457,6 +458,21 @@
               <button data-retries="5">5 次</button>
             </div>
           </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">上下文</div>
+          <div class="settings-row">
+            <div class="sp-row-main">
+              <b>自动压缩上下文</b>
+              <small>发送前历史字符量超过上下文预算的 90%（约 63 万字符）时，自动把旧消息折叠成摘要再请求。</small>
+            </div>
+            <div class="seg" id="autocompactSeg">
+              <button data-ac="off">关闭</button>
+              <button data-ac="on" class="is-active">开启</button>
+            </div>
+          </div>
+          <p class="fine">默认开启；阈值 = 上下文预算（700000 字符）× 90%，压缩摘要作为 system 消息注入后续请求。手动 /compact 不受此开关影响。</p>
         </div>
 
         <div class="settings-card">

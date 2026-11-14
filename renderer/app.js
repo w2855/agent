@@ -109,7 +109,9 @@ const state = {
   busy: false,
   stopRequested: false,
   collapsed: false,
-  theme: readStorage('dsh.theme2', 'light') === 'dark' ? 'dark' : 'light',
+  /* 主题三态：system=跟随系统 / dark / light。迁移规则：没有 dsh.theme2 存储时默认「跟随系统」
+     （新装体验最好），已存过 dark/light 的老用户保持原选择不动。 */
+  theme: ['system', 'light', 'dark'].includes(readStorage('dsh.theme2', 'system')) ? readStorage('dsh.theme2', 'system') : 'system',
   accent: ACCENTS.includes(readStorage('dsh.accent', 'mist')) ? readStorage('dsh.accent', 'mist') : 'mist',
   pending: null,
   pendingTurn: null,
@@ -289,10 +291,24 @@ function validateApiInput(cfg, opts = {}) {
 
 /* ───────── 主题 / 配色 ───────── */
 
+/* boot 时绑定的系统深浅 MediaQueryList：跟随系统监听挂在它上面（探测/调试可直接复用这一实例） */
+let systemSchemeMql = null;
+
+/* 系统深浅探测：matchMedia 不可用（异常宿主）时按浅色处理 */
+function prefersDark() {
+  try { return window.matchMedia('(prefers-color-scheme: dark)').matches; } catch { return false; }
+}
+
+/* 生效主题：跟随系统档位实时解析 matchMedia，其余档位用自身 */
+function effectiveTheme() {
+  return state.theme === 'system' ? (prefersDark() ? 'dark' : 'light') : state.theme;
+}
+
 function applyTheme(theme) {
-  state.theme = theme === 'light' ? 'light' : 'dark';
-  document.documentElement.dataset.theme = state.theme;
-  $('#brandGlyph').src = state.theme === 'dark' ? '../assets/glyph-dark.svg' : '../assets/glyph-light.svg';
+  state.theme = ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
+  const effective = effectiveTheme();
+  document.documentElement.dataset.theme = effective;
+  $('#brandGlyph').src = effective === 'dark' ? '../assets/glyph-dark.svg' : '../assets/glyph-light.svg';
   writeStorage('dsh.theme2', state.theme);
   $$('#themeSeg button').forEach((b) => b.classList.toggle('is-active', b.dataset.theme === state.theme));
   if (state.projectOpen) renderArchPage();
@@ -471,21 +487,71 @@ function inline(text) {
     .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 }
 
-function markdown(src) {
+/* GFM 表格分隔行：只含 | - : 和空白，且至少有一个 - 和一个 | */
+const isTableSepRow = (row) => {
+  const t = row.trim();
+  return t.length > 0 && /^[-\s:|]+$/.test(t) && t.includes('-') && t.includes('|');
+};
+
+/* 收集一个完整表格块：从表头行（下一行是分隔行才成立）开始，连续竖线行都算数据行。
+   输入是已整体转义的行，单元格走既有 inline()（它接收的就是已转义文本）。
+   返回 { html, next }，next 指向表格块之后的第一个行号。 */
+function collectTable(lines, start) {
+  // 拆列：先掐掉首尾空管道，再把转义竖线占位后按 | 切，最后还原，避免单元格里的 \| 被切错
+  const splitRow = (row) => row.trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .replace(/\\\|/g, '\u0000')
+    .split('|')
+    .map((c) => inline(c.trim().replace(/\u0000/g, '|')));
+  const align = (lines[start + 1] || '').trim()
+    .replace(/^\||\|$/g, '')
+    .split('|')
+    .map((c) => {
+      const t = c.trim();
+      const l = t.startsWith(':');
+      const r = t.endsWith(':');
+      return l && r ? 'center' : r ? 'right' : l ? 'left' : '';
+    });
+  const head = splitRow(lines[start]);
+  const cellTag = (tag, c, i) => `<${tag}${align[i] ? ` style="text-align:${align[i]}"` : ''}>${c ?? ''}</${tag}>`;
+  const th = head.map((c, i) => cellTag('th', c, i)).join('');
+  let i = start + 2;
+  const rows = [];
+  while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+    rows.push(splitRow(lines[i]));
+    i++;
+  }
+  const body = rows.map((r) => `<tr>${head.map((_, ci) => cellTag('td', r[ci], ci)).join('')}</tr>`).join('');
+  return { html: `<div class="md-table-wrap"><table class="md-table"><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table></div>`, next: i };
+}
+
+/* 代码块输出：lang 支持且非 live 尾时走高亮 tokenizer，否则原样转义 */
+function codeBlockHtml(code, lang, highlight) {
+  const body = highlight && hlLang(lang) ? highlightCode(code, lang) : esc(code);
+  return `<pre><code>${body}</code></pre>`;
+}
+
+function markdown(src, opts = {}) {
   try {
-    const lines = esc(src).split('\n');
+    const raw = String(src ?? '').split('\n');
+    const lines = raw.map(esc);
     const out = [];
     let list = null;
     let code = null;
+    let codeLang = '';
     const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
 
-    for (const line of lines) {
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
       if (line.startsWith('```')) {
-        if (code === null) { closeList(); code = []; }
-        else { out.push(`<pre><code>${code.join('\n')}</code></pre>`); code = null; }
+        if (code === null) { closeList(); code = []; codeLang = (raw[li] || line).slice(3).trim().toLowerCase(); }
+        else { out.push(codeBlockHtml(code.join('\n'), codeLang, !opts.live)); code = null; }
         continue;
       }
-      if (code !== null) { code.push(line); continue; }
+      // 围栏内容收集原始行：高亮 tokenizer 要对原始 code 分词、逐 token 转义，
+      // 不能吃已经 esc 过的文本（否则 &quot; 会被再转义一次，字符串染色也会失配）
+      if (code !== null) { code.push(raw[li] ?? ''); continue; }
       if (!line.trim()) { closeList(); continue; }
       const h = line.match(/^(#{1,3})\s+(.*)$/);
       if (h) { closeList(); out.push(`<p><strong>${inline(h[2])}</strong></p>`); continue; }
@@ -498,9 +564,16 @@ function markdown(src) {
         continue;
       }
       closeList();
+      // GFM 表格：表头 + 分隔行成对出现才成表；live 尾不解析（流式里未写完的表格先按普通文本走，防半表闪烁）
+      if (!opts.live && /^\s*\|.*\|\s*$/.test(line) && !isTableSepRow(line) && isTableSepRow(lines[li + 1] || '')) {
+        const table = collectTable(lines, li);
+        out.push(table.html);
+        li = table.next - 1;
+        continue;
+      }
       out.push(`<p>${inline(line)}</p>`);
     }
-    if (code !== null) out.push(`<pre><code>${code.join('\n')}</code></pre>`);
+    if (code !== null) out.push(codeBlockHtml(code.join('\n'), codeLang, !opts.live));
     closeList();
     return out.join('');
   } catch (err) {
@@ -508,6 +581,128 @@ function markdown(src) {
     console.warn('[markdown] 渲染失败，已降级为纯文本', err);
     return `<p>${esc(src)}</p>`;
   }
+}
+
+/* ───────── 零依赖语法高亮（单遍 alternation 正则 tokenizer） ─────────
+   每种语言一个主正则，按「注释 → 字符串 → 关键字 → 字面量 → 数字 → 函数名」优先级从左到右交替，
+   命中第几个捕获组就打哪个 token 类；捕获组内部一律 (?:) 非捕获，靠组序号判类。
+   防注入策略：对原始 code 分词，每个 token 的文本部分单独 esc() 后再拼 span，全程不出现未转义原文。
+   只用于 stable 块（表格同理）：流式 live 尾保持纯文本，避免半行误染反复闪（参考 ZCode 流式 reveal 的
+   「稳定区一次成型、活动尾低开销」分层）。 */
+
+const HL_LANG_MAP = {
+  js: 'js', javascript: 'js', jsx: 'js', mjs: 'js', cjs: 'js', node: 'js',
+  ts: 'js', tsx: 'js', typescript: 'js',
+  json: 'json', jsonc: 'json', json5: 'json',
+  py: 'py', python: 'py', python3: 'py',
+  bash: 'sh', sh: 'sh', shell: 'sh', zsh: 'sh', console: 'sh',
+  cmd: 'bat', bat: 'bat', batch: 'bat', dos: 'bat',
+  css: 'css',
+  html: 'html', xml: 'html', svg: 'html',
+};
+const hlLang = (lang) => HL_LANG_MAP[String(lang || '').trim().toLowerCase()] || '';
+
+const HL_SPECS = {
+  /* js / ts：关键字组在前，保证 if( 不会落进函数名组 */
+  js: {
+    re: /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\[\s\S])*`)|(\b(?:const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|class|extends|super|new|this|typeof|instanceof|in|of|import|from|export|default|async|await|try|catch|finally|throw|yield|delete|void|static|get|set)\b)|(\b(?:null|undefined|true|false|NaN|Infinity)\b)|(\b0[xX][\da-fA-F]+\b|\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|([A-Za-z_$][\w$]*(?=\s*\())/g,
+    class(m) {
+      if (m[1]) return 'tok-com';
+      if (m[2]) return 'tok-str';
+      if (m[3] || m[4]) return 'tok-key';
+      if (m[5]) return 'tok-num';
+      if (m[6]) return 'tok-fn';
+      return '';
+    },
+  },
+  /* json：后跟冒号的字符串判成键名 */
+  json: {
+    re: /("(?:[^"\\]|\\.)*"(?=\s*:))|("(?:[^"\\]|\\.)*")|(\b(?:true|false|null)\b)|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+    class(m) {
+      if (m[1] || m[3]) return 'tok-key';
+      if (m[2]) return 'tok-str';
+      if (m[4]) return 'tok-num';
+      return '';
+    },
+  },
+  /* python：三引号串放在单引号前，避免 """ 被切成空串 */
+  py: {
+    re: /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|[bBrRfFuU]{0,2}"(?:[^"\\\n]|\\.)*"|[bBrRfFuU]{0,2}'(?:[^'\\\n]|\\.)*')|(\b(?:def|class|import|from|as|return|if|elif|else|for|while|break|continue|pass|lambda|try|except|finally|raise|with|yield|global|nonlocal|assert|del|and|or|not|in|is|async|await)\b)|(\b(?:None|True|False|self|cls)\b)|(\b0[xX][\da-fA-F]+\b|\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|(@[\w.]+)|([A-Za-z_]\w*(?=\s*\())/g,
+    class(m) {
+      if (m[1]) return 'tok-com';
+      if (m[2]) return 'tok-str';
+      if (m[3] || m[4]) return 'tok-key';
+      if (m[5]) return 'tok-num';
+      if (m[6] || m[7]) return 'tok-fn'; /* 装饰器与函数名 */
+      return '';
+    },
+  },
+  /* bash / sh：$ 变量算函数色 */
+  sh: {
+    re: /(#[^\n]*)|("(?:[^"\\]|\\.)*"|'[^']*')|(\b(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|function|return|exit|export|local|source|set|unset|shift|read|echo|printf|cd|eval|exec|trap)\b)|(\$\{?[\w@#?*]+\}?)|(\b\d+\b)/g,
+    class(m) {
+      if (m[1]) return 'tok-com';
+      if (m[2]) return 'tok-str';
+      if (m[3]) return 'tok-key';
+      if (m[4]) return 'tok-fn';
+      if (m[5]) return 'tok-num';
+      return '';
+    },
+  },
+  /* cmd / bat：rem 与 :: 注释，%VAR% 算变量 */
+  bat: {
+    re: /(rem\b[^\n]*|::[^\n]*)|("[^"\n]*")|(\b(?:if|else|for|in|do|goto|call|exit|set|setlocal|endlocal|echo|pause|cd|dir|del|copy|move|md|rd|ren|type|start|shift|not|exist|defined)\b)|(%[\w]+%)|(\b\d+\b)/g,
+    class(m) {
+      if (m[1]) return 'tok-com';
+      if (m[2]) return 'tok-str';
+      if (m[3]) return 'tok-key';
+      if (m[4]) return 'tok-fn';
+      if (m[5]) return 'tok-num';
+      return '';
+    },
+  },
+  /* css：属性名（冒号前）算关键字，选择器算函数色 */
+  css: {
+    re: /(\/\*[\s\S]*?\*\/)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|(@[\w-]+)|([-a-zA-Z]+(?=\s*:))|(#[0-9a-fA-F]{3,8}\b)|(\b\d+(?:\.\d+)?(?:px|em|rem|vh|vw|vmin|vmax|%|s|ms|deg|fr|pt|ch)?\b)|([.#][-\\\w]+|::?[-\w]+(?=\s*[,{]))/g,
+    class(m) {
+      if (m[1]) return 'tok-com';
+      if (m[2]) return 'tok-str';
+      if (m[3] || m[4]) return 'tok-key';
+      if (m[5] || m[6]) return 'tok-num';
+      if (m[7]) return 'tok-fn';
+      return '';
+    },
+  },
+  /* html：标签算关键字，属性名（= 前）算函数色，属性值是字符串 */
+  html: {
+    re: /(<!--[\s\S]*?-->)|(<\/?[\w-]+|\/?>)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|([\w-]+(?==))/g,
+    class(m) {
+      if (m[1]) return 'tok-com';
+      if (m[2]) return 'tok-key';
+      if (m[3]) return 'tok-str';
+      if (m[4]) return 'tok-fn';
+      return '';
+    },
+  },
+};
+
+/* 对原始 code 单遍分词：命中 token 打上 span（类名固定白名单），其余文本逐段 esc，保证无 XSS */
+function highlightCode(code, lang) {
+  const spec = HL_SPECS[hlLang(lang)];
+  if (!spec) return esc(code);
+  let out = '';
+  let last = 0;
+  spec.re.lastIndex = 0;
+  let m;
+  while ((m = spec.re.exec(code)) !== null) {
+    if (m.index > last) out += esc(code.slice(last, m.index));
+    const cls = spec.class(m);
+    out += cls ? `<span class="${cls}">${esc(m[0])}</span>` : esc(m[0]);
+    last = m.index + m[0].length;
+    if (m[0].length === 0) spec.re.lastIndex++; // 空匹配保护，防死循环
+  }
+  out += esc(code.slice(last));
+  return out;
 }
 
 /* ───────── 流式增量渲染：稳定块只解析一次，活动尾低开销重绘（参考 aider mdstream 滑动窗口） ───────── */
@@ -561,7 +756,8 @@ function createStreamPainter(prose) {
         const nl = tail.indexOf('\n');
         liveEl.innerHTML = `<pre><code>${esc(nl === -1 ? '' : tail.slice(nl + 1))}</code></pre>`;
       } else {
-        liveEl.innerHTML = markdown(tail);
+        // live 尾关闭表格与高亮：未写完的块先按普通文本走，stable 区推进时才一次成型
+        liveEl.innerHTML = markdown(tail, { live: true });
       }
     },
   };
@@ -1072,6 +1268,18 @@ function buildApiMessages(session, currentText, draft, skipUser) {
   return out;
 }
 
+/* 会话历史字符量：与 buildApiMessages 的预算统计口径一致
+   （user 取 text+apiSuffix，assistant 取 body，跳过已压缩占位消息），供自动压缩判断用量。 */
+function sessionContextChars(session) {
+  let used = 0;
+  for (const m of session.messages) {
+    if (m.compacted) continue;
+    const text = m.role === 'user' ? (m.text || '') + (m.apiSuffix || '') : (m.body || '');
+    if (text) used += text.length;
+  }
+  return used;
+}
+
 /* ───────── 回合 ───────── */
 
 async function runTurn(rawText) {
@@ -1090,6 +1298,9 @@ async function runTurn(rawText) {
   if (!s.messages.length) $('#chat').innerHTML = '<div class="chat-inner"></div>';
   if (s.title === '新对话') s.title = text.replace(/\s+/g, ' ').slice(0, 18) || '新对话';
   saveSessions();
+
+  // 自动压缩：发送前历史超过上下文预算 90% 时先折叠，再走本轮请求（开关见对话页设置）
+  maybeAutoCompact(s);
 
   /* 任务面板「同步给模型」开启时，把手工变更摘要追加进本轮 user 消息的 apiSuffix */
   const suffix = formatAttachments() + todoSyncSuffix();
@@ -2832,31 +3043,65 @@ function handleGoal(text) {
   toast('会话目标已设置');
 }
 
-/** 真实上下文压缩：把历史消息折叠成摘要，后续请求以 system 消息注入 */
-function compactContext() {
-  if (state.busy) { toast('生成中不能压缩上下文'); return; }
-  const s = active();
+/** 压缩核心：把会话未压缩的历史折叠成摘要，写入 compacted 池并把消息列表重置为一条占位消息。
+    返回 { count }；没有可压缩内容时返回 null。手动 /compact 与自动压缩共用此核心，UI 反馈由调用方负责。 */
+function performCompact(s) {
   const usable = s.messages.filter((m) => !m.compacted);
-  if (usable.length < 2) { toast('当前会话没有可压缩的历史消息'); return; }
+  if (usable.length < 2) return null;
 
   const lines = usable.map((m) => {
     const content = m.role === 'user' ? m.text : (m.body || '');
     const flat = String(content).replace(/\s+/g, ' ').slice(0, 120);
     return `- ${m.role === 'user' ? '用户' : '助手'}：${flat}`;
   });
-  const summary = lines.join('\n');
-  state.compacted.set(s.id, summary);
+  state.compacted.set(s.id, lines.join('\n'));
   s.messages = [{
     role: 'assistant',
     summary: { label: '上下文已压缩', tools: 0, messages: 0 },
     tools: [], files: [], approval: null, metrics: '', compacted: true,
-    body: `已将 ${usable.length} 条历史消息压缩为摘要，后续请求会带上这段上下文。\n\n${summary}`,
+    body: `已将 ${usable.length} 条历史消息压缩为摘要，后续请求会带上这段上下文。\n\n${lines.join('\n')}`,
     startedAt: Date.now(), finishedAt: Date.now(),
   }];
+  return { count: usable.length };
+}
+
+/** 真实上下文压缩：把历史消息折叠成摘要，后续请求以 system 消息注入 */
+function compactContext() {
+  if (state.busy) { toast('生成中不能压缩上下文'); return; }
+  const s = active();
+  const done = performCompact(s);
+  if (!done) { toast('当前会话没有可压缩的历史消息'); return; }
   pruneMsgStore();
   renderChat();
   renderHeader();
-  toast(`已压缩 ${usable.length} 条消息`);
+  toast(`已压缩 ${done.count} 条消息`);
+}
+
+/** 自动压缩开关（对话页设置，默认开；存 dsh.autocompact） */
+function autoCompactSetting() {
+  return readStorage('dsh.autocompact', 'on') !== 'off';
+}
+
+/** 发送前自动压缩：历史字符量超过上下文预算 90% 时，先折叠为摘要再发本轮请求
+    （ruflo 思路：在上下文撞顶前拦截压缩，长会话不越聊越贵）。与手动 /compact 共用 performCompact。 */
+function maybeAutoCompact(session) {
+  if (!autoCompactSetting()) return false;
+  const used = sessionContextChars(session);
+  if (used <= LIMITS.maxContextChars * 0.9) return false;
+  const pct = Math.round((used / LIMITS.maxContextChars) * 100);
+  if (!performCompact(session)) return false;
+  /* 时间线插入一条系统提示；compacted 标记保证它不进 API 请求、也不会被下一轮再次压缩 */
+  session.messages.push({
+    role: 'assistant',
+    summary: { label: '自动压缩', tools: 0, messages: 0 },
+    tools: [], files: [], approval: null, metrics: '', compacted: true,
+    body: `上下文已自动压缩（占用 ${pct}%）。`,
+    startedAt: Date.now(), finishedAt: Date.now(),
+  });
+  pruneMsgStore();
+  renderChat(); // 消息列表已被整体替换，先重绘时间线，本轮 user/assistant 节点再往后追加
+  toast(`上下文已自动压缩（占用 ${pct}%）`);
+  return true;
 }
 
 function updateSlash() {
@@ -3931,7 +4176,7 @@ function archCanvasSignature(project, live) {
   if (!project) return 'none';
   return JSON.stringify([
     project.id, project.revision, project.name, project.mainAgentId,
-    state.theme, state.accent,
+    effectiveTheme(), state.accent,
     project.edges || [],
     (project.discovery?.techStack || []),
     (project.discovery?.entries || []).map((e) => [e.kind, e.name]),
@@ -5756,7 +6001,8 @@ function bind() {
     const card = b.closest('[data-approval-id]');
     if (card) decideDelegationApproval(card.dataset.approvalId, b.dataset.delegApprove);
   });
-  $('#themeBtn').addEventListener('click', () => applyTheme(state.theme === 'dark' ? 'light' : 'dark'));
+  // 顶栏快捷切换按「当前生效主题」取反：跟随系统时也能一键切到明确的深/浅
+  $('#themeBtn').addEventListener('click', () => applyTheme(effectiveTheme() === 'dark' ? 'light' : 'dark'));
   $('#themeSeg').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (b) applyTheme(b.dataset.theme);
@@ -5800,6 +6046,21 @@ function bind() {
     toast(on ? '已开启：点关闭按钮将最小化到托盘' : '已关闭：点关闭按钮直接退出');
   });
   syncTraySeg();
+
+  /* 自动压缩（对话页）：localStorage 持有开关，默认开；runTurn 发送前据此判断是否折叠历史 */
+  const syncAutoCompactSeg = () => {
+    const on = autoCompactSetting();
+    $$('#autocompactSeg button').forEach((b) => b.classList.toggle('is-active', (b.dataset.ac === 'on') === on));
+  };
+  $('#autocompactSeg').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    const on = b.dataset.ac === 'on';
+    writeStorage('dsh.autocompact', on ? 'on' : 'off');
+    syncAutoCompactSeg();
+    toast(on ? '已开启自动压缩：超预算 90% 时发送前自动折叠历史' : '已关闭自动压缩');
+  });
+  syncAutoCompactSeg();
 
   $('#hostBtn').addEventListener('click', openConnect);
   $('#openConnect').addEventListener('click', () => { closeSheets(); openConnect(); });
@@ -6067,6 +6328,13 @@ function bind() {
 
 function boot() {
   applyTheme(state.theme);
+  // 跟随系统：系统深浅切换时实时重解析（只在「跟随系统」档位生效；参考 ZCode settings-appearance 的系统档位行为）
+  try {
+    systemSchemeMql = window.matchMedia('(prefers-color-scheme: dark)');
+    const onSchemeChange = () => { if (state.theme === 'system') applyTheme('system'); };
+    if (systemSchemeMql.addEventListener) systemSchemeMql.addEventListener('change', onSchemeChange);
+    else if (systemSchemeMql.addListener) systemSchemeMql.addListener(onSchemeChange); // 旧接口兜底
+  } catch { /* matchMedia 不可用时停在手动档位 */ }
   applyAccent(state.accent);
   renderPerm();
   renderAboutSystem();
