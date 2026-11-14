@@ -1172,10 +1172,16 @@ function renderTasks(node, msg) {
   if (slot) slot.innerHTML = taskCard(msg.tasks);
 }
 
-/* ───────── 工具叙述行（UI 层保底） ─────────
-   模型的文字说明优先：只要本回合已有模型正文（body 非空），就不再叠加 UI 叙述行，
-   避免「正在 …」行与模型自己的播报同时显示造成双重观感。模型全程沉默（静默调用工具）时，
-   叙述行才数据驱动地补一行「🛠 正在 <动词> <目标>…」；全部落定后淡出移除。
+/* ───────── 工具叙述行（UI 层保底，三段规则） ─────────
+   修复「工具调用中途不说话」：真实多步任务里模型经常在工具循环中途全程沉默，
+   旧规则（body 非空即永久退场）导致首句播报之后界面再无文字。新规则让「正在做什么 /
+   在想什么」在回合全程可见：
+     1) 工具执行中：显示「正在 <动词> <目标>…」；模型在该工具发起【后】说过话
+        （body 长度 ≠ 入列快照 bodyAtStart）→ 让位，不重复模型刚说的；本回合第一个
+        工具且发起前已有正文（意图播报在先）→ 不叠加，避免双份观感。
+     2) 工具间隙（无 running 但回合进行中）：显示「模型正在思考下一步…」——真实 API
+        首 token 可能十几秒，此处绝不空白；模型出声（body 变长）即让位。
+     3) 回合结束或模型已出声：叙述行淡出。
    切会话重建节点时按消息状态投影，不会残留历史叙述。 */
 function renderNarrate(node, msg) {
   const slot = $('.slot-narrate', node);
@@ -1183,47 +1189,51 @@ function renderNarrate(node, msg) {
   const tools = msg.tools || [];
   // 取最近一个未落定的工具（一轮并行多个时播报最新发起的一个）
   const running = [...tools].reverse().find((t) => t.status === 'running' || t.status === 'pending');
-  /* 退场规则（修复「工具调用中途不说话」）：
-     - 模型在当前 running 工具发起【之后】说过话（body 长度 ≠ 入列快照）→ 叙述行让位，不重复模型刚说的；
-     - 本回合第一个工具且发起前已有正文（模型已播报意图）→ 不叠加，避免双份观感；
-     - 其余情况（尤其多步循环中途模型沉默）→ 叙述行常驻兜底，让「正在做什么」始终可见。 */
-  const spokenAfterStart = running
-    ? (running.bodyAtStart !== undefined
-        ? String(msg.body || '').length !== running.bodyAtStart
-        : String(msg.body || '').trim() !== '') // 无快照（旧会话数据/探针构造）：保持旧规则——有正文即让位
-    : false;
-  const firstIntent = running && running.bodyAtStart !== undefined
-    && tools.indexOf(running) === 0 && running.bodyAtStart > 0;
-  if (!running || spokenAfterStart || firstIntent) {
-    const leaving = $('.tool-narrate:not(.is-leaving)', slot);
-    if (leaving) { leaving.classList.add('is-leaving'); setTimeout(() => leaving.remove(), 300); }
-    return;
+  const bodyNow = String(msg.body || '');
+  const bodyLen = bodyNow.length;
+  const live = !!(msg.summary && msg.summary.label === '进行中'); // 回合进行中（含工具间隙的思考期）
+  let wantSig = ''; // 空 = 应退场
+  if (running && live) {
+    const spokenAfterStart = running.bodyAtStart !== undefined
+      ? bodyLen !== running.bodyAtStart
+      : bodyNow.trim() !== ''; // 无快照（旧会话数据/探针构造）：保持旧规则——有正文即让位
+    const firstIntent = running.bodyAtStart !== undefined
+      && tools.indexOf(running) === 0 && running.bodyAtStart > 0;
+    if (!spokenAfterStart && !firstIntent) {
+      wantSig = ['tool', running.id || '', running.verb || '', running.target || ''].join('');
+    }
+  } else if (!running && live) {
+    const last = tools[tools.length - 1];
+    const silent = !!(last && last.bodyAtStart !== undefined && bodyLen === last.bodyAtStart);
+    if (silent) wantSig = 'thinking'; // 工具落定但模型还没出声：间隙思考期保持有字
   }
   const cur = $('.tool-narrate:not(.is-leaving)', slot);
-  if (running) {
-    const sig = [running.id || '', running.verb || '', running.target || ''].join('\u0001');
-    if (cur && cur.dataset.sig === sig) return; // 同一工具同一目标：零 DOM 写入
-    if (cur) cur.remove();
-    const line = document.createElement('div');
-    line.className = 'tool-narrate';
-    line.dataset.sig = sig;
-    line.innerHTML = `🛠 正在 ${esc(running.verb || running.name || '执行')} ${esc(running.target || '')}…`;
-    slot.appendChild(line);
+  if (!wantSig) {
+    if (cur) {
+      cur.classList.add('is-leaving'); // 300ms 淡出后移除（--ease-exit）；detached 节点同样成立（后台会话投影）
+      setTimeout(() => cur.remove(), 300);
+    }
     return;
   }
-  if (cur) {
-    cur.classList.add('is-leaving'); // 300ms 淡出后移除（--ease-exit）； detached 节点同样成立（后台会话投影）
-    setTimeout(() => cur.remove(), 300);
-  }
+  if (cur && cur.dataset.sig === wantSig) return; // 同状态同目标：零 DOM 写入
+  if (cur) cur.remove();
+  const line = document.createElement('div');
+  line.className = 'tool-narrate';
+  line.dataset.sig = wantSig;
+  line.innerHTML = wantSig === 'thinking'
+    ? '模型正在思考下一步…'
+    : `正在 ${esc(running.verb || running.name || '执行')} ${esc(running.target || '')}…`;
+  if (wantSig === 'thinking') line.classList.add('is-thinking');
+  slot.appendChild(line);
+}
+
+function toolSignature(t) {
+  return [t.status || 'ok', t.verb || '', t.target || '', t.meta || '', !!t.expanded,
+    String(t.result || '').length, String(t.error || '').length].join('');
 }
 
 /* 工具行增量更新：按 data-tool-id 定位，内容签名没变的行不碰 DOM。
    旧实现每次全量 innerHTML 重建，扫光/展开态/悬停态全部重来一次，就是用户看到的闪烁 */
-function toolSignature(t) {
-  return [t.status || 'ok', t.verb || '', t.target || '', t.meta || '', !!t.expanded,
-    String(t.result || '').length, String(t.error || '').length].join('\u0001');
-}
-
 function renderTools(node, msg) {
   renderNarrate(node, msg); // 叙述行随工具状态联动（入列/执行中显示，落定淡出）
   const box = $('.tools', node);

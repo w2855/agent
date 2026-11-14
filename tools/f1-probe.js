@@ -74,7 +74,8 @@
   // 叙述行退让：模型已有正文时 UI 不再叠加「正在 …」行（确定性单元断言，脱节点上驱动）
   const host = document.createElement('div');
   host.innerHTML = '<div class="slot-narrate"></div>';
-  const fakeMsg = { body: '', tools: [{ id: 't1', verb: '读取', target: 'src/', status: 'running' }] };
+  /* summary.label='进行中' 是叙述行三段规则的回合进行信号（真实回合由 runTurn 维护） */
+  const fakeMsg = { body: '', summary: { label: '进行中' }, tools: [{ id: 't1', verb: '读取', target: 'src/', status: 'running' }] };
   renderNarrate(host, fakeMsg);
   assert('part2', 'narrateShowsWhenSilent', !!host.querySelector('.tool-narrate'), '模型沉默时叙述行兜底仍在');
   fakeMsg.body = '模型已自行说明';
