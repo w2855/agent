@@ -12,3 +12,6 @@ tmp-*.json-*-wal
 .e2e-userdata/
 *.e2e-userdata/
 release/
+
+# 桌宠帧序列（由 pet_render.py 从关键帧确定性再生，不入库）
+assets/pet/**/*.frames/

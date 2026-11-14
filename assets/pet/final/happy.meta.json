@@ -1,0 +1,10 @@
+{
+ "action": "happy",
+ "fps": 60,
+ "frames": 120,
+ "durationSec": 2.0,
+ "gifDelayMs": 20,
+ "canvas": 512,
+ "keyframes": 8,
+ "pngSeq": "E:\\dsh-desktop\\assets\\pet\\final\\happy.frames"
+}
