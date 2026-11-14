@@ -507,6 +507,142 @@ function approveIfNeeded(rt, proposal) {
   add('并行委派均成功返回', p1r.ok && p1r.data.ok === true && p2r.ok && p2r.data.ok === true, JSON.stringify([p1r.data?.code, p2r.data?.code]));
   rt.finishRun({ runId: parent.run.id, outcome: 'succeeded' });
 
+  /* 12. 预算预留：父剩余预算折半为子预算，子消耗并入父 usage，父预算即将耗尽时拒绝再委派 */
+  parent = rt.createTask({
+    title: '预算预留测试', input: 'reserve', providerId: PROVIDER.baseUrl, model: PROVIDER.model,
+    idempotencyKey: 'dele-parent-reserve', budget: { maxModelCalls: 2, maxTokens: 100000, maxWallClockMs: 60000 },
+  }).data;
+  childTurn = 0;
+  modelHandler = async () => {
+    childTurn++;
+    if (childTurn === 1) return toolReply('list_dir', { path: '.' }, { prompt_tokens: 50, completion_tokens: 50, total_tokens: 100 });
+    return textReply('不应到达：子任务预算已在上限处截断。');
+  };
+  const dReserve = proposeDelegation(rt, parent.run.id, {
+    agentId: target.data.agent.id,
+    objective: '验证父预算折半预留。',
+    expectedOutput: '返回摘要。',
+  });
+  approveIfNeeded(rt, dReserve.proposal);
+  const reserveExec = await rt.executeTool({ toolCallId: dReserve.proposal.data.toolCallId, providerConfig: PROVIDER, profile: 'full' });
+  add('父剩余预算折半预留为子任务预算', reserveExec.ok && reserveExec.data.ok === false && reserveExec.data.code === 'BUDGET_EXCEEDED', reserveExec.data?.code);
+  const reserveDel = rt.listDelegations({ parentRunId: parent.run.id }).data.delegations[0];
+  add('子任务预算按父剩余量折半（预留语义）', reserveDel?.budget?.maxModelCalls === 1 && reserveDel?.budget?.maxTokens === 50000, JSON.stringify(reserveDel?.budget));
+  const reserveChildRun = rt.stateStore.getRun(reserveDel.childRunId);
+  add('父预算耗尽时子任务按超限收尾', reserveChildRun.status === 'failed' && reserveDel.status === 'failed', `${reserveChildRun.status}/${reserveDel.status}`);
+  add('子任务超限产生 budget.exceeded 事件', rt.read({ afterSeq: 0, limit: 5000 }).events.some((e) => e.type === 'budget.exceeded' && e.runId === reserveDel.childRunId), 'ok');
+  const reserveParentUsage = rt.stateStore.getRun(parent.run.id).usage;
+  add('子任务消耗并入父 Run usage', reserveParentUsage.modelCalls === 1 && reserveParentUsage.inputTokens === 50 && reserveParentUsage.outputTokens === 50 && reserveParentUsage.toolCalls === 2, JSON.stringify(reserveParentUsage));
+  const dReserve2 = proposeDelegation(rt, parent.run.id, {
+    agentId: target.data.agent.id,
+    objective: '父预算即将耗尽时的第二次委派。',
+    expectedOutput: '不应被允许。',
+  });
+  approveIfNeeded(rt, dReserve2.proposal);
+  const reserveExec2 = await rt.executeTool({ toolCallId: dReserve2.proposal.data.toolCallId, providerConfig: PROVIDER, profile: 'full' });
+  add('父预算即将耗尽时再次委派被拒', reserveExec2.ok && reserveExec2.data.ok === false && reserveExec2.data.code === 'BUDGET_EXHAUSTED', reserveExec2.data?.code);
+  rt.finishRun({ runId: parent.run.id, outcome: 'failed', errorCode: 'TEST' });
+
+  /* 13. 向后兼容：无预算字段的旧任务沿用默认子预算，子消耗同样计入父 usage */
+  parent = rt.createTask({ title: '无预算兼容测试', input: 'compat', providerId: PROVIDER.baseUrl, model: PROVIDER.model, idempotencyKey: 'dele-parent-compat' }).data;
+  childTurn = 0;
+  modelHandler = async () => textReply('子任务完成：无预算字段兼容。', { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 });
+  const dCompat = proposeDelegation(rt, parent.run.id, {
+    agentId: target.data.agent.id,
+    objective: '验证无预算字段的旧任务不受影响。',
+    expectedOutput: '返回摘要。',
+  });
+  approveIfNeeded(rt, dCompat.proposal);
+  const compatExec = await rt.executeTool({ toolCallId: dCompat.proposal.data.toolCallId, providerConfig: PROVIDER, profile: 'full' });
+  const compatDel = rt.listDelegations({ parentRunId: parent.run.id }).data.delegations[0];
+  add('无预算字段的旧任务沿用默认子预算并委派成功', compatExec.ok && compatExec.data.ok === true
+    && compatDel?.budget?.maxModelCalls === 12 && compatDel?.budget?.maxTokens === 60000 && compatDel?.budget?.maxWallClockMs === 300000, compatExec.data?.code);
+  const compatParentUsage = rt.stateStore.getRun(parent.run.id).usage;
+  const compatChildUsage = rt.stateStore.getRun(compatDel.childRunId).usage;
+  add('成功子任务的消耗计入父 usage', compatParentUsage.inputTokens === 20 && compatParentUsage.outputTokens === 10 && compatParentUsage.modelCalls === 1
+    && compatChildUsage.inputTokens === 20, JSON.stringify({ p: compatParentUsage, c: compatChildUsage }));
+  const compatFinish = rt.finishRun({ runId: parent.run.id, outcome: 'succeeded', summary: '无预算字段父任务成功' });
+  add('无预算字段的父任务照常成功收尾', compatFinish.ok && compatFinish.data.task.status === 'succeeded', compatFinish.data?.task?.status);
+
+  /* 14. 重启续跑：子任务跨重启的消耗并入新父 Run 且不重复累计 */
+  const root2 = tempDir('delegation-restart');
+  const workspace2 = path.join(root2, 'ws');
+  fs.mkdirSync(workspace2, { recursive: true });
+  let handler14 = async () => textReply('占位');
+  const rt1 = makeRuntime(path.join(root2, 'store'), workspace2, (ctx) => handler14(ctx));
+  const target14 = rt1.createAgent({ name: '续跑助手', permissionProfileId: 'full' });
+  const restartObjective = '重启续跑：完成并总结。';
+  const parent1 = rt1.createTask({
+    title: '重启父任务一', input: 'resume', providerId: PROVIDER.baseUrl, model: PROVIDER.model,
+    idempotencyKey: 'dele-parent-restart-1',
+  }).data;
+  let restartTurn = 0;
+  handler14 = async () => {
+    restartTurn++;
+    if (restartTurn === 1) return toolReply('list_dir', { path: '.' }, { prompt_tokens: 30, completion_tokens: 20, total_tokens: 50 });
+    return new Promise(() => { /* 模拟重启：旧进程的模型请求不再返回，冻结现场 */ });
+  };
+  const dRestart = proposeDelegation(rt1, parent1.run.id, {
+    agentId: target14.data.agent.id,
+    objective: restartObjective,
+    expectedOutput: '返回摘要。',
+  });
+  approveIfNeeded(rt1, dRestart.proposal);
+  const pendingRestartExec = rt1.executeTool({ toolCallId: dRestart.proposal.data.toolCallId, providerConfig: PROVIDER, profile: 'full' });
+  let restartRec = null;
+  for (let i = 0; i < 100; i++) {
+    restartRec = rt1.listDelegations({ parentRunId: parent1.run.id }).data.delegations[0];
+    const childRun = restartRec?.childRunId ? rt1.stateStore.getRun(restartRec.childRunId) : null;
+    if (restartRec?.status === 'running' && childRun?.usage?.modelCalls >= 2) break;
+    await sleep(20);
+  }
+  // 冻结现场：子 Run 已完成第 1 回合并开始第 2 回合的模型调用，此时关闭进程模拟重启
+  rt1.close();
+
+  const rt2 = makeRuntime(path.join(root2, 'store'), workspace2, (ctx) => handler14(ctx));
+  restartRec = rt2.stateStore.getDelegation(restartRec.id);
+  add('重启后带检查点的委派保留续跑候选', restartRec.status === 'queued' && !!restartRec.checkpoint && restartRec.checkpoint.modelCalls === 1, `${restartRec.status}/${restartRec.checkpoint?.modelCalls}`);
+  add('重启后子 Run 置为 interrupted', rt2.stateStore.getRun(restartRec.childRunId).status === 'interrupted', rt2.stateStore.getRun(restartRec.childRunId).status);
+  add('重启后旧父 Run 不含子消耗', (() => {
+    const u = rt2.stateStore.getRun(parent1.run.id).usage;
+    return u.inputTokens === 0 && u.outputTokens === 0 && u.modelCalls === 0;
+  })(), JSON.stringify(rt2.stateStore.getRun(parent1.run.id).usage));
+
+  // 新父任务带着同一目标重新委派：触发检查点续跑而不是新开子任务
+  handler14 = async () => textReply('续跑完成：子任务最终总结。', { prompt_tokens: 40, completion_tokens: 10, total_tokens: 50 });
+  const parent2 = rt2.createTask({
+    title: '重启父任务二', input: 'resume', providerId: PROVIDER.baseUrl, model: PROVIDER.model,
+    idempotencyKey: 'dele-parent-restart-2',
+  }).data;
+  const dResume = proposeDelegation(rt2, parent2.run.id, {
+    agentId: target14.data.agent.id,
+    objective: restartObjective,
+    expectedOutput: '返回摘要。',
+  });
+  approveIfNeeded(rt2, dResume.proposal);
+  const resumeExec = await rt2.executeTool({ toolCallId: dResume.proposal.data.toolCallId, providerConfig: PROVIDER, profile: 'full' });
+  add('重启后同目标委派自动续跑并完成', resumeExec.ok && resumeExec.data.ok === true && /续跑完成/.test(resumeExec.data?.content || ''), resumeExec.data?.code || (resumeExec.data?.content || '').slice(0, 40));
+  restartRec = rt2.stateStore.getDelegation(restartRec.id);
+  add('续跑委派记录改挂到新父任务', restartRec.parentTaskId === parent2.task.id && restartRec.parentRunId === parent2.run.id, `${restartRec.parentTaskId}/${restartRec.parentRunId}`);
+  const resumedChildUsage = rt2.stateStore.getRun(restartRec.childRunId).usage;
+  add('续跑后子 Run 用量跨重启累计', resumedChildUsage.modelCalls === 3 && resumedChildUsage.inputTokens === 70 && resumedChildUsage.outputTokens === 30, JSON.stringify(resumedChildUsage));
+  const parent2Usage = rt2.stateStore.getRun(parent2.run.id).usage;
+  add('子任务全部消耗并入新父 Run 且只计一次', parent2Usage.modelCalls === 3 && parent2Usage.inputTokens === 70 && parent2Usage.outputTokens === 30, JSON.stringify(parent2Usage));
+  add('重启续跑后旧父 Run 不重复累计', (() => {
+    const u = rt2.stateStore.getRun(parent1.run.id).usage;
+    return u.inputTokens === 0 && u.outputTokens === 0 && u.modelCalls === 0;
+  })(), JSON.stringify(rt2.stateStore.getRun(parent1.run.id).usage));
+  const remerged = rt2.stateStore.mergeChildUsage(restartRec);
+  const parent2UsageAgain = rt2.stateStore.getRun(parent2.run.id).usage;
+  add('重复合并幂等（不重复累计）', remerged === null && parent2UsageAgain.inputTokens === 70 && parent2UsageAgain.outputTokens === 30 && parent2UsageAgain.modelCalls === 3, JSON.stringify({ remerged: !!remerged, usage: parent2UsageAgain }));
+  const resumeFinish = rt2.finishRun({ runId: parent2.run.id, outcome: 'succeeded', summary: '续跑父任务成功' });
+  add('续跑后父任务成功收尾', resumeFinish.ok && resumeFinish.data.task.status === 'succeeded', resumeFinish.data?.task?.status);
+  add('子任务消耗不因重启重复计入（合并标记一致）', restartRec.usageMerged?.inputTokens === resumedChildUsage.inputTokens
+    && restartRec.usageMerged?.outputTokens === resumedChildUsage.outputTokens, JSON.stringify(restartRec.usageMerged));
+  rt2.close();
+  try { fs.rmSync(root2, { recursive: true, force: true }); } catch { /* Windows 文件占用时忽略 */ }
+  void pendingRestartExec; // 旧进程的执行 promise 已随冻结现场悬挂，不参与断言
+
   add('事件链无缺口', rt.store.verify().ok, JSON.stringify(rt.store.verify()));
   add('审计哈希链校验通过', rt.audit.verify().ok, JSON.stringify(rt.audit.verify().issues));
 

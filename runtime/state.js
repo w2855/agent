@@ -768,10 +768,39 @@ class StateStore {
     return record;
   }
 
+  /** 子任务收尾时把子 Run 用量增量并入父 Run usage（delegation 记录跨重启保留 parentRunId）。
+      幂等：记录上保存已并入量 usageMerged，重复合并/重启续跑只补增量，不重复累计。 */
+  mergeChildUsage(record) {
+    if (!record || !record.parentRunId || !record.childRunId) return null;
+    const childRun = this.state.runs[record.childRunId];
+    const parentRun = this.state.runs[record.parentRunId];
+    if (!childRun?.usage || !parentRun?.usage) return null;
+    const merged = record.usageMerged && typeof record.usageMerged === 'object' ? record.usageMerged : {};
+    const current = {
+      modelCalls: Math.max(0, Number(childRun.usage.modelCalls) || 0),
+      toolCalls: Math.max(0, Number(childRun.usage.toolCalls) || 0),
+      inputTokens: Math.max(0, Number(childRun.usage.inputTokens) || 0),
+      outputTokens: Math.max(0, Number(childRun.usage.outputTokens) || 0),
+    };
+    let delta = null;
+    for (const key of Object.keys(current)) {
+      const inc = current[key] - Math.max(0, Number(merged[key]) || 0);
+      if (inc <= 0) continue;
+      delta = delta || { modelCalls: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0 };
+      delta[key] = inc;
+      parentRun.usage[key] = (Number(parentRun.usage[key]) || 0) + inc;
+    }
+    record.usageMerged = current;
+    if (delta) this._persist();
+    return delta;
+  }
+
   _cancelDelegationsForTask(taskId, reason) {
     for (const record of Object.values(this.state.delegations)) {
       if (TERMINAL_DELEGATION.has(record.status)) continue;
       if (record.parentTaskId !== taskId && record.childTaskId !== taskId) continue;
+      // 级联取消同样把子任务已消耗的用量并入父 Run，保证父任务记账完整
+      this.mergeChildUsage(record);
       record.status = 'canceled';
       record.finishedAt = this.now();
       record.errorCode = reason === 'parent_canceled' ? 'PARENT_CANCELED' : 'TASK_CANCELED';

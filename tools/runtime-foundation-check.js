@@ -197,6 +197,35 @@ function tempDir(tag) {
   psvc.close();
   fs.rmSync(pdir, { recursive: true, force: true });
 
+  /* 6.2 子任务用量并入父 Run usage（P2：父 usage 看不到子消耗）——幂等差值合并 */
+  const udir = tempDir('usage-merge');
+  const usvc = runtimeModule.createRuntime({ dir: udir, workspacePath: ws }).init();
+  const ustore = usvc.stateStore;
+  const uparent = ustore.createTask({ title: '用量父任务', budget: { maxModelCalls: 4, maxTokens: 1000 }, idempotencyKey: 'usage-merge-parent' });
+  const uchild = ustore.createTask({ title: '用量子任务', parentTaskId: uparent.task.id, budget: { maxModelCalls: 2, maxTokens: 500 }, idempotencyKey: 'usage-merge-child' });
+  const urec = ustore.createDelegationRecord({
+    parentTaskId: uparent.task.id, parentRunId: uparent.run.id, parentAgentId: uparent.run.agentId,
+    targetAgentId: uchild.run.agentId, childTaskId: uchild.task.id, childRunId: uchild.run.id,
+    objective: '合并用量', expectedOutput: 'y',
+  });
+  const uc1 = ustore.beginModelCall({ runId: uchild.run.id });
+  ustore.finishModelCall({ modelCallId: uc1.id, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+  const udelta1 = ustore.mergeChildUsage(urec);
+  const upUsage1 = ustore.getRun(uparent.run.id).usage;
+  add('子 Run 用量并入父 Run usage', upUsage1.modelCalls === 1 && upUsage1.inputTokens === 10 && upUsage1.outputTokens === 5, JSON.stringify(upUsage1));
+  add('合并返回本次增量明细', !!udelta1 && udelta1.inputTokens === 10 && udelta1.modelCalls === 1, JSON.stringify(udelta1));
+  const uc2 = ustore.beginModelCall({ runId: uchild.run.id });
+  ustore.finishModelCall({ modelCallId: uc2.id, usage: { prompt_tokens: 7, completion_tokens: 3 } });
+  ustore.mergeChildUsage(urec);
+  const upUsage2 = ustore.getRun(uparent.run.id).usage;
+  add('增量合并持续累计子消耗', upUsage2.modelCalls === 2 && upUsage2.inputTokens === 17 && upUsage2.outputTokens === 8, JSON.stringify(upUsage2));
+  const udelta3 = ustore.mergeChildUsage(urec);
+  const upUsage3 = ustore.getRun(uparent.run.id).usage;
+  add('重复合并不重复累计（幂等）', udelta3 === null && upUsage3.inputTokens === 17 && upUsage3.outputTokens === 8, JSON.stringify({ delta: udelta3, usage: upUsage3 }));
+  add('父 Run 缺失时合并安全返回空', ustore.mergeChildUsage({ parentRunId: 'run_missing', childRunId: uchild.run.id }) === null, 'ok');
+  usvc.close();
+  fs.rmSync(udir, { recursive: true, force: true });
+
   fs.rmSync(ws, { recursive: true, force: true });
   fs.rmSync(dir, { recursive: true, force: true });
   fs.rmSync(rdir, { recursive: true, force: true });

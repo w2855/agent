@@ -32,18 +32,36 @@ function normalizeBudgetInput(value) {
   return out;
 }
 
-function parentRemaining(parentRun, now) {
-  const budget = parentRun?.budget && typeof parentRun.budget === 'object' ? parentRun.budget : {};
-  const usage = parentRun?.usage || {};
-  const out = {};
-  if (budget.maxWallClockMs) out.maxWallClockMs = Math.max(0, Number(budget.maxWallClockMs) - Math.max(0, now - (parentRun.startedAt || now)));
-  if (budget.maxModelCalls) out.maxModelCalls = Math.max(0, Number(budget.maxModelCalls) - (Number(usage.modelCalls) || 0));
-  if (budget.maxTokens) out.maxTokens = Math.max(0, Number(budget.maxTokens) - ((Number(usage.inputTokens) || 0) + (Number(usage.outputTokens) || 0)));
+/* 尚未收尾的子任务实时用量：已收尾的子任务用量在 finish 时并入父 Run usage，
+   这里只补充未并入部分，使父任务剩余预算覆盖父子总消耗（预算预留）。 */
+function pendingChildUsage(state, parentRun) {
+  const out = { modelCalls: 0, inputTokens: 0, outputTokens: 0 };
+  if (!state || !parentRun?.taskId) return out;
+  const delegations = state.listDelegations({ parentTaskId: parentRun.taskId, limit: 200 }).delegations;
+  for (const d of delegations) {
+    if (TERMINAL.has(d.status)) continue;
+    const usage = d.childRunId ? state.getRun(d.childRunId)?.usage : null;
+    if (!usage) continue;
+    out.modelCalls += Number(usage.modelCalls) || 0;
+    out.inputTokens += Number(usage.inputTokens) || 0;
+    out.outputTokens += Number(usage.outputTokens) || 0;
+  }
   return out;
 }
 
-function computeChildBudget(parentRun, declared, now) {
-  const remaining = parentRemaining(parentRun, now);
+function parentRemaining(parentRun, now, state) {
+  const budget = parentRun?.budget && typeof parentRun.budget === 'object' ? parentRun.budget : {};
+  const usage = parentRun?.usage || {};
+  const child = pendingChildUsage(state, parentRun);
+  const out = {};
+  if (budget.maxWallClockMs) out.maxWallClockMs = Math.max(0, Number(budget.maxWallClockMs) - Math.max(0, now - (parentRun.startedAt || now)));
+  if (budget.maxModelCalls) out.maxModelCalls = Math.max(0, Number(budget.maxModelCalls) - ((Number(usage.modelCalls) || 0) + child.modelCalls));
+  if (budget.maxTokens) out.maxTokens = Math.max(0, Number(budget.maxTokens) - ((Number(usage.inputTokens) || 0) + (Number(usage.outputTokens) || 0) + child.inputTokens + child.outputTokens));
+  return out;
+}
+
+function computeChildBudget(parentRun, declared, now, state) {
+  const remaining = parentRemaining(parentRun, now, state);
   const child = {};
   for (const key of ['maxWallClockMs', 'maxModelCalls', 'maxTokens']) {
     const fallback = DEFAULT_CHILD_BUDGET[key];
@@ -225,7 +243,7 @@ class DelegationService {
     let declared;
     try { declared = normalizeBudgetInput(args.budget); }
     catch (err) { return this._reject(parentRun, targetAgentId, 'BUDGET_INVALID', err.message); }
-    const budgetResult = computeChildBudget(parentRun, declared, this.now());
+    const budgetResult = computeChildBudget(parentRun, declared, this.now(), this.state);
     if (!budgetResult.ok) return this._reject(parentRun, targetAgentId, budgetResult.code, budgetResult.message);
 
     const queue = this.state.queueStats();
@@ -391,6 +409,8 @@ class DelegationService {
     record.summary = String(summary || '').slice(0, 2000);
     record.errorCode = errorCode || undefined;
     record.artifacts = Array.isArray(artifacts) ? artifacts.slice(0, 20) : [];
+    // 子任务收尾：把子 Run 用量增量并入父 Run usage（幂等），父任务与 UI 才能看到真实消耗
+    this.state.mergeChildUsage(record);
     this.state.updateDelegation(record.id, record);
     this.events.append({
       type: 'delegation.finished',
