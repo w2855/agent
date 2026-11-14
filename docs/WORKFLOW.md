@@ -43,10 +43,15 @@
 
 ## 5. 问题 Backlog
 
-### P2 遗留（来自交接文档）
-- [~] 流式 O(n²) 渲染 → 改增量/节流更新（第一轮）
-- [ ] msgStore 不清理 → 会话消息上限 + 冷会话裁剪（第一轮）
-- [ ] 密钥回传渲染层（架构取舍，暂缓，需用户点头才动）
+### P2 遗留（来自交接文档 + code-review-2026-11-13.md 交叉核对）
+- [~] 流式 O(n²) 渲染：app.js:1546-1554 innerHTML 重建（第一轮）
+- [~] msgStore 永不清理：app.js:160-166（第一轮）
+- [ ] 子任务预算不预留、父 usage 不累计子消耗（delegation.js:35-59 + state.js:954-958）⚠️ 冻结区，需用户点头
+- [ ] 密钥回传渲染层（main.js:269-284, preload.js:40-43，架构取舍，需用户点头才动）
+- [ ] delegate_task 声明 workspaceOnly 但 policy 层不校验参数（tool-registry.js:60）——安全向可做
+- [ ] download-exec 只查 curl/wget 直连管道，`curl -o evil.exe … & evil.exe` 不命中（policy.js:65）——安全向可做
+- [ ] `_prune` 可删仍被子任务引用的父任务（state.js:1336）
+- [ ] graph.js 不抑制 end 后事件（state.js:1249-1334 相关）
 - [ ] electron-builder 打包实测（DSH-Desktop-${version}.exe）
 - [ ] tool-e2e 完整端到端数字
 
@@ -73,6 +78,8 @@ foundation 43 / orchestrator 58 / delegation 63 / project 43 / queue 29 / graph 
 ### R0 · 2026-11-14 · 建立工作流
 - [x] 项目现状验证（结构与 package.json 无异常）
 - [x] 回归基线 296/296 全绿
+- [x] git 仓库初始化 + 基线提交 `7efb0e6`（158 文件，含 .gitignore 排除日志/截图/node_modules）
 - [x] 本文件建立
 - [~] 并行研究：opencode 源码模式 / 高星 agent 源码模式 / 本地问题定位
+- [~] tool-e2e 后台补跑中
 - 下一轮：按定位结果修流式渲染 + msgStore

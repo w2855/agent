@@ -170,6 +170,7 @@ const SESSIONS_KEY = (source) => source === 'preview' ? 'dsh.sessions.preview' :
 const SESSION_SAVE_MAX_MESSAGES = 200;
 const SESSION_SAVE_RESULT_CHARS = 4000;
 
+let storageWarned = false;
 function saveSessions() {
   const source = sourceOf();
   try {
@@ -184,7 +185,14 @@ function saveSessions() {
       }),
     }));
     writeStorage(SESSIONS_KEY(source), JSON.stringify({ sessions: slim, activeId: state.activeId }));
-  } catch { /* 存储满时静默降级 */ }
+    storageWarned = false;
+  } catch {
+    // 存储满：不静默吞掉，但也只提示一次，避免每回合刷屏
+    if (!storageWarned) {
+      storageWarned = true;
+      toast('本地存储写入失败，最近的会话可能没有保存。请清理旧会话或其他应用数据后重试');
+    }
+  }
 }
 
 function loadSavedSessions(source) {
@@ -220,6 +228,12 @@ const registerMsg = (msg) => {
   msgStore.set(msg.id, msg);
   return msg.id;
 };
+// 释放不再被任何会话引用的消息（上下文压缩会整批替换 messages，不清理则旧消息对象永远无法回收）
+function pruneMsgStore() {
+  const live = new Set();
+  for (const s of state.sessions) for (const m of s.messages || []) if (m.id) live.add(m.id);
+  for (const id of msgStore.keys()) if (!live.has(id)) msgStore.delete(id);
+}
 
 const sourceOf = () => state.connection.source;
 const currentModel = () => state.connection.api?.model || DEFAULT_API.model;
@@ -431,6 +445,59 @@ function markdown(src) {
   if (code !== null) out.push(`<pre><code>${code.join('\n')}</code></pre>`);
   closeList();
   return out.join('');
+}
+
+/* ───────── 流式增量渲染：稳定块只解析一次，活动尾低开销重绘（参考 aider mdstream 滑动窗口） ───────── */
+
+// 返回稳定前缀切点：前缀只含已完结块（空行收尾），不含未闭合代码围栏——切在围栏开始之前
+function stableBoundary(src) {
+  let i = 0, safe = 0, safeBeforeFence = 0, inFence = false;
+  while (i < src.length) {
+    const nl = src.indexOf('\n', i);
+    const end = nl === -1 ? src.length : nl + 1;
+    const line = src.slice(i, end);
+    if (line.startsWith('```')) {
+      if (!inFence) { safeBeforeFence = safe; inFence = true; }
+      else inFence = false;
+    } else if (!inFence && !line.trim()) {
+      safe = end; // 空行收尾的块可整体进入稳定区
+    }
+    i = end;
+  }
+  return inFence ? safeBeforeFence : safe;
+}
+
+// 两条流式路径共用：稳定块落 div.md-stable（边界推进时才重解析），活动尾落 div.md-live（每帧只解析小段），光标常驻不重建
+function createStreamPainter(prose) {
+  const stableEl = document.createElement('div');
+  stableEl.className = 'md-stable';
+  const liveEl = document.createElement('div');
+  liveEl.className = 'md-live';
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  prose.replaceChildren(stableEl, liveEl, caret);
+  let stableLen = -1;
+  let lastTailPaint = 0;
+  return {
+    paint(body) {
+      const cut = stableBoundary(body);
+      if (cut !== stableLen) {
+        stableEl.innerHTML = markdown(body.slice(0, cut));
+        stableLen = cut;
+      }
+      const tail = body.slice(cut);
+      const now = performance.now();
+      if (tail.length > 4000 && now - lastTailPaint < 120) return; // 超长单段降频，防退化成 O(n²)
+      lastTailPaint = now;
+      // 未闭合代码围栏：直接按 pre 渲染，不反复走 markdown 循环
+      if (tail.startsWith('```')) {
+        const nl = tail.indexOf('\n');
+        liveEl.innerHTML = `<pre><code>${esc(nl === -1 ? '' : tail.slice(nl + 1))}</code></pre>`;
+      } else {
+        liveEl.innerHTML = markdown(tail);
+      }
+    },
+  };
 }
 
 /* ───────── 消息渲染 ───────── */
@@ -1660,9 +1727,10 @@ function runApiTurn(ctx, opts) {
     return out;
   };
 
+  const painter = createStreamPainter(prose);
   const paint = () => {
     draft.body = body;
-    prose.innerHTML = markdown(body) + '<span class="caret"></span>';
+    painter.paint(body);
     scrollToBottom();
   };
   const schedulePaint = () => {
@@ -2319,13 +2387,14 @@ async function runPreviewTurn(text, ctx) {
 
 async function streamText(text, prose, draft) {
   draft.body = '';
+  const painter = createStreamPainter(prose);
   let i = 0;
   while (i < text.length) {
     if (state.stopRequested) break;
     const step = 2 + Math.floor(Math.random() * 3);
     i = Math.min(text.length, i + step);
     draft.body = text.slice(0, i);
-    prose.innerHTML = markdown(draft.body) + '<span class="caret"></span>';
+    painter.paint(draft.body);
     scrollToBottom();
     await sleep(16);
   }
@@ -2538,6 +2607,7 @@ function compactContext() {
     body: `已将 ${usable.length} 条历史消息压缩为摘要，后续请求会带上这段上下文。\n\n${summary}`,
     startedAt: Date.now(), finishedAt: Date.now(),
   }];
+  pruneMsgStore();
   renderChat();
   renderHeader();
   toast(`已压缩 ${usable.length} 条消息`);
