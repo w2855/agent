@@ -116,4 +116,16 @@ contextBridge.exposeInMainWorld('dsh', {
     defaultWorkspace: () => ipcRenderer.invoke('workspace:default'),
     pickWorkspace: (current) => ipcRenderer.invoke('workspace:pick', current),
   },
+  mcp: {
+    getServers: () => ipcRenderer.invoke('mcp:servers:get'),
+    setServers: (list) => ipcRenderer.invoke('mcp:servers:set', list),
+    startServer: (idOrCfg) => ipcRenderer.invoke('mcp:server:start', idOrCfg),
+    stopServer: (id) => ipcRenderer.invoke('mcp:server:stop', id),
+    listTools: (serverId) => ipcRenderer.invoke('mcp:tools:list', serverId),
+    callTool: (serverId, name, args, timeoutMs) => ipcRenderer.invoke('mcp:tool:call', { serverId, name, args, timeoutMs }),
+  },
+  skills: {
+    scan: (workspace) => ipcRenderer.invoke('skills:scan', { workspace }),
+    read: (filePath, workspace) => ipcRenderer.invoke('skills:read', { path: filePath, workspace }),
+  },
 });

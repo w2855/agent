@@ -6,7 +6,16 @@ const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const retry = require('./lib/retry');
 const localTools = require('./lib/tools');
+const mcpModule = require('./lib/mcp');
+const skillsModule = require('./lib/skills');
 const runtimeModule = require('./runtime');
+
+// 测试模式（--script/--shot）禁用硬件加速：本机 GPU 驱动间歇性导致渲染进程启动即崩
+// （Renderer process crashed / GPU process exited），did-finish-load 不触发、脚本永远不跑；
+// 该 UI 是纯 DOM/CSS，软件渲染完全够用。日常启动不受影响。
+if (process.argv.includes('--script') || process.argv.includes('--shot')) {
+  app.disableHardwareAcceleration();
+}
 
 // 允许用 --user-data-dir 隔离测试数据；正常启动仍使用系统默认目录
 const userDataArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
@@ -49,6 +58,19 @@ let win = null;
 let runtimeSvc = null;
 /** id -> { lifeCtrl, ctrl, cancelBody, aborted, reason, finish } */
 const activeChats = new Map();
+
+/** MCP stdio 客户端管理器（server 的启停/发现/调用都在主进程） */
+const mcpManager = mcpModule.createMcpManager();
+/** MCP server 配置的内存态；持久化由渲染层 localStorage 负责，经 IPC 同步下来 */
+let mcpConfigs = [];
+
+/* MCP 工具与内置工具合流：executeTool 按 mcp_ 前缀路由到管理器。
+   审批与 policy 不做任何特殊放行——MCP 工具一律按 run_command 同档
+   （ask 需审批、readonly 拒绝），见 lib/tools.js 的 executeMcpTool。 */
+localTools.setMcpBridge({
+  resolve: (fullName) => mcpModule.findTool(mcpManager.status(), fullName),
+  call: (serverId, toolName, args) => mcpManager.callTool(serverId, toolName, args),
+});
 
 /* ---------------- 窗口 ---------------- */
 
@@ -180,6 +202,8 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   try { runtimeSvc?.close(); } catch { /* 已关闭 */ }
+  // 退出时停掉所有 MCP server（杀整棵进程树，避免遗留子进程）
+  try { mcpManager.stopAll(); } catch { /* 尽力停止即可 */ }
 });
 
 app.on('window-all-closed', () => {
@@ -1118,13 +1142,18 @@ ipcMain.on('model:abort-all', () => {
  * 是否调用由模型决定，是否需要用户确认由权限级别决定。
  */
 
-ipcMain.handle('tool:specs', () => ({
-  ok: true,
-  specs: localTools.TOOL_SPECS,
-  meta: localTools.TOOL_META,
-  readOnly: [...localTools.READ_ONLY],
-  needsApproval: [...localTools.NEEDS_APPROVAL],
-}));
+ipcMain.handle('tool:specs', () => {
+  /* MCP 工具追加进 specs：inputSchema 本身就是 JSON Schema，基本直传。
+     policy 无特殊放行：MCP 工具名追加进 needsApproval（与 run_command 同档）。 */
+  const mcpEntries = mcpModule.buildToolSpecs(mcpManager.status());
+  return {
+    ok: true,
+    specs: [...localTools.TOOL_SPECS, ...mcpEntries.map((e) => e.spec)],
+    meta: localTools.TOOL_META,
+    readOnly: [...localTools.READ_ONLY],
+    needsApproval: [...localTools.NEEDS_APPROVAL, ...mcpEntries.map((e) => e.fullName)],
+  };
+});
 
 ipcMain.handle('tool:exec', async (_event, payload) => {
   if (!payload || typeof payload !== 'object') return { ok: false, code: 'BAD_ARGS', error: '工具调用参数为空' };
@@ -1163,6 +1192,139 @@ ipcMain.handle('workspace:pick', async (_event, currentPath) => {
     return { ok: true, path: picked };
   } catch (err) {
     return { ok: false, error: `选择目录失败：${err?.message || String(err)}` };
+  }
+});
+
+/* ---------------- MCP 客户端 ----------------
+ * stdio MCP server 的启动/停止/工具发现/调用都在主进程；
+ * 配置列表由渲染层 localStorage 传下来，这里只保存内存态。
+ * 启动时不自动连接任何 server，全部由用户在设置里手动启动；
+ * app 退出时在 before-quit 里统一 stopAll。
+ */
+
+/** 单条 MCP 配置的规范化（mcp:servers:set 与 mcp:server:start 共用）。 */
+function normalizeMcpConfig(raw, label) {
+  if (!raw || typeof raw !== 'object') throw new Error(`${label}不是对象`);
+  const id = String(raw.id || '').trim();
+  if (!id || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) throw new Error(`${label}的 id 非法（字母/数字/下划线/中划线，≤64）`);
+  const command = String(raw.command || '').trim();
+  if (!command) throw new Error(`MCP 配置 ${id} 缺少 command`);
+  return {
+    id,
+    name: String(raw.name || id).trim() || id,
+    command,
+    args: Array.isArray(raw.args) ? raw.args.map(String) : [],
+    env: raw.env && typeof raw.env === 'object' && !Array.isArray(raw.env)
+      ? Object.fromEntries(Object.entries(raw.env).map(([k, v]) => [String(k), String(v)]))
+      : {},
+  };
+}
+
+ipcMain.handle('mcp:servers:get', () => ({
+  ok: true,
+  configs: mcpConfigs,
+  servers: mcpManager.status(),
+}));
+
+ipcMain.handle('mcp:servers:set', (_event, list) => {
+  if (!Array.isArray(list)) return { ok: false, code: 'BAD_ARGS', error: 'MCP 配置必须是数组' };
+  const next = [];
+  const seen = new Set();
+  try {
+    for (const [i, raw] of list.entries()) {
+      const cfg = normalizeMcpConfig(raw, `第 ${i + 1} 个 MCP 配置`);
+      if (seen.has(cfg.id)) return { ok: false, code: 'BAD_ARGS', error: `MCP 配置 id 重复：${cfg.id}` };
+      seen.add(cfg.id);
+      next.push(cfg);
+    }
+  } catch (err) {
+    return { ok: false, code: 'BAD_ARGS', error: err?.message || String(err) };
+  }
+  // 配置里被删掉的 server 如果还在运行，顺手停掉，避免游离进程
+  const aliveIds = new Set(next.map((c) => c.id));
+  for (const s of mcpManager.status()) {
+    if (!aliveIds.has(s.id) && s.status !== 'stopped') mcpManager.stopServer(s.id);
+  }
+  mcpConfigs = next;
+  return { ok: true, configs: mcpConfigs };
+});
+
+ipcMain.handle('mcp:server:start', async (_event, idOrCfg) => {
+  let cfg;
+  try {
+    if (idOrCfg && typeof idOrCfg === 'object') {
+      // 直接传完整配置：规范化后 upsert 进内存配置表
+      cfg = normalizeMcpConfig(idOrCfg, 'MCP 配置');
+      const idx = mcpConfigs.findIndex((c) => c.id === cfg.id);
+      if (idx >= 0) mcpConfigs[idx] = cfg;
+      else mcpConfigs.push(cfg);
+    } else {
+      const id = String(idOrCfg || '').trim();
+      cfg = mcpConfigs.find((c) => c.id === id);
+      if (!cfg) return { ok: false, code: 'NOT_FOUND', error: `没有这个 MCP 配置：${id}` };
+    }
+  } catch (err) {
+    return { ok: false, code: 'BAD_ARGS', error: err?.message || String(err) };
+  }
+  return mcpManager.startServer(cfg);
+});
+
+ipcMain.handle('mcp:server:stop', (_event, id) => mcpManager.stopServer(String(id || '')));
+
+ipcMain.handle('mcp:tools:list', (_event, serverId) => {
+  const servers = mcpManager.status();
+  const scoped = serverId ? servers.filter((s) => s.id === String(serverId)) : servers;
+  const entries = mcpModule.buildToolSpecs(scoped);
+  return {
+    ok: true,
+    tools: entries.map((e) => ({
+      serverId: e.serverId,
+      serverName: e.serverName,
+      name: e.toolName,
+      fullName: e.fullName,
+      description: e.description,
+      inputSchema: e.inputSchema,
+      spec: e.spec,
+    })),
+  };
+});
+
+ipcMain.handle('mcp:tool:call', async (_event, payload) => {
+  if (!payload || typeof payload !== 'object') return { ok: false, code: 'BAD_ARGS', error: '参数为空' };
+  const serverId = String(payload.serverId || '');
+  const name = String(payload.name || '');
+  if (!serverId || !name) return { ok: false, code: 'BAD_ARGS', error: '缺少 serverId 或 name' };
+  const args = payload.args && typeof payload.args === 'object' && !Array.isArray(payload.args) ? payload.args : {};
+  return mcpManager.callTool(serverId, name, args, payload.timeoutMs);
+});
+
+/* ---------------- Skills（技能） ----------------
+ * 用户级 = userData/skills，项目级 = workspace/.dsh/skills；
+ * 目录不存在就当没有。扫描与读取都在主进程，读取按扫描目录做边界校验。
+ */
+
+function skillScanDirs(workspace) {
+  const dirs = [{ source: 'user', dir: path.join(app.getPath('userData'), 'skills') }];
+  const ws = String(workspace || '').trim();
+  if (ws) dirs.push({ source: 'project', dir: path.join(ws, '.dsh', 'skills') });
+  return dirs;
+}
+
+ipcMain.handle('skills:scan', (_event, payload) => {
+  const workspace = payload && typeof payload === 'object' ? payload.workspace : payload;
+  try {
+    return { ok: true, skills: skillsModule.scanSkills(skillScanDirs(workspace)) };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+});
+
+ipcMain.handle('skills:read', async (_event, payload) => {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  try {
+    return await skillsModule.readSkillFile(skillScanDirs(p.workspace), p.path);
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
   }
 });
 
