@@ -8,7 +8,7 @@
 把 DSH Desktop 打磨为体验对标一线开源 agent（opencode / Cline / aider）的桌面 AI agent：
 - 遗留 P2 问题全部清零（性能 + 架构）
 - UX 达到「用户可感知的顺滑」：流式渲染不卡顿、操作有反馈、错误可恢复
-- 回归基线 296/296 恒绿，tool-e2e 拿到完整数字
+- 回归基线 339/339 恒绿 + lessons-check 101/101，tool-e2e 74/74
 
 ## 2. 每轮循环（不可跳步）
 
@@ -79,6 +79,30 @@ R4 候选（剩余，按价值排序）：
 - [x] 选区浮动操作菜单（复制/追问预填）（`97354c5` R7-g3）
 - [x] electron-builder 打包实测（R4 完成；新版重出归入 R9 P5）
 
+### R9–R11 能力落地（ruflo 移植 + 并行批次，均已验证）
+- [x] 验证门学习闭环（污点检测 + 退出码真判定，`084a25c`）
+- [x] Doctor 体检面板 + Statusline 状态条 + Pair 协作模式 + 任务清单三态（`dbad4ec`）
+- [x] PII 脱敏管线 + 三处接线（`e0f39a1`/`53a679d`）
+- [x] Hybrid 检索（检索引擎 `0e0cd4d` + 经验库接入 `038311e`）
+- [x] 成本预算硬停阶梯（`4098804`）
+- [x] 经验库轮换备份（`4098804`）
+- [x] Autopilot 无人值守（`00b1764`）
+- [x] 发版字节校验（`a428706`）
+- [x] 文件级撤销（`b196658`）
+- [x] 会话级并行聊天（`676000d`）
+- [x] 会话右键菜单 + ID 识别（`6c76269`）
+- [x] 统一 userData + 保存加固 + 上下文窗口设置（`74f5f98`/`d2fe3ac`）
+- [x] 架构按会话隔离（`e411e91`）
+- [x] 表格渲染/语法高亮/自动上下文压缩/主题跟随（`3035fea`）
+- [x] 启动画面 + 启动提速 + 说话强化 + 任务清单常驻（`5821f6c`）
+- [x] 全应用动效重做（`d3f2617`）
+
+### 待办下一批（R12 候选）
+- [~] 叙述重复根因修复（进行中）：会话并行批引入的叙述行重复，先定位根因再修
+- [~] 壁纸修复（进行中）
+- [~] 401 修复（进行中）
+- [ ] 桌宠恢复：条件 = 生成配额恢复后重生成 idle 大幅度姿势并重新启用打包加载（R9-final 起打包排除 assets/pet，git 保留资产）
+
 ### 观察项
 - [ ] runtime-ipc-check.js 只能在 Electron 内跑（`--script` 方式），文档化
 
@@ -91,10 +115,12 @@ for f in tools/runtime-*-check.js; do node "$f" 2>&1 | tail -5; done   # 9 脚�
 npx electron . --user-data-dir="E:/dsh-desktop/.e2e-userdata" --script=tools/tool-e2e.js   # 渲染层 e2e
 ```
 
-基线数字（2026-11-14 聚合器实测，全绿；R6-budget 起从 296 升至 339）：
+基线数字（2026-11-14 实测，全绿；R6-budget 起从 296 升至 339）：
 foundation 62 / orchestrator 58 / delegation 83 / project 43 / queue 29 / graph 24 / audit 17 / validation 23 = **339/339**
-（runtime-ipc-check.js 需 Electron 上下文（`--script` 通道），node 直跑报 `window is not defined` 属预期）
-（并发代理扩容会改变各脚本计数，以聚合器当场实测为准；lib 自检另含 mcp 26 / skills 14 / ipc-mcp 18 / secret-mask 37 / h3 31 / lessons 39）
+lessons-check = **101/101**（R10-x2 起 39→101）
+最终门禁 = **22 项 21✓ 0✗ 1 跳**（R9-final 实测；runtime-ipc-check.js 需 Electron 上下文（`--script` 通道），node 直跑报 `window is not defined` 属预期，计为跳过）
+（并发代理扩容会改变各脚本计数，以聚合器当场实测为准；lib 自检另含 mcp 26 / skills 14 / ipc-mcp 18 / secret-mask 37 / h3 31 / lessons 101）
+（run-all 五段汇总：语法门禁 → runtime 回归 → lib 自检 → Electron 探针 → tool-e2e，任一失败退出码 1；`--quick` 跳过探针/e2e，聚合器只跑现状不重试修复）
 
 ## 7. 轮次记录
 
@@ -161,7 +187,33 @@ foundation 62 / orchestrator 58 / delegation 83 / project 43 / queue 29 / graph 
 - **R8-pet 直出模式**（`890e3cd`，按用户反馈）：废弃光流插帧（即过渡动画感来源），改关键帧直出零添加帧（60fps 时钟均匀直切）；wave/happy/sleepy/confused/shy 已直出；idle 姿势已加大幅度待重生成（暂停）
 - **R8-dynamic**（`d421370`，H4，用户硬需求）：架构图事件驱动实时刷新（150ms 去抖 + 实时徽标 + 运行节点呼吸光环 + diff 防闪烁，轮询降 3s 兜底）+ 任务清单全交互（行内编辑/状态循环/两段删除/拖拽排序/新增/同步模型开关）；探针 arch14 + todo22 全绿；顺手修面板点击误关与定位裁切两个既有 bug
 
-### R9 · 2026-11-14 · 进行中（6 路并行 + 验收聚合器）
-- [~] 本轮 6 路并行子代理，记录在案 5 路（均运行中）：P1 A组（TOP15 渲染/交互差距项，含 #7 主题跟随）/ P2 稳定性（runtime 回归扩容，各脚本计数已变、总 339）/ P3 经验库（新增 tools/lessons-check.js 自检 39 项）/ P5 打包流水线（electron-builder 重出 exe）/ P6 桌宠归档
+### R9 · 2026-11-14 · 6 路并行 + ruflo 移植（全部收口，已提交）
+- [x] 本轮并行子代理全部落地：P1 A组（TOP15 渲染/交互差距项）/ P2 稳定性（runtime 回归扩容至 339）/ P3 经验库（tools/lessons-check.js 自检）/ P5 打包流水线 / P6 桌宠归档；另 Q/R/G 系列见下
+- [x] R9-p1（P1 A组，`3035fea`）：GFM 表格渲染（流式不解析防半表 + 吸底滚动条 + sticky 表头）+ 零依赖语法高亮（单遍 tokenizer 七语言，流式关/完成开）+ 自动上下文压缩（90% 阈值/时间线提示/设置开关）+ 主题跟随系统（三态/实时监听/默认迁移）；探针 28 全过
+- [x] R9-q1（Q1，`084a25c`）：验证门学习闭环——改测试/改验证器判污点，test/build/typecheck 退出码真才 verified，caution 三态；污染记录永不参与统计；lessons-check 83/83
+- [x] R9-r1（R1，`0e0cd4d`）：Hybrid 检索（BM25 中文 bigram + 字符余弦 + 精确命中 + MMR 去重）+ 有界读取委托（intent/depth 系数三档策略/块拆分），纯函数零依赖
+- [x] R9-r2（R2，`4098804`）：成本预算硬停阶梯（持久 budget.json 三窗口滚动/hard-stop 拒绝/fallback 降级）+ 经验库轮换备份（keep-7/WAL 伴随/损坏跳过）；339 回归绿
+- [x] R9-q2（Q2，`e0f39a1`）：PII 四档脱敏管线（私钥块/api_key/jwt/email/手机/身份证/凭据 KV 七类探测，BLOCK/REDACT/HASH/PASS，对象递归防循环引用）；55 断言
+- [x] R9-g4（G4，`dbad4ec`）：Doctor 体检面板（10 项 HealthCheck + MetaHarness 配置评分 0-100 + 修复建议）+ Statusline 状态条（模型/agent 数/上下文%/token）+ Pair 协作模式 + 任务清单三态；探针 35/35
+- [x] R9-final（`197ae80`/`1974dab`）：探针适配两处有意行为变化（dyn 4 态含 verifying；凭据掩码视图防明文泄漏）+ 打包排除整个 assets/pet（约 300MB 不入包）；最终门禁 22 项 21✓0✗1跳全绿
 - [x] 新建 tools/run-all.js 一键验收聚合器（`node tools/run-all.js [--quick]`）：语法门禁（46 文件）+ runtime 回归 + lib 自检（存在才跑）+ Electron 探针（隔离 .runall-probe，--quick 跳过）+ tool-e2e（自动 mock-gateway 复用/新建回收）；统一解析 [script]/JSON/中文计数，汇总中文表格，任一失败退出码 1；聚合器只跑现状，并发改动导致的异常不重试不修复
 - [x] 文档同步：本文件轮次记录补齐 R7（4 提交）/R8（4 提交）/R9 + backlog 勾选（P2 遗留 8 项全部关账）+ §6 基线更新为 339；feature-gap-analysis.md TOP15 状态列（#3 通知 / #6 导出 / #11 托盘 完成，#7 主题跟随 → P1 进行中）
+
+### R10 · 2026-11-14 · 存储统一 + 保存加固 + 会话体验（全部已提交）
+- [x] T4 统一 userData（`74f5f98`）：打包版/开发版统一为 %APPDATA%/dsh-desktop，根治两套存储分裂导致的记录丢失感知；setPath 先于单实例锁（锁按 userData 隔离，时序修正）+ 旧打包目录迁移提示；6 组断言
+- [x] T1 保存加固 + 会话 ID + /load + 上下文设置（`d2fe3ac`）：dirty 标记 + 30s 自动保存 + hidden/beforeunload 兜底 + 配额感知分级降级 L0-L3 + Doctor 存储用量第 11 项（根因：回合中被杀丢数据 + 配额满静默失败）；会话 ID 徽标点击复制 + /load 跨会话读取（compacted 双保险不污染历史）+ 上下文窗口设置（50 万–200 万/statusline 跟随/个性化确认保留）；探针 49/49
+- [x] G6 会话右键菜单 + ID 识别 + 架构接线（`6c76269`）：复制 ID/重命名/删除 + 发送自动识别会话 ID 直接载入（无需 /load 命令）+ 架构 per-session 接线（工具 args 带 sessionId/架构页按会话过滤//load 挂载提示）
+- [x] R3 架构按会话隔离（`e411e91`）：runtime 三分支向后兼容（带 sessionId=独立/不带=旧行为/旧数据命中不新建）+ listBySession/getProjectBySession（/load 挂载用）+ 修 createProject 按 workspace 误去重 bug；29 断言
+- [x] chore（`b33ad6e`）：探针隔离目录 gitignore + 截图/shot 脚本与桌宠 metadata/preview 入库 + pet_generate 429 长退避参数
+
+### R11 · 2026-11-14 · 会话并行 + 文件撤销 + 动效重做 + 启动体验（全部已提交）
+> 注：R4/R5/X1/X2 提交前缀为 R9-r4/R9-r5/R10-x1/R10-x2（子代理系列沿用旧编号），按本轮批次归入 R11 记录。
+- [x] G5 会话级并行聊天（`676000d`）：A 跑 B 聊——busy 降级为活跃会话派生值、stopRequested 按会话独立（中断 A 不误杀 B）、pendingTurns 队列 Map 隔离、流式 painter 支持 mount 重挂与 DOM 中转（切走数据照常累积切回恢复）、审批与 todo_write 按回合归属会话记账、侧栏 N 个会话运行中 pill；探针 29/29 + e2e 74/74 零适配
+- [x] R6 文件级撤销（`b196658`）：写前+写后双快照 / sha 防抖 / changed-since 安全预检不盲覆 / 环形 20 / 损坏跳过 / 原子写回 + runtime.undo 门面 + tools.js 注入点（未注入 no-op 向后兼容）；46 断言
+- [x] R7 补丁脚本：锚点式预写补丁（失败跳过不盲打 + dry-run 预检），随 G6 提交 `6c76269` 落地，10/10 应用成功
+- [x] R8 全应用动效重做（`d3f2617`，emil 五技能方法论）：63 keyframes 审计（保留重做 39/删 24/新增 4）、三曲线三档时长统一、退场收束、origin-aware 菜单、按压态/焦点环/stagger 封顶、性能修复（阴影重绘与 drop-shadow 滤镜改 opacity 与 stroke）、18 个 reduce 块收敛为 1、打断与重放缺陷修复 + 一键应用脚本（备份/回滚/dry-run）；dry-run 全命中
+- [x] R4 发版字节校验（`a428706`，ruflo verify 模式）：sha256 清单原子写 / 流式哈希 110MB 不整读 / 篡改 1 字节精确定位 / 中文路径 + release.js 后验自动 buildManifest+verify+--verify 子命令；26 断言 + 真实 exe 闭环
+- [x] R5 autopilot 无人值守（`00b1764`，ruflo 移植）：循环状态机（queued/paused 推进/超时巡检/连续 2 失败自动停/maxIterations 停/环形决策 50/不虚构新任务安全边界）+ main.js 接线（autopilot:state IPC + before-quit stop）；37 断言
+- [x] X1 PII 三处接线（`53a679d`）：通知 strict 凭据 BLOCK / 导出 standard 脱敏 + 计数 toast / 崩溃日志 standard + targetPath 程序化导出 + 经验库 IPC（lessons:summary/tail，Doctor⑨可达方案）；mock20 + 探针 12 全过
+- [x] X2 经验 Hybrid 检索（`038311e`）：searchLessons 双路检索 + relatedLessonsForTask 双路关联（结构 taskId/前缀/tag + 语义关键词，去重取高分，verified/tainted 门槛照旧），空库/故障注入绝不抛错；lessons-check 101/101
+- [x] Y1+Y2 启动画面 + 启动提速 + 说话强化 + 清单常驻（`5821f6c`）：纯 CSS 首帧可见 + 就绪渐隐 + 异常兜底；立即显示/boot-stages 阶段打点/非关键初始化延后；UI 叙述行兜底 + 系统提示硬约束；任务清单右上角常驻（默认展开/计数徽标/记忆收起）+ 工具行 mcp 前缀 fallback
