@@ -36,14 +36,29 @@ const ARCH_KIND_LABEL = {
 const enteredMessages = new WeakSet();
 const enteredTools = new WeakSet();
 const RETRY_CHOICES = [0, 2, 3, 5];
+
+/* 会话上下文窗口（字符）：从 localStorage dsh.ctxLimit 读取，用户可在设置页「对话 → 上下文」卡片修改。
+   默认 700000，范围 50000–2000000；非法值（非数字 / 越界）一律回退默认值。 */
+const CTX_LIMIT_DEFAULT = 700000;
+const CTX_LIMIT_MIN = 50000;
+const CTX_LIMIT_MAX = 2000000;
+function readCtxLimit() {
+  const raw = readStorage('dsh.ctxLimit', '');
+  const n = Number(raw);
+  if (!raw || !Number.isFinite(n) || n <= 0) return CTX_LIMIT_DEFAULT;
+  return clamp(Math.round(n), CTX_LIMIT_MIN, CTX_LIMIT_MAX);
+}
+
 const LIMITS = {
   maxInput: 120000,
   maxAttachFiles: 8,
   maxAttachBytes: 512 * 1024,
   maxAttachChars: 120000,
   /* 上下文预算（字符）：发给上游的历史总量上限；超出时从最旧开始裁剪，
-     裁剪按消息整条进行且只裁最旧端——已发过的前缀保持不变，缓存命中率优先。 */
-  maxContextChars: 700000,
+     裁剪按消息整条进行且只裁最旧端——已发过的前缀保持不变，缓存命中率优先。
+     启动时从 dsh.ctxLimit 读取；statusline / 自动压缩 / buildApiMessages 都是函数式读取，
+     设置页改完立即生效，无需重启。 */
+  maxContextChars: readCtxLimit(),
   turnTimeoutMs: 190000,
 };
 
@@ -59,6 +74,11 @@ function readJson(key, fallback) {
 function writeStorage(key, value) {
   try { localStorage.setItem(key, value); return true; }
   catch (err) { toast(`本地存储写入失败：${err?.message || err}`); return false; }
+}
+/* 静默写：分级降级保存内部用，失败不立即 toast，由降级链统一决定提示时机 */
+function writeStorageQuiet(key, value) {
+  try { localStorage.setItem(key, value); return true; }
+  catch { return false; }
 }
 
 const validModel = (m) => typeof m === 'string' && MODEL_RE.test(m.trim());
@@ -178,35 +198,114 @@ function withApprovalLock(fn) {
   return run;
 }
 
-/* ───────── 会话持久化（按来源分开存；工具结果体积大，落盘前裁剪） ───────── */
+/* ───────── 会话持久化（按来源分开存；工具结果体积大，落盘前裁剪） ─────────
+   保存加固（针对「聊天记录不保存」）：
+   ① 周期自动保存——每 autoSaveIntervalMs 检查 dirty 标记，有变更才落盘；
+   ② 页面隐藏（visibilitychange hidden）立即保存一次；
+   ③ beforeunload 同步兜底保存（localStorage 写入是同步的，关闭窗口前来得及）；
+   ④ 配额感知分级降级——写入失败时逐级缩小落盘体积，宁可丢部分历史也不整体丢盘。 */
 const SESSIONS_KEY = (source) => source === 'preview' ? 'dsh.sessions.preview' : 'dsh.sessions.model';
 const SESSION_SAVE_MAX_MESSAGES = 200;
 const SESSION_SAVE_RESULT_CHARS = 4000;
+/* 分级降级参数：L2=非活跃会话只留最近 20 条、工具结果截 1000 字；L3=只保留最近 10 个会话（最旧先弃） */
+const SESSION_SAVE_L2_MESSAGES = 20;
+const SESSION_SAVE_L2_RESULT_CHARS = 1000;
+const SESSION_SAVE_L3_KEEP = 10;
+/* localStorage 容量口径（字符数）：Doctor「本地存储用量」检查与分级提示共用同一预算 */
+const STORAGE_BUDGET_CHARS = 5 * 1024 * 1024;
 
-let storageWarned = false;
-function saveSessions() {
-  const source = sourceOf();
-  try {
-    const slim = state.sessions.map((s) => ({
+/* dirty 标记：发消息 / 工具结果落定 / 编辑会话等变更时置位；
+   周期自动保存只在 dirty 时落盘，saveSessions 成功后清位。 */
+let sessionsDirty = false;
+let autoSaveTimer = null;
+let autoSaveIntervalMs = 30000; // 可被探针改小，验证周期保存路径
+const markSessionsDirty = () => { sessionsDirty = true; };
+
+/* 单级序列化：level 0=现策略（每会话最近 200 条 / 工具结果 4000 字）；
+   level ≥1 时非活跃会话进一步截断（最近 20 条 / 工具结果 1000 字）；
+   level ≥2 时只保留最近 10 个会话（sessions 数组新会话在前，最旧先弃；当前会话被挤出时强制保留）。
+   只裁剪序列化副本，内存里的会话数据不动——降级保存不破坏当前使用中的会话。 */
+function serializeSessionsAtLevel(level) {
+  let kept = state.sessions;
+  if (level >= 2) {
+    kept = state.sessions.slice(0, SESSION_SAVE_L3_KEEP);
+    if (state.activeId && !kept.some((s) => s.id === state.activeId)) {
+      const cur = state.sessions.find((s) => s.id === state.activeId);
+      if (cur) kept = kept.concat(cur);
+    }
+  }
+  return kept.map((s) => {
+    const inactive = level >= 1 && s.id !== state.activeId;
+    const maxMsgs = inactive ? SESSION_SAVE_L2_MESSAGES : SESSION_SAVE_MAX_MESSAGES;
+    const maxResult = inactive ? SESSION_SAVE_L2_RESULT_CHARS : SESSION_SAVE_RESULT_CHARS;
+    return {
       ...s,
-      messages: (s.messages || []).slice(-SESSION_SAVE_MAX_MESSAGES).map((m) => {
+      messages: (s.messages || []).slice(-maxMsgs).map((m) => {
         const copy = { ...m };
         if (Array.isArray(copy.tools)) {
-          copy.tools = copy.tools.map((t) => ({ ...t, result: String(t.result || '').slice(0, SESSION_SAVE_RESULT_CHARS) }));
+          copy.tools = copy.tools.map((t) => ({ ...t, result: String(t.result || '').slice(0, maxResult) }));
         }
         return copy;
       }),
-    }));
-    writeStorage(SESSIONS_KEY(source), JSON.stringify({ sessions: slim, activeId: state.activeId }));
-    storageWarned = false;
-  } catch {
-    // 存储满：不静默吞掉，但也只提示一次，避免每回合刷屏
-    if (!storageWarned) {
-      storageWarned = true;
-      toast('本地存储写入失败，最近的会话可能没有保存。请清理旧会话或其他应用数据后重试');
+    };
+  });
+}
+
+let storageWarned = false;
+
+/* 分级降级保存：从 level 起步逐级尝试（最高 L2=第 3 级），任一级写成功即止。
+   返回 { ok, level, droppedIds }；droppedIds 仅在 L3 生效时列出被弃存会话 id。 */
+function saveSessionsTiered(level = 0) {
+  const source = sourceOf();
+  for (let lv = Math.max(0, Math.min(2, level)); lv <= 2; lv++) {
+    try {
+      const slim = serializeSessionsAtLevel(lv);
+      if (writeStorageQuiet(SESSIONS_KEY(source), JSON.stringify({ sessions: slim, activeId: state.activeId }))) {
+        storageWarned = false;
+        const droppedIds = lv >= 2
+          ? state.sessions.slice(SESSION_SAVE_L3_KEEP)
+            .filter((s) => s.id !== state.activeId).map((s) => s.id)
+          : [];
+        return { ok: true, level: lv, droppedIds };
+      }
+    } catch { /* 序列化异常也按写入失败处理，继续降级 */ }
+  }
+  return { ok: false, level: 2, droppedIds: [] };
+}
+
+function saveSessions() {
+  const r = saveSessionsTiered(0);
+  if (r.ok) {
+    sessionsDirty = false;
+    // L3 降级生效：告知被弃存了哪些会话（只显示 id 前 10 位，与头部徽标一致）
+    if (r.droppedIds.length) {
+      toast(`存储已满：已降级保存，弃存 ${r.droppedIds.length} 个旧会话（${r.droppedIds.slice(0, 3).map((id) => id.slice(0, 10)).join('、')}${r.droppedIds.length > 3 ? '…' : ''}）`);
     }
+    return;
+  }
+  // 全部级别都失败：存储真的满了，只提示一次避免每回合刷屏
+  if (!storageWarned) {
+    storageWarned = true;
+    toast('存储已满，请导出或清理会话');
   }
 }
+
+/* 保存加固三件套之一：周期自动保存。dirty 才落盘，避免空闲时反复序列化大会话。 */
+function autoSaveTick() {
+  if (sessionsDirty) saveSessions();
+}
+function startAutoSave() {
+  if (autoSaveTimer) clearInterval(autoSaveTimer);
+  autoSaveTimer = setInterval(autoSaveTick, autoSaveIntervalMs);
+}
+/* 关闭/刷新前同步兜底保存：localStorage 写入同步完成，窗口关闭前来得及落盘 */
+function saveOnExit() {
+  try { saveSessions(); } catch { /* 关闭路径上的最后兜底，失败不再打扰 */ }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) saveOnExit();
+});
+window.addEventListener('beforeunload', saveOnExit);
 
 function loadSavedSessions(source) {
   try {
@@ -217,6 +316,11 @@ function loadSavedSessions(source) {
     for (const s of data.sessions) {
       if (!Array.isArray(s.messages)) s.messages = [];
       for (const m of s.messages) registerMsg(m);
+      /* 重启后重建压缩/载入上下文的 system 注入池：/compact 与 /load 都把摘要写进
+         最后一条 compacted 占位消息的 body，这里按 body 回填 state.compacted，
+         否则重启后「上下文」只在界面上可见、不再注入后续请求。 */
+      const lastCompacted = [...s.messages].reverse().find((m) => m.compacted && m.body);
+      if (lastCompacted && !state.compacted.has(s.id)) state.compacted.set(s.id, lastCompacted.body);
     }
     return data;
   } catch { return null; }
@@ -441,6 +545,12 @@ function renderHeader() {
   const s = active();
   if (!s) return;
   $('#title').textContent = s.title || '新对话';
+  // 会话 ID 徽标：mono 小徽标显示 id 前 10 位（#m-xxxx），点击复制完整 id（bind 里挂接）
+  const badge = $('#sessionBadge');
+  if (badge) {
+    badge.textContent = '#' + String(s.id || '').slice(0, 10);
+    badge.hidden = !s.id;
+  }
   const label = sourceOf() === 'model' ? currentModel() : '离线预览';
   $('#modelName').textContent = label;
   const running = s.state === 'running';
@@ -1367,6 +1477,8 @@ async function runTurn(rawText) {
   if (!s.messages.length) $('#chat').innerHTML = '<div class="chat-inner"></div>';
   if (s.title === '新对话') s.title = text.replace(/\s+/g, ' ').slice(0, 18) || '新对话';
   saveSessions();
+  // 发消息即置 dirty：本轮流式输出与工具结果由周期自动保存（30s）兜底，回合结束 finish 再统一保存
+  markSessionsDirty();
 
   // 自动压缩：发送前历史超过上下文预算 90% 时先折叠，再走本轮请求（开关见对话页设置）
   maybeAutoCompact(s);
@@ -2540,6 +2652,7 @@ function runApiTurn(ctx, opts) {
       expanded: false,
     };
     draft.tools.push(tool);
+    markSessionsDirty(); // 工具调用入列即置 dirty，30s 周期保存可捕获中途被杀的回合
     revealTools(node, draft);
     renderTools(node, draft);
     scrollToBottom();
@@ -2794,6 +2907,7 @@ async function runPreviewTurn(text, ctx) {
   if (!stopped) {
     for (const tool of script.tools || []) {
       draft.tools.push(tool);
+      markSessionsDirty(); // 同上：工具完成/入列置 dirty
       toolsBox.insertAdjacentHTML('beforeend', toolRow(tool));
       const row = toolsBox.lastElementChild;
       const spin = document.createElement('span');
@@ -2897,6 +3011,7 @@ function finish(draft, node, session, stopped, overrideLabel) {
   session.state = 'idle';
   state.busy = false;
   state.stopRequested = false;
+  markSessionsDirty(); // 回合收尾变更（summary/metrics/unread）置 dirty，下方保存成功即清
   saveSessions();
   // 应用在后台时结束的回合标为未读，切回来点一下会话即清除
   if (document.hidden) session.unread = true;
@@ -3091,8 +3206,9 @@ function handleCommand(text) {
     case '/arch': openArchPage(); break;
     case '/goal': handleGoal(parts.slice(1).join(' ').trim()); break;
     case '/skills': openSettings('skills'); break;
+    case '/load': handleLoadSession(parts.slice(1).join(' ').trim()); break;
     default:
-      toast(`未识别的命令「${cmd}」，可用：/new、/model、/compact、/arch、/stop、/goal、/skills`);
+      toast(`未识别的命令「${cmd}」，可用：/new、/model、/compact、/arch、/stop、/goal、/skills、/load`);
   }
 }
 
@@ -3110,6 +3226,73 @@ function handleGoal(text) {
   renderHeader();
   renderTodoPanel();
   toast('会话目标已设置');
+}
+
+/** /load <会话id>：把另一会话的上下文摘要注入当前会话（跨会话读取）。
+    走 compacted 通道——不污染历史：界面插入一条 compacted:true 占位消息（照 performCompact 的消息形状），
+    真正发给上游的是 state.compacted 里的摘要（buildApiMessages 以 system 消息注入并跳过占位消息本身）。
+    支持 id 精确匹配与唯一前缀匹配（头部徽标只显示 id 前 10 位）。 */
+function handleLoadSession(idArg) {
+  if (state.busy) { toast('生成中不能载入会话上下文'); return; }
+  const cur = active();
+  if (!cur) return;
+  const q = String(idArg || '').trim();
+  if (!q) { toast('用法：/load <会话id>（点击会话标题旁的 # 徽标可复制完整 ID）'); return; }
+  let target = state.sessions.find((s) => s.id === q);
+  if (!target) {
+    const hits = state.sessions.filter((s) => s.id.startsWith(q));
+    if (hits.length === 1) target = hits[0];
+  }
+  if (!target) {
+    const avail = state.sessions.slice(0, 8).map((s) => s.id.slice(0, 10)).join('、');
+    toast(`没有找到会话「${q.slice(0, 20)}」。可用 ID 前缀：${avail}`);
+    return;
+  }
+  if (target.id === cur.id) { toast('不能载入自己'); return; }
+
+  const msgs = target.messages || [];
+  const tokenSum = msgs.reduce((sum, m) => {
+    const u = m.usage || {};
+    return sum + (u.total_tokens ?? u.totalTokens
+      ?? ((u.prompt_tokens ?? u.inputTokens ?? 0) + (u.completion_tokens ?? u.outputTokens ?? 0)) ?? 0) || 0;
+  }, 0);
+  const times = msgs.map((m) => m.startedAt).filter((t) => Number(t) > 0);
+  const fmt = (t) => new Date(t).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const range = times.length ? `${fmt(Math.min(...times))} ~ ${fmt(Math.max(...times))}` : '无时间记录';
+  /* 摘要：前 5 条消息 role + 内容前 80 字 */
+  const sample = msgs.slice(0, 5).map((m) => {
+    const c = String(m.role === 'user' ? (m.text || '') : (m.body || '')).replace(/\s+/g, ' ').trim();
+    return `- ${m.role === 'user' ? '用户' : '助手'}：${c.slice(0, 80) || '（空）'}`;
+  }).join('\n') || '（无消息）';
+  /* 最近 6 条消息原文（user/assistant 各带角色标；单条截 2000 字，防止巨消息挤爆请求预算） */
+  const recent = msgs.slice(-6).map((m) => {
+    const c = String(m.role === 'user' ? (m.text || '') + (m.apiSuffix || '') : (m.body || ''));
+    if (!c) return `[${m.role === 'user' ? '用户' : '助手'}]（空）`;
+    return `[${m.role === 'user' ? '用户' : '助手'}]\n${c.length > 2000 ? c.slice(0, 2000) + '…（已截断）' : c}`;
+  }).join('\n\n') || '（无消息）';
+
+  const body = `📥 已载入会话 ${target.title || '未命名'}（${target.id}，${msgs.length} 条消息）的上下文：\n\n`
+    + `【会话摘要】前 ${Math.min(5, msgs.length)} 条消息：\n${sample}\n`
+    + `累计 token：${Number(tokenSum).toLocaleString('en-US')} · 时间范围：${range}\n\n`
+    + `【最近 ${Math.min(6, msgs.length)} 条消息原文】\n${recent}`;
+
+  /* 注入：摘要并入 state.compacted（已有摘要则追加，不覆盖 /compact 的成果）；
+     占位消息同时入时间线与持久化，compacted:true 保证它不进 API 历史、也不会被下轮再压缩。 */
+  const payload = `以下上下文载入自会话「${target.title || '未命名'}」（${target.id}，${msgs.length} 条消息）：\n\n${sample}\n\n${recent}`;
+  state.compacted.set(cur.id, state.compacted.has(cur.id) ? `${state.compacted.get(cur.id)}\n\n${payload}` : payload);
+  const loadedMsg = {
+    role: 'assistant',
+    summary: { label: '已载入会话上下文', tools: 0, messages: 0 },
+    tools: [], files: [], approval: null, metrics: '', compacted: true,
+    body, startedAt: Date.now(), finishedAt: Date.now(),
+  };
+  cur.messages.push(loadedMsg);
+  registerMsg(loadedMsg);
+  markSessionsDirty();
+  saveSessions();
+  renderChat();
+  updateStatusline();
+  toast(`已载入「${target.title || '未命名'}」的上下文（${msgs.length} 条消息）`);
 }
 
 /** 压缩核心：把会话未压缩的历史折叠成摘要，写入 compacted 池并把消息列表重置为一条占位消息。
@@ -3780,6 +3963,32 @@ function doctorCheckVersion() {
   return { name: '版本 / 平台', status: 'pass', detail: `${window.dsh?.platform || '未知平台'} · Electron ${v.electron || '?'} · Chrome ${v.chrome || '?'} · Node ${v.node || '?'}` };
 }
 
+/* ⑪ 本地存储用量：所有 dsh.* 键的字符长度合计 / 5MB 预算（与分级保存同一口径），
+   >80% 黄色警示（配额写满是「聊天记录不保存」的已确认根因之一）；明细列出最大的 3 个键。 */
+function doctorCheckStorageUsage() {
+  let total = 0;
+  const rows = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith('dsh.')) continue;
+      const len = (localStorage.getItem(k) || '').length;
+      total += len;
+      rows.push({ k, len });
+    }
+  } catch (err) {
+    return { name: '本地存储用量', status: 'skip', detail: `无法枚举 localStorage：${err?.message || err}` };
+  }
+  const pct = Math.round((total / STORAGE_BUDGET_CHARS) * 100);
+  const top3 = rows.sort((a, b) => b.len - a.len).slice(0, 3)
+    .map((r) => `${r.k} ${formatBytes(r.len * 2)}`) // UTF-16 每字符 2 字节，换算成直观体积
+    .join('、') || '（暂无 dsh.* 键）';
+  if (pct >= 80) {
+    return { name: '本地存储用量', status: 'warn', detail: `已用 ${pct}%（${formatBytes(total * 2)} / 5MB），最大：${top3}`, fix: '导出并删除旧会话，或清理其他 dsh.* 数据，避免保存降级' };
+  }
+  return { name: '本地存储用量', status: 'pass', detail: `已用 ${pct}%（${formatBytes(total * 2)} / 5MB），最大：${top3}` };
+}
+
 /** MetaHarness 配置评分（纯函数，探针直接调用）：
     baseUrl 合法 40 / 模型已选 20 / 密钥已保管 20 / 名称非默认 10 / 上次探活成功 10 = 100。 */
 function scoreProfile(p) {
@@ -3831,6 +4040,7 @@ async function runDoctorChecks(force) {
     await doctorCheckMcp(),
     doctorCheckLessons(),
     doctorCheckVersion(),
+    doctorCheckStorageUsage(),
   ];
   doctorCache = { checks, at: Date.now() };
   doctorRunning = false;
@@ -6257,6 +6467,41 @@ function bind() {
   });
   $('#saveCustomPrompt').addEventListener('click', saveCustomPrompt);
 
+  /* 会话 ID 徽标：点击复制完整 id（is-copied 打勾 1.2s 还原，与 msg-actions 的复制模式一致） */
+  $('#sessionBadge').addEventListener('click', () => {
+    const id = active()?.id || '';
+    if (!id) return;
+    navigator.clipboard?.writeText(id).then(() => {
+      const b = $('#sessionBadge');
+      b.classList.add('is-copied');
+      toast('会话 ID 已复制');
+      setTimeout(() => b.classList.remove('is-copied'), 1200);
+    }).catch(() => toast('复制失败，完整 ID：' + id));
+  });
+
+  /* 上下文窗口（对话 pane）：改 LIMITS.maxContextChars 并持久化 dsh.ctxLimit，即时生效
+     （statusline / 自动压缩 / buildApiMessages 都是函数式读取 LIMITS，无需重启）。 */
+  const ctxInput = $('#ctxLimitInput');
+  if (ctxInput) {
+    ctxInput.value = String(LIMITS.maxContextChars);
+    ctxInput.addEventListener('input', () => ctxInput.classList.remove('is-invalid'));
+    ctxInput.addEventListener('change', () => {
+      const raw = ctxInput.value.trim();
+      const n = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isFinite(n) || n < CTX_LIMIT_MIN || n > CTX_LIMIT_MAX) {
+        ctxInput.classList.add('is-invalid'); // 非法输入红框，输入新内容或改对后清除
+        toast(`上下文窗口需为 ${CTX_LIMIT_MIN}–${CTX_LIMIT_MAX} 的整数`);
+        return;
+      }
+      ctxInput.classList.remove('is-invalid');
+      LIMITS.maxContextChars = Math.round(n);
+      writeStorage('dsh.ctxLimit', String(LIMITS.maxContextChars));
+      ctxInput.value = String(LIMITS.maxContextChars);
+      updateStatusline();
+      toast('上下文窗口已更新，立即生效');
+    });
+  }
+
   /* MCP pane：行内按钮随 innerHTML 重建，全部走事件委托 */
   $('#mcpServerList').addEventListener('click', (e) => {
     const start = e.target.closest('[data-mcp-start]');
@@ -6673,6 +6918,7 @@ function boot() {
   renderAttachments();
   renderToolsSetting();
   updateStatusline(); // 状态条首帧：模型 / 智能体 / 上下文占用即刻可见
+  startAutoSave(); // 保存加固：30s 周期自动保存（仅 dirty 时落盘；hidden/beforeunload 另有兜底）
 
   // 启动即加载工具定义并解析默认工作目录，API 面板不再停在「加载中…」
   if (window.dsh?.tools) {

@@ -120,7 +120,11 @@
       </button>
 
       <div class="title-block">
-        <h1 id="title">新对话</h1>
+        <div class="title-row">
+          <h1 id="title">新对话</h1>
+          <!-- 会话 ID 徽标：显示 id 前 10 位，点击复制完整 id（跨会话 /load 用） -->
+          <button class="sid-badge" id="sessionBadge" title="会话 ID（点击复制完整 ID）" hidden></button>
+        </div>
         <div class="meta"><i class="dot live" id="titleDot"></i><span id="subtitle">就绪</span></div>
         <div class="meta goal-line" id="goalLine" hidden></div>
       </div>
@@ -261,6 +265,7 @@
   <button class="menu-item" data-cmd="/stop"><span>/stop</span><small>中断当前回合</small></button>
   <button class="menu-item" data-cmd="/goal"><span>/goal</span><small>设置/查看会话目标</small></button>
   <button class="menu-item" data-cmd="/skills"><span>/skills</span><small>打开技能面板</small></button>
+  <button class="menu-item" data-cmd="/load"><span>/load</span><small>载入其他会话的上下文（/load &lt;会话id&gt;）</small></button>
 </div>
 
 <!-- 模型选择：列表来自上游 GET /models -->
@@ -470,17 +475,22 @@
 
         <div class="settings-card">
           <div class="group-title">上下文</div>
+          <div class="field">
+            <label for="ctxLimitInput">会话上下文窗口（字符数） <span>（超过将自动压缩历史）</span></label>
+            <input id="ctxLimitInput" inputmode="numeric" placeholder="700000" spellcheck="false" />
+            <p class="fine">范围 50000–2000000，保存即时生效：状态条的上下文占用、自动压缩阈值与发给上游的请求预算同步更新。</p>
+          </div>
           <div class="settings-row">
             <div class="sp-row-main">
               <b>自动压缩上下文</b>
-              <small>发送前历史字符量超过上下文预算的 90%（约 63 万字符）时，自动把旧消息折叠成摘要再请求。</small>
+              <small>发送前历史字符量超过上下文窗口的 90% 时，自动把旧消息折叠成摘要再请求。</small>
             </div>
             <div class="seg" id="autocompactSeg">
               <button data-ac="off">关闭</button>
               <button data-ac="on" class="is-active">开启</button>
             </div>
           </div>
-          <p class="fine">默认开启；阈值 = 上下文预算（700000 字符）× 90%，压缩摘要作为 system 消息注入后续请求。手动 /compact 不受此开关影响。</p>
+          <p class="fine">默认开启；阈值 = 上下文窗口 × 90%，压缩摘要作为 system 消息注入后续请求。手动 /compact 不受此开关影响。</p>
         </div>
 
         <div class="settings-card">
