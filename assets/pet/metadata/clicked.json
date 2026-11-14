@@ -1,0 +1,13 @@
+{
+ "action": "clicked",
+ "poses": [
+  "Neutral standing, unaware",
+  "Surprised reaction starting: eyes widening, small jump beginning",
+  "Peak surprise: body bounced up slightly, eyes big, mouth open in delight",
+  "Bouncing down, delighted expression, cheeks blushing a little",
+  "Settling from the bounce, smiling",
+  "Easing back to standing, pleasant surprised-afterglow",
+  "Almost neutral, small residual smile",
+  "Back to the exact neutral pose of keyframe 1"
+ ]
+}

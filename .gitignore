@@ -15,3 +15,7 @@ release/
 
 # 桌宠帧序列（由 pet_render.py 从关键帧确定性再生，不入库）
 assets/pet/**/*.frames/
+
+# 探针隔离目录
+.s-*/
+.e2e-g5/

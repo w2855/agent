@@ -1,0 +1,13 @@
+{
+ "action": "phone",
+ "poses": [
+  "Holding a phone with both hands at chest, looking down at screen",
+  "Eyes scanning screen, thumb tapping, interested expression",
+  "Thumb scrolling, eyes following content, slight smile",
+  "Tapping screen twice, small focused squint",
+  "Eyes widening at something on screen, small surprise",
+  "Chucking softly at the screen, warm smile",
+  "Continuing to scroll, relaxed happy expression",
+  "Eyes finishing a page, returning to initial phone pose"
+ ]
+}

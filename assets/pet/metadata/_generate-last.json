@@ -1,0 +1,653 @@
+{
+ "startedAt": 1794638603.997785,
+ "finishedAt": 1794639989.3781855,
+ "durationSec": 1385.4,
+ "jobs": 232,
+ "failed": {
+  "clicked#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "clicked#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "patted#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "patted#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "patted#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "patted#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "patted#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "patted#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "patted#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dragging#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dragging#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dragging#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dragging#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dragging#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dragging#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dragging#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dragging#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "awakened#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "awakened#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "awakened#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "awakened#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "awakened#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "awakened#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "awakened#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "awakened#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "message#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "message#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "message#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "message#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "message#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "message#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "message#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "message#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "welcome#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "welcome#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "welcome#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "welcome#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "welcome#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "welcome#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "welcome#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "welcome#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "greeting#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "greeting#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "greeting#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "greeting#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "greeting#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "greeting#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "greeting#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "greeting#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "success#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "success#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "success#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "success#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "success#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "success#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "success#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "success#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "error#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "error#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "error#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "error#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "error#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "error#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "error#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "error#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "completed#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "completed#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "completed#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "completed#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "completed#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "completed#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "completed#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "completed#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "issue_found#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "issue_found#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "issue_found#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "issue_found#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "issue_found#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "issue_found#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "issue_found#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "issue_found#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "surprised#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "surprised#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "surprised#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "surprised#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "surprised#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "surprised#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "surprised#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "surprised#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "celebrating#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "celebrating#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "celebrating#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "celebrating#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "celebrating#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "celebrating#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "celebrating#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "celebrating#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "encourage#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "encourage#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "encourage#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "encourage#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "encourage#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "encourage#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "encourage#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "encourage#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "drink#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "drink#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "drink#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "drink#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "drink#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "drink#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "drink#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "drink#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "eat#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "eat#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "eat#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "eat#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "eat#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "eat#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "eat#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "eat#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "phone#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "phone#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "phone#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "phone#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "phone#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "phone#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "phone#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "phone#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "play_cat#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "play_cat#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "play_cat#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "play_cat#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "play_cat#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "play_cat#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "play_cat#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "play_cat#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "stretch#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "stretch#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "stretch#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "stretch#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "stretch#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "stretch#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "stretch#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "stretch#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "sleeping#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "sleeping#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "sleeping#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "sleeping#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "sleeping#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "sleeping#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "sleeping#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "sleeping#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dance#1": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dance#2": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dance#3": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dance#4": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dance#5": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dance#6": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dance#7": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  },
+  "dance#8": {
+   "ok": false,
+   "info": "HTTPError: HTTP Error 429: Too Many Requests"
+  }
+ },
+ "ok": 71
+}

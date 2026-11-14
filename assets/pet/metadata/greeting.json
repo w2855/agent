@@ -1,0 +1,13 @@
+{
+ "action": "greeting",
+ "poses": [
+  "Standing straight, neutral friendly face",
+  "Upper body beginning a small bow, hands folding in front",
+  "Bow at 15 degrees, hands folded politely, eyes closed politely",
+  "Deepest bow point, polite smile, hair falling forward slightly",
+  "Rising from the bow, head lifting, eyes opening",
+  "Nearly upright, hands unfolding, friendly smile",
+  "Fully upright with a bright smile and small wave of one hand",
+  "Back to neutral standing, warm friendly expression"
+ ]
+}

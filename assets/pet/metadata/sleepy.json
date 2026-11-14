@@ -1,0 +1,13 @@
+{
+ "action": "sleepy",
+ "poses": [
+  "Standing but eyelids half closed, sleepy expression, head straight",
+  "Eyelids heavier, head starting to tilt slightly forward",
+  "Head nodding forward noticeably, eyes nearly closed",
+  "Head at lowest nod point, eyes closed, sleeping briefly",
+  "Head starting to lift back up, eyes still closed",
+  "Head rising, eyes fluttering half open",
+  "Head almost level, eyes opening, still drowsy",
+  "Back to standing with drowsy half-lidded eyes, ready to nod again"
+ ]
+}
