@@ -19,3 +19,7 @@ assets/pet/**/*.frames/
 # 探针隔离目录
 .s-*/
 .e2e-g5/
+
+# 截图输出目录（瞬态）
+shots-output/
+.shot-run/

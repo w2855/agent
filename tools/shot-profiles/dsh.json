@@ -1,0 +1,29 @@
+{
+  "name": "dsh",
+  "appPath": ".",
+  "shotOutput": "shot.png",
+  "threshold": 0.5,
+  "userDataSetup": {
+    "files": [
+      { "src": "tools/shot-profiles/seeds/soft-render.flag", "dest": "soft-render.flag" }
+    ]
+  },
+  "setupCommand": {
+    "cmd": "node",
+    "args": ["tools/mock-gateway.js"],
+    "cwd": ".",
+    "portProbe": 57321,
+    "label": "mock 网关"
+  },
+  "scenarios": [
+    { "id": "boot-splash", "desc": "启动画面渐隐前后（best-effort，立即返回）", "script": "tools/shot-scenarios/boot-splash.js" },
+    { "id": "chat-idle", "desc": "空会话 + 欢迎态", "script": "tools/shot-scenarios/chat-idle.js" },
+    { "id": "chat-content", "desc": "示例消息：表格 + 代码块 + 列表", "script": "tools/shot-scenarios/chat-content.js" },
+    { "id": "settings-appearance", "desc": "设置页 · 外观", "script": "tools/shot-scenarios/settings-appearance.js" },
+    { "id": "settings-doctor", "desc": "设置页 · 体检", "script": "tools/shot-scenarios/settings-doctor.js" },
+    { "id": "settings-mcp", "desc": "设置页 · MCP", "script": "tools/shot-scenarios/settings-mcp.js" },
+    { "id": "settings-chat", "desc": "设置页 · 聊天", "script": "tools/shot-scenarios/settings-chat.js" },
+    { "id": "arch-page", "desc": "架构页离线渲染（假项目注入）", "script": "tools/shot-scenarios/arch-page.js" },
+    { "id": "todo-panel", "desc": "任务面板展开 + 三种状态", "script": "tools/shot-scenarios/todo-panel.js" }
+  ]
+}
