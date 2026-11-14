@@ -5,6 +5,7 @@ const path = require('node:path');
 const { newId } = require('./ids');
 const model = require('./model');
 const { listManifests } = require('./tool-registry');
+const lessons = require('../lib/lessons');
 
 /* 任务 / 运行 / 步骤 / 模型调用 / 工具调用 / 审批的本地快照。
    事件日志是事实来源，本文件保存可快速读取的当前状态；每次变更原子写盘。 */
@@ -24,6 +25,8 @@ class StateStore {
     this.now = now;
     this.state = this._empty();
     this.ready = false;
+    // 验证经验库（ruflo verified-lessons 模式）：懒创建，见 _ensureLessons
+    this.lessons = null;
   }
 
   _empty() {
@@ -423,6 +426,55 @@ class StateStore {
     return this.events.append({ type, ...fields });
   }
 
+  /* ---------------- 经验库写入钩子（ruflo verified-lessons 模式，只写不改） ----------------
+     任务 / 委派收尾时追加一条 outcome 经验到 userData/lessons.jsonl。
+     所有钩子都被 try/catch 包裹：经验库任何异常只静默丢弃，绝不影响主链路 / 事件链 / 审计链。 */
+
+  _ensureLessons() {
+    // 与状态快照同目录（userData），追加式 JSONL
+    if (!this.lessons) this.lessons = lessons.createLessonStore(path.join(this.dir, 'lessons.jsonl'));
+    return this.lessons;
+  }
+
+  /** 写一条经验；失败（含校验不过、IO 异常）一律静默，返回是否真正写入 */
+  _recordLessonSafe(entry) {
+    try {
+      const res = lessons.recordLesson(this._ensureLessons(), entry, { now: this.now() });
+      return res.ok && !res.deduped;
+    } catch { /* 经验库异常不影响主链路 */ }
+    return false;
+  }
+
+  /** 任务收尾（成功/失败/取消）：summary = 任务目标前 120 字 + 结束标签，tags = [agentId] */
+  _recordTaskOutcome(task, outcome, { runId, errorCode, endedStatus } = {}) {
+    if (!task) return;
+    const goal = typeof task.input === 'string' && task.input ? task.input : String(task.title || '');
+    this._recordLessonSafe({
+      taskId: task.id,
+      agentId: task.agentId || '',
+      kind: 'outcome',
+      outcome,
+      summary: `${goal.slice(0, 120)} [${endedStatus || outcome}]`,
+      tags: [task.agentId].filter(Boolean),
+      evidence: { runId, errorCode },
+    });
+  }
+
+  /** 委派子任务收尾：用委派记录 id 作幂等键（避免与子任务自身 outcome 撞键），tag 含 'delegation' */
+  _recordDelegationOutcome(record, status) {
+    if (!record) return;
+    const outcome = status === 'succeeded' ? 'success' : status === 'canceled' ? 'canceled' : 'failed';
+    this._recordLessonSafe({
+      taskId: record.id,
+      agentId: record.targetAgentId || '',
+      kind: 'outcome',
+      outcome,
+      summary: `${String(record.objective || '').slice(0, 120)} [delegation:${status}]`,
+      tags: [record.targetAgentId, 'delegation'].filter(Boolean),
+      evidence: { runId: record.childRunId, errorCode: record.errorCode },
+    });
+  }
+
   /* ---------------- 任务 / 运行 ---------------- */
 
   createTask(input = {}) {
@@ -765,6 +817,11 @@ class StateStore {
     if (!record) throw new Error(`委派不存在：${delegationId}`);
     Object.assign(record, patch);
     this._persist();
+    // 经验库钩子：委派记录以终态经过这里（DelegationService.finish 收尾）时记一条；
+    // 调用方常先直接改 record.status 再回存，是否重复由经验库 (taskId, kind) 幂等去重兜底
+    if (TERMINAL_DELEGATION.has(record.status)) {
+      this._recordDelegationOutcome(record, record.status);
+    }
     return record;
   }
 
@@ -815,6 +872,8 @@ class StateStore {
           reason,
         },
       });
+      // 经验库钩子：级联取消也是委派收尾；不经过 updateDelegation，这里单独记（幂等去重兜底）
+      this._recordDelegationOutcome(record, 'canceled');
     }
   }
 
@@ -855,6 +914,8 @@ class StateStore {
     this._append('task.canceled', { taskId: task.id, actor: { kind: 'user', id: 'local-user' }, payload: { reason } });
     this._persist();
     this._drainQueue();
+    // 经验库钩子：任务取消也是一种收尾结果（finishRun 不覆盖取消路径，这里单独记）
+    this._recordTaskOutcome(task, 'canceled', { endedStatus: 'canceled' });
     return task;
   }
 
@@ -952,6 +1013,14 @@ class StateStore {
     }
     this._persist();
     this._drainQueue();
+    // 经验库钩子：任务收尾（成功/失败/取消）记一条 outcome；interrupted 是重启恢复的中间态，不记
+    if (to !== 'interrupted') {
+      this._recordTaskOutcome(
+        task,
+        to === 'succeeded' ? 'success' : to === 'failed' ? 'failed' : 'canceled',
+        { runId: run.id, errorCode: finalErrorCode, endedStatus: to },
+      );
+    }
     return { run, task, validation: { status: validationStatus, checks: list }, errorCode: finalErrorCode };
   }
 
