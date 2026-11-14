@@ -1,11 +1,15 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, shell, nativeTheme, net, dialog, safeStorage } = require('electron');
+const {
+  app, BrowserWindow, ipcMain, shell, nativeTheme, net, dialog, safeStorage,
+  Notification, Tray, Menu, nativeImage,
+} = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const retry = require('./lib/retry');
 const secretMask = require('./lib/secret-mask');
+const notifyDedupe = require('./lib/notify-dedupe');
 const localTools = require('./lib/tools');
 const mcpModule = require('./lib/mcp');
 const skillsModule = require('./lib/skills');
@@ -32,6 +36,11 @@ if (userDataArg) {
 
 // 浅色是默认外观；窗口底色跟主题一致，避免启动瞬间白闪。
 nativeTheme.themeSource = 'light';
+
+// Windows toast 通知要求应用声明 AppUserModelID，否则 new Notification() 在 Windows 上
+// 直接触发 failed 事件（toast 不显示）。打包后用 electron-builder 的 appId；
+// 未打包（开发/探针）时 toast 只认可执行文件自身的 AUMID，用 process.execPath。
+app.setAppUserModelId(app.isPackaged ? 'cn.dsh.desktop' : process.execPath);
 
 
 /** 错误信息脱敏：任何回给渲染层/日志的文本不得包含 API Key 或常见密钥形态。 */
@@ -68,6 +77,22 @@ let mcpConfigs = [];
 /** 主进程持有的真实 API Key（profileId → 明文）。
     任何发回渲染层的路径都只允许掩码：get 转掩码视图，chat/test/list 用这张表还原 key。 */
 let profileKeyById = new Map();
+
+/* ---------------- 系统通知 / 托盘（模块级状态） ---------------- */
+
+/** 通知去重器：相同 tag 在 30s 内只发一次（后台回合/审批提醒可能由两条路径先后触发）。 */
+const osNotifyDedupe = notifyDedupe.createNotifyDedupe();
+/** 持有在途通知的引用，防止还没展示完就被 GC；close/failed 时移除。 */
+const liveNotifications = new Set();
+
+/** Windows 托盘引用放模块级：Tray 被回收图标会消失，托盘实例本身也不能丢。 */
+let tray = null;
+/** 「关闭时最小化到托盘」开关：渲染层 localStorage 持有，经 tray:state IPC 同步进内存。 */
+let closeToTray = false;
+/** 首次隐藏到托盘的提示只发一次。 */
+let trayHintShown = false;
+/** app.quit() 途中 close 事件也会触发： quitting 时不再拦截，否则永远退不出去。 */
+let quitting = false;
 
 /* MCP 工具与内置工具合流：executeTool 按 mcp_ 前缀路由到管理器。
    审批与 policy 不做任何特殊放行——MCP 工具一律按 run_command 同档
@@ -140,6 +165,17 @@ function createWindow() {
     win = null;
   });
 
+  // 关闭到托盘：开关开启（且不是真退出）时只隐藏窗口，首次隐藏发一条系统提示
+  win.on('close', (event) => {
+    if (quitting || !closeToTray) return;
+    event.preventDefault();
+    if (win && !win.isDestroyed()) win.hide();
+    if (!trayHintShown) {
+      trayHintShown = true;
+      showOsNotification({ title: 'DSH', body: '已最小化到托盘，右键托盘图标可退出', tag: 'tray-hint' });
+    }
+  });
+
   if (process.argv.includes('--dev')) win.webContents.openDevTools({ mode: 'detach' });
 
   // 启动即打开「API 接入」面板，方便直接测试连接
@@ -200,15 +236,21 @@ app.whenReady().then(() => {
     console.log('[runtime] 初始化失败：', err && err.message ? err.message : String(err));
   }
   createWindow();
+  // 托盘只在 Windows 创建（macOS 用 Dock，Linux 各发行版托盘行为差异大，先不铺开）
+  createTray();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on('before-quit', () => {
+  // quit 途中窗口还会收到 close 事件：置位后 close 拦截不再生效，保证能退干净
+  quitting = true;
   try { runtimeSvc?.close(); } catch { /* 已关闭 */ }
   // 退出时停掉所有 MCP server（杀整棵进程树，避免遗留子进程）
   try { mcpManager.stopAll(); } catch { /* 尽力停止即可 */ }
+  // 托盘先销毁再退出，防止图标残留在任务栏托盘区
+  destroyTray();
 });
 
 app.on('window-all-closed', () => {
@@ -225,6 +267,98 @@ ipcMain.on('win:toggle-maximize', () => {
 });
 ipcMain.on('win:close', () => { if (win && !win.isDestroyed()) win.close(); });
 ipcMain.handle('win:is-maximized', () => !!(win && !win.isDestroyed() && win.isMaximized()));
+
+/* ---------------- 系统通知（Windows toast） ----------------
+ * 渲染层只在 document.hidden 时发起（前台不打扰），走这里统一展示：
+ * 相同 tag 30s 内去重成一条；点击通知聚焦主窗口。不支持通知的系统静默跳过。
+ */
+
+function showOsNotification(payload) {
+  // 权限自检：不支持就静默跳过，让调用方拿到明确的 UNSUPPORTED
+  if (!Notification.isSupported()) return { ok: false, code: 'UNSUPPORTED', message: '当前系统不支持通知' };
+  const title = String(payload?.title || '').trim().slice(0, 80) || 'DSH';
+  const body = String(payload?.body || '').slice(0, 200);
+  const tag = typeof payload?.tag === 'string' && payload.tag.trim() ? payload.tag.trim() : '';
+  // 去重键 = tag：没有 tag 就每次都发；命中窗口期直接吞掉本次
+  if (tag && !osNotifyDedupe.shouldSend(tag)) return { ok: true, deduped: true };
+  const notification = new Notification({ title, body, silent: false });
+  liveNotifications.add(notification);
+  const release = () => liveNotifications.delete(notification);
+  notification.on('click', () => {
+    // 点击通知 → 聚焦主窗口
+    showMainWindow();
+  });
+  notification.on('close', release);
+  notification.on('failed', (_event, error) => {
+    release();
+    console.log('[notify] 展示失败：', error || '未知原因');
+  });
+  notification.show();
+  return { ok: true };
+}
+
+ipcMain.handle('notify:show', (_event, payload) => {
+  try { return showOsNotification(payload); } catch (err) {
+    return { ok: false, error: `通知发送失败：${err?.message || String(err)}` };
+  }
+});
+
+/* ---------------- Windows 托盘 ----------------
+ * 仅 win32 创建；左键点击显示并聚焦窗口，右键菜单提供打开 / 新对话 / 退出。
+ * 「新对话」发 tray:new-chat，由渲染层 bind() 监听后调 newChat()。
+ */
+
+function showMainWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function createTray() {
+  if (process.platform !== 'win32') return;
+  try {
+    // png 直接可用；缩到 16px 高，避免大图在托盘区被系统按原尺寸渲染
+    const icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png')).resize({ height: 16 });
+    tray = new Tray(icon);
+    tray.setToolTip('DSH');
+    tray.on('click', () => showMainWindow());
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: '打开 DSH', click: () => showMainWindow() },
+      {
+        label: '新对话',
+        click: () => {
+          showMainWindow();
+          try { win?.webContents?.send('tray:new-chat'); } catch { /* 窗口正在关闭 */ }
+        },
+      },
+      { type: 'separator' },
+      { label: '退出', click: () => app.quit() },
+    ]));
+  } catch (err) {
+    tray = null;
+    console.log('[tray] 创建失败：', err?.message || err);
+  }
+}
+
+function destroyTray() {
+  try { tray?.destroy(); } catch { /* 已销毁 */ }
+  tray = null;
+}
+
+ipcMain.handle('tray:state:get', () => ({
+  ok: true,
+  platform: process.platform,
+  supported: process.platform === 'win32',
+  closeToTray,
+  trayCreated: !!(tray && !tray.isDestroyed()),
+}));
+
+// 开关状态由渲染层 localStorage 持有，启动时 set 一次同步进内存（与 mcpConfigs 同一模式）
+ipcMain.handle('tray:state:set', (_event, payload) => {
+  closeToTray = !!(payload && payload.closeToTray === true);
+  return { ok: true, closeToTray };
+});
 
 /* ---------------- Runtime（Phase 1 基础） ---------------- */
 
@@ -1376,6 +1510,42 @@ ipcMain.handle('skills:read', async (_event, payload) => {
     return await skillsModule.readSkillFile(skillScanDirs(p.workspace), p.path);
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
+  }
+});
+
+/* ---------------- 会话导出 ----------------
+ * 序列化（Markdown / JSON）在 preload 侧 lib/session-export.js 完成，
+ * 这里只负责保存对话框与落盘；无头探针不弹框、不阻塞。
+ */
+
+/** 导出文件名清洗：非法字符换成下划线，缺扩展名按 format 补上。 */
+function sanitizeExportName(raw, format) {
+  let name = String(raw || '').trim() || '会话导出';
+  name = name.replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/^\.+/, '').trim();
+  if (name.length > 80) name = name.slice(0, 80).trim();
+  const ext = format === 'json' ? '.json' : '.md';
+  if (!name.toLowerCase().endsWith(ext)) name += ext;
+  return name;
+}
+
+ipcMain.handle('export:session', async (_event, payload) => {
+  if (!payload || typeof payload !== 'object') return { ok: false, error: '导出参数为空' };
+  const format = payload.format === 'json' ? 'json' : 'md';
+  const content = typeof payload.content === 'string' ? payload.content : '';
+  if (!content.trim()) return { ok: false, error: '导出内容为空' };
+  try {
+    const choice = await dialog.showSaveDialog(win || undefined, {
+      title: '导出会话',
+      defaultPath: sanitizeExportName(payload.defaultName, format),
+      filters: format === 'json'
+        ? [{ name: 'JSON', extensions: ['json'] }]
+        : [{ name: 'Markdown', extensions: ['md'] }],
+    });
+    if (choice.canceled || !choice.filePath) return { ok: false, canceled: true };
+    await fs.promises.writeFile(choice.filePath, content, 'utf8');
+    return { ok: true, path: choice.filePath };
+  } catch (err) {
+    return { ok: false, error: `导出失败：${err?.message || String(err)}` };
   }
 });
 

@@ -1,6 +1,9 @@
 'use strict';
 
 const { contextBridge, ipcRenderer } = require('electron');
+// 会话导出序列化是纯函数（node 单测可直接跑）：渲染层进程没有 require，
+// 由 preload 加载后透传给页面（见 lib/session-export.js）。
+const sessionExport = require('./lib/session-export');
 
 contextBridge.exposeInMainWorld('dsh', {
   platform: process.platform,
@@ -19,6 +22,26 @@ contextBridge.exposeInMainWorld('dsh', {
       ipcRenderer.on('win:maximized', handler);
       return () => ipcRenderer.removeListener('win:maximized', handler);
     },
+  },
+  /* 系统通知（main 进程 Windows toast；相同 tag 30s 内去重，主进程负责 isSupported 自检） */
+  notify: {
+    show: (p) => ipcRenderer.invoke('notify:show', p),
+  },
+  /* Windows 托盘：开关状态渲染层 localStorage 持有，经 tray:state 同步进主进程内存 */
+  tray: {
+    getState: () => ipcRenderer.invoke('tray:state:get'),
+    setCloseToTray: (value) => ipcRenderer.invoke('tray:state:set', { closeToTray: value === true }),
+    onNewChat: (fn) => {
+      const handler = () => fn();
+      ipcRenderer.on('tray:new-chat', handler);
+      return () => ipcRenderer.removeListener('tray:new-chat', handler);
+    },
+  },
+  /* 会话导出：保存走主进程对话框；序列化是纯函数，这里透传给页面复用 */
+  export: {
+    session: (p) => ipcRenderer.invoke('export:session', p),
+    serializeSessionMd: (session) => sessionExport.serializeSessionMd(session),
+    serializeSessionJson: (session) => sessionExport.serializeSessionJson(session),
   },
   wallpaper: {
     current: () => ipcRenderer.invoke('wallpaper:current'),
