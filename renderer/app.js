@@ -409,6 +409,18 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('beforeunload', saveOnExit);
 
+/* msgStore/registerMsg：会话消息注册表。必须声明在 loadSavedSessions 之前——
+   启动恢复（模块顶层）会同步调用它，声明放后面会踩 const TDZ
+   （ReferenceError 被恢复的 catch 吞掉 → 启动恢复静默失败 → 退出时保存把空会话覆盖历史，
+   即「聊天记录不保存」的第二层根因，第一层是 localStorage 按 origin 键控）。 */
+const msgStore = new Map();
+let msgSeq = 0;
+const registerMsg = (msg) => {
+  if (!msg.id) msg.id = 'msg-' + (++msgSeq);
+  msgStore.set(msg.id, msg);
+  return msg.id;
+};
+
 function loadSavedSessions(source) {
   try {
     const raw = readStorage(SESSIONS_KEY(source), null);
@@ -440,14 +452,6 @@ state.activeId = state.sessions[0].id;
 }
 state.pendingModel = state.connection.api.model;
 
-const msgStore = new Map();
-let msgSeq = 0;
-const registerMsg = (msg) => {
-  if (!msg.id) msg.id = 'msg-' + (++msgSeq);
-  msgStore.set(msg.id, msg);
-  return msg.id;
-};
-// 释放不再被任何会话引用的消息（上下文压缩会整批替换 messages，不清理则旧消息对象永远无法回收）
 function pruneMsgStore() {
   const live = new Set();
   for (const s of state.sessions) for (const m of s.messages || []) if (m.id) live.add(m.id);
