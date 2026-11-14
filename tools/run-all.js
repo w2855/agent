@@ -307,7 +307,7 @@ async function ensureGateway() {
         const failed = c1.failed + c2.failed;
         add('Electron探针', f, failed ? '✗' : '✓',
           `${c1.passed + c2.passed}过/${failed}败`,
-          `两相位 ${phases} · arch ${c1.passed}过${c1.failed}败 · todo ${c2.passed}过${c2.failed}败`);
+          `两相位 ${phases} · 相位1 ${c1.passed}过${c1.failed}败 · 相位2 ${c2.passed}过${c2.failed}败`);
         continue;
       }
       const { obj, fail, raw } = await runElectronProbe(f, { timeoutMs: 120000 });

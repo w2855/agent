@@ -90,7 +90,7 @@
 
 ## 六、专项探针（tools/，均绿）
 - 新增 governance 36/36（治理/取消/对账/分页/容量/Autopilot/SSRF/环境变量/队列）
-- f1 17/17、g5 29/29、g3 44/44、dyn 44/44（两相位）、tool-e2e 74/74、effort-probe 3/3
+- f1 17/17、g5 29/29、g3 44/44、dyn 36/36（两相位：arch 14 + todo 22）、tool-e2e 75/75、effort-probe 3/3
 - arch-iso 7/7、narrate-live 4/4、narrate-gap 5/5、persist-write/read、storage-check 8/8、storage-probe 20/20、abort-check 11/11
 
 ## 七、当前待办（按优先级）
