@@ -507,12 +507,31 @@ class StateStore {
     } catch { return fallback; }
   }
 
+  /**
+   * 任务相关经验引用（Q1 接线）：收尾时用 relatedLessonsForTask 检索与该 taskId 关联度
+   * 最高的 topK=3 条既有经验（结构关联：taskId 精确/前缀/tag；语义关联：summary 高频词），
+   * 一并写进本次 outcome 记录（供 UI 与后续委派参考）。
+   * relatedLessonsForTask 自身承诺绝不抛错（空库/非法输入 → {hits:[], total:0}），
+   * 这里仍 try/catch 全包：任何异常只丢弃 related 字段，绝不影响既有字段与收尾主链路。
+   */
+  _relatedForTask(taskId) {
+    try {
+      return lessons
+        .relatedLessonsForTask(this._ensureLessons(), taskId, { topK: 3 })
+        .hits.map((h) => ({
+          taskId: h.entry.taskId,
+          kind: h.entry.kind,
+          summary: h.entry.summary?.slice(0, 80),
+        }));
+    } catch { return undefined; /* 检索异常：不记录 related，不影响既有字段 */ }
+  }
+
   /** 任务收尾（成功/失败/取消）：summary = 任务目标前 120 字 + 结束标签，tags = [agentId]；
-      附验证门结果（verified/verifiedBy/tainted/taintReason） */
+      附验证门结果（verified/verifiedBy/tainted/taintReason）与 related 相关经验引用 */
   _recordTaskOutcome(task, outcome, { runId, errorCode, endedStatus } = {}) {
     if (!task) return;
     const goal = typeof task.input === 'string' && task.input ? task.input : String(task.title || '');
-    this._recordLessonSafe({
+    const entry = {
       taskId: task.id,
       agentId: task.agentId || '',
       kind: 'outcome',
@@ -521,15 +540,19 @@ class StateStore {
       tags: [task.agentId].filter(Boolean),
       evidence: { runId, errorCode },
       ...this._taskGate(task),
-    });
+    };
+    // related 相关经验引用（Q1）：检索在写本条之前进行（不含本条自身）；失败不带该字段
+    const related = this._relatedForTask(task.id);
+    if (related) entry.related = related;
+    this._recordLessonSafe(entry);
   }
 
   /** 委派子任务收尾：用委派记录 id 作幂等键（避免与子任务自身 outcome 撞键），tag 含 'delegation'；
-      验证门用子任务的工具执行链判定 */
+      验证门用子任务的工具执行链判定；同样附 related 相关经验引用 */
   _recordDelegationOutcome(record, status) {
     if (!record) return;
     const outcome = status === 'succeeded' ? 'success' : status === 'canceled' ? 'canceled' : 'failed';
-    this._recordLessonSafe({
+    const entry = {
       taskId: record.id,
       agentId: record.targetAgentId || '',
       kind: 'outcome',
@@ -538,7 +561,11 @@ class StateStore {
       tags: [record.targetAgentId, 'delegation'].filter(Boolean),
       evidence: { runId: record.childRunId, errorCode: record.errorCode },
       ...this._taskGate(this.state.tasks[record.childTaskId]),
-    });
+    };
+    // related 相关经验引用（Q1）：以委派记录 id 为查询键；失败不带该字段
+    const related = this._relatedForTask(record.id);
+    if (related) entry.related = related;
+    this._recordLessonSafe(entry);
   }
 
   /* ---------------- 任务 / 运行 ---------------- */

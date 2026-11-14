@@ -6,6 +6,8 @@
    置信门 confidenceFor 三态 / stats-query 默认排除未验证与污染记录 /
    Hybrid 检索组合（lib/retrieval.js hybridSearch）：searchLessons 中文命中与
    MMR 去重 / relatedLessonsForTask 双路关联 / 空库与故障注入绝不抛错。
+   related 相关经验引用（Q1 接线）：入库有界清洗 / runtime 收尾接线（空库空数组、
+   注入命中 topK 截断、检索异常字段完好、委派收尾同样携带）。
    运行：node tools/lessons-check.js */
 
 const fs = require('node:fs');
@@ -385,18 +387,101 @@ function tempDir(tag) {
     && (() => { const r = lessons.relatedLessonsForTask(badStore, 'task_rel_1'); return r.hits.length === 0 && r.total === 0; })(),
     'fail-safe');
 
+  /* 18. related 相关经验引用（Q1 接线）：入库有界清洗 + runtime 任务/委派收尾接线 */
+  const wireStore = lessons.createLessonStore(path.join(tmp, 'related-wire.jsonl'));
+  const wireRes = lessons.recordLesson(wireStore, {
+    taskId: 'task_w1', kind: 'outcome', outcome: 'success', summary: '收尾带相关经验引用', verified: true, ts: 20,
+    related: [
+      { taskId: 'task_src_a', kind: 'lesson', summary: '相关经验一', junk: '丢弃' },
+      { taskId: 'task_src_b', kind: 'nope' }, // 非法 kind 丢弃
+      '不是对象', // 非对象条目丢弃
+      null,
+      { taskId: 'task_src_c', kind: 'outcome', summary: '超'.repeat(200) }, // summary 超长截断
+    ],
+  });
+  const wireLine = wireRes.ok ? JSON.parse(fs.readFileSync(path.join(tmp, 'related-wire.jsonl'), 'utf8').trim()) : null;
+  add('related：合法条清洗落盘（junk 字段 / 非法 kind / 非对象条目丢弃，只留 taskId/kind/summary）',
+    Array.isArray(wireLine?.related) && wireLine.related.length === 2
+    && wireLine.related[0].taskId === 'task_src_a' && wireLine.related[0].kind === 'lesson'
+    && wireLine.related[0].summary === '相关经验一' && !('junk' in wireLine.related[0]),
+    JSON.stringify(wireLine?.related));
+  add('related：summary 超长截断到 80', wireLine?.related[1]?.taskId === 'task_src_c' && wireLine.related[1].summary.length === 80,
+    String(wireLine?.related[1]?.summary?.length));
+  const noRelRes = lessons.recordLesson(wireStore, { taskId: 'task_w2', kind: 'lesson', summary: '非数组 related 不入库', related: 'oops', ts: 21 });
+  add('related：非数组输入缺省不入库（无该字段）', noRelRes.ok === true && !('related' in noRelRes.entry), JSON.stringify(noRelRes.entry));
+
+  // runtime 收尾接线：空库 → 空数组；注入命中 → topK=3 截断；检索异常 → 其他字段完好
+  const rt6dir = tempDir('runtime6');
+  const rt6 = runtimeModule.createRuntime({ dir: rt6dir, workspacePath: tmp }).init();
+  const agentId6 = rt6.stateStore.getDefaultAgent()?.id || '';
+  const t8 = rt6.createTask({ title: 'related 空库冒烟', input: '空库首条收尾', idempotencyKey: 'lesson-rel-1' });
+  rt6.finishRun({ runId: t8.data.run.id, outcome: 'succeeded', summary: '完成' });
+  const t8Entry = lessons.createLessonStore(path.join(rt6dir, 'lessons.jsonl')).readAll().entries.find((e) => e.taskId === t8.data.task.id);
+  add('runtime：空库首条收尾 related 为空数组', Array.isArray(t8Entry?.related) && t8Entry.related.length === 0, JSON.stringify(t8Entry?.related));
+
+  const origRelated = lessons.relatedLessonsForTask;
+  // 假函数模拟真函数契约（按 options.topK 截断），并捕获接线点传入的 options 以断言 topK=3
+  let capturedOpts = null;
+  const fakeHits = [
+    { entry: { taskId: 'task_hit_1', kind: 'lesson', summary: 'h1'.repeat(60) }, score: 1 }, // 120 字 → 截断 80
+    { entry: { taskId: 'task_hit_2', kind: 'outcome', summary: 'h2' }, score: 0.9 },
+    { entry: { taskId: 'task_hit_3', kind: 'lesson', summary: 'h3' }, score: 0.8 },
+    { entry: { taskId: 'task_hit_4', kind: 'lesson', summary: 'h4' }, score: 0.7 },
+    { entry: { taskId: 'task_hit_5', kind: 'lesson', summary: 'h5' }, score: 0.6 },
+  ];
+  lessons.relatedLessonsForTask = (store, id, opts) => {
+    capturedOpts = opts;
+    const topK = Number.isInteger(opts?.topK) && opts.topK > 0 ? opts.topK : 8;
+    return { hits: fakeHits.slice(0, topK), total: fakeHits.length };
+  };
+  const t9 = rt6.createTask({ title: 'related 注入命中冒烟', input: '注入命中 topK 截断', idempotencyKey: 'lesson-rel-2' });
+  rt6.finishRun({ runId: t9.data.run.id, outcome: 'succeeded', summary: '完成' });
+  const t9Entry = lessons.createLessonStore(path.join(rt6dir, 'lessons.jsonl')).readAll().entries.find((e) => e.taskId === t9.data.task.id);
+  add('runtime：注入命中 → related 按 topK=3 截断（接线点传入 options.topK=3）',
+    Array.isArray(t9Entry?.related) && t9Entry.related.length === 3 && capturedOpts?.topK === 3,
+    JSON.stringify({ related: t9Entry?.related?.map((r) => r.taskId), opts: capturedOpts }));
+  add('runtime：related 元素为 {taskId,kind,summary≤80} 且超长截断到 80',
+    (t9Entry?.related || []).every((r) => typeof r.taskId === 'string'
+      && (r.kind === 'lesson' || r.kind === 'outcome')
+      && (r.summary === undefined || r.summary.length <= 80))
+    && t9Entry.related[0].summary.length === 80,
+    JSON.stringify(t9Entry?.related));
+
+  lessons.relatedLessonsForTask = () => { throw new Error('boom'); };
+  const t10 = rt6.createTask({ title: 'related 异常冒烟', input: '检索异常不影响收尾', idempotencyKey: 'lesson-rel-3' });
+  rt6.finishRun({ runId: t10.data.run.id, outcome: 'succeeded', summary: '完成' });
+  const t10Entry = lessons.createLessonStore(path.join(rt6dir, 'lessons.jsonl')).readAll().entries.find((e) => e.taskId === t10.data.task.id);
+  add('runtime：related 检索异常 → 无 related 字段且 outcome/summary/tags/verified 完好',
+    !!t10Entry && !('related' in t10Entry) && t10Entry.outcome === 'success'
+    && t10Entry.summary.endsWith('[succeeded]') && Array.isArray(t10Entry.tags) && t10Entry.tags.includes(agentId6)
+    && t10Entry.verified === false,
+    JSON.stringify(t10Entry));
+  lessons.relatedLessonsForTask = origRelated; // 恢复真函数
+
+  // 委派收尾同样带 related（真函数：当前库无该委派 id 的关联记录 → 空数组）
+  const delW = rt6.stateStore.createDelegationRecord({
+    parentTaskId: t8.data.task.id, parentRunId: t8.data.run.id, targetAgentId: agentId6,
+    childTaskId: t10.data.task.id, childRunId: t10.data.run.id, objective: 'related 委派冒烟',
+  });
+  rt6.stateStore.updateDelegation(delW.id, { status: 'succeeded' });
+  const delWEntry = lessons.createLessonStore(path.join(rt6dir, 'lessons.jsonl')).readAll().entries.find((e) => e.taskId === delW.id);
+  add('runtime：委派收尾也带 related 数组（无关联 → 空数组）', Array.isArray(delWEntry?.related) && delWEntry.related.length === 0,
+    JSON.stringify(delWEntry?.related));
+
   /* 清理临时目录 */
   rt.close();
   rt2.close();
   rt3.close();
   rt4.close();
   rt5.close();
+  rt6.close();
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.rmSync(rdir, { recursive: true, force: true });
   fs.rmSync(rt2dir, { recursive: true, force: true });
   fs.rmSync(rt3dir, { recursive: true, force: true });
   fs.rmSync(rt4dir, { recursive: true, force: true });
   fs.rmSync(rt5dir, { recursive: true, force: true });
+  fs.rmSync(rt6dir, { recursive: true, force: true });
 
   const total = checks.length;
   const passed = checks.filter((c) => c.pass).length;
