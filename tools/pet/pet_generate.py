@@ -18,7 +18,10 @@ REF = os.path.join(ROOT, 'assets', 'pet', 'reference', 'character_master.png')
 OUT = os.path.join(ROOT, 'assets', 'pet', 'generated')
 META = os.path.join(ROOT, 'assets', 'pet', 'metadata')
 PROMPTS = os.path.join(ROOT, 'tools', 'pet', 'pet-prompts.json')
-KEY = os.environ.get('DSH_PET_API_KEY', 'REDACTED-SECRET')
+KEY = os.environ.get('DSH_PET_API_KEY', '')
+if not KEY:
+    print('缺少环境变量 DSH_PET_API_KEY（生图网关密钥）', file=sys.stderr)
+    sys.exit(2)
 
 
 def load_cfg():
