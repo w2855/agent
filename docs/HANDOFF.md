@@ -1,56 +1,60 @@
 # DSH Desktop 任务交接提示词（新会话直接粘贴本文件全文即可续跑）
 
+> 更新于 2026-11-15。此前版本的「git 两线合并」与「九个缺失提交」描述已过时——实际为单线，全部提交在线上且已推送。
+
 ## 一、项目与路径
-- 应用：E:\dsh-desktop（Electron 纯 JS，零 npm 依赖，中文 AI agent 桌面应用「DSH Desktop」）
-- 启动：`npx electron .`（开发）/ 桌面快捷方式 → release\DSH-Desktop-0.1.0.exe（打包）
-- 验收：`node tools/run-all.js`（聚合器：语法 52 文件 + runtime 回归 339 + lib 自检 6 套 + Electron 探针 5 个 + e2e 74 项）
-- 文档：docs/WORKFLOW.md（R0-R11 全轮次）、docs/e2e-guide.md、docs/feature-gap-analysis.md、docs/pet-paused.md、tools/RELEASE.md、tools/patches/ANIMATION-REDESIGN.md
+- 应用：E:\dsh-desktop（Electron 纯 JS，零 npm 运行时依赖，中文 AI agent 桌面应用「DSH Desktop」）
+- 远端：https://github.com/w2855/agent（main 已推送，最新 dc95bd5 + README；GitHub 访问走本机代理 127.0.0.1:7877）
+- 启动：`npx electron .`（开发）/ 桌面快捷方式 → release\DSH-Desktop-0.1.0.exe（打包，00:18 新包含全部修复）
+- 验收：`node tools/run-all.js`（五段聚合：语法 59 + runtime 回归 339 + lib 自检 6 套 + Electron 探针 + e2e 74）——最近一次全绿
+- 打包：`node tools/release.js`（无参数=构建+字节校验；**--verify 只校验不构建**，别误用）
+- 文档：docs/WORKFLOW.md（R0-R11 轮次）、docs/e2e-guide.md、docs/feature-gap-analysis.md、docs/pet-paused.md、tools/RELEASE.md、README.md
 
-## 二、git 状态（⚠️ 本会话末尾发生过 rebase 中断+reset，必须先审计恢复）
-- 当前 HEAD = 31aaa7e（R12-chore 429 参数），工作树含部分未提交内容
-- **已知两条历史线**：
-  - 线 A（当前 HEAD 祖先）：含全部功能提交至 R12-chore，但**缺**以下内容：R3 架构会话隔离 runtime 侧（e411e91）、R6 文件撤销（undo 三件套）、G6 补丁应用（6c76269）、R11 动画重做包应用（d3f2617）、X1 PII 接线（53a679d）、X2 经验检索（038311e）、X3 related 经验（d7c388f）、X4 文档（13c7fca）、Q2 PII 管线（e0f39a1）——这些提交在另一条线上
-  - 线 B（清洗线，tip ≈ 9eae0a9 之后延续到 7f4dfa1/31aaa7e 附近，经 reflog 可达）：含密钥清洗（sk-chatgpt2api-admin-<截断，即管理密钥> 已全历史 REDACTED）+ X5 截图系统（7f4dfa1）
-- **恢复步骤（第一步必做）**：
-  1. `git reflog | head -30` 与 `git log --all --oneline | head -40` 盘点两线尖端
-  2. 内容合并策略：以内容最全的工作树为准（当前树已含 G5/G6/R8/Y1Y2 的文件内容，直接 `git add -A && git commit` 快照），然后用 `git merge` 或孤儿分支归一历史
-  3. **密钥终扫**：`git grep "<管理密钥字面量>" $(git rev-list --all)` 与 `-S` 扫描必须为空（字面量本身不得入库，见安全约束）（线 A 的 690ac84 曾含密钥，线 B 已清洗）
-  4. 远端 origin = https://github.com/w2855/agent（已有占位 Initial commit）→ 内容确认后 `git push -u origin main --force-with-lease`（用户已明确授权上传此仓库）
-- 探针隔离目录 .s-*/、.shot-run/、.diag-x/ 已 gitignore/可删；不要提交任何 userData 目录
+## 二、git 状态（干净）
+- 单线 main，工作树 0 未提交，全部历史已推送（密钥终扫全历史干净）
+- git 身份：仓库级 user.name=dsh-workflow / user.email=workflow@local（之前丢过一次，丢失时按此重设）
 
-## 三、已交付并验证的功能（回归全绿时这些都在）
-- 核心修复：流式渲染增量更新（O(n²)→稳定块+活动尾）、msgStore 泄漏、GFM 表格渲染、零依赖语法高亮（七语言）、自动上下文压缩（90%阈值）、主题跟随系统、toast 队列、保存加固（立即落盘+dirty+30s+分级降级 L0-L3+beforeunload）
-- 会话级并行聊天（G5）：A 跑 B 聊、busy 会话级、中断按会话隔离、流式 painter mount 重挂、侧栏运行中 pill
-- 安全：密钥主进程化（掩码视图+profileId 解析）、PII 四档管线（BLOCK/REDACT/HASH/PASS）、单实例锁、崩溃恢复（软渲染自愈）、下载执行变体检测、workspaceOnly 校验、end 后事件抑制
-- 系统集成：OS 通知（tag 去重）、托盘、会话导出 md/JSON、发版字节校验（release/manifest.json + verify）、Autopilot 无人值守循环（连续 2 失败自动停）、经验库 verified-lessons + Hybrid 检索 + related 注入、成本预算硬停三窗口、文件级撤销（写前快照+changed-since 预检）
-- UX：ZCode 式设置页 9 pane（含 Doctor 体检 11 项+MetaHarness 配置评分）、Statusline 状态条、Pair 协作模式（TDD/评审/导师）、任务 verifying/blocked 三态、Ctrl+F 高亮查找、选区浮动菜单、右键会话菜单（复制 ID/重命名/删除）、粘贴会话 ID 自动载入、失败重试按钮、消息/代码块复制、差异化开合动效+Motion Tokens 体系、任务清单右上角常驻
-- 401 修复（F2，真实端到端 5/5 过）：子代理密钥经 main 进程 resolveSecretKey 解析（掩码→真钥），跨接入点委派（delegate_task 可选 profileId 选任意连接的模型）
-- 19 个 emil 动效技能已装（我的 %APPDATA% 同级 .agents/skills 与 DSH skills 目录）
+## 三、R13 已交付（本轮，全部在 GitHub）
+1. **文件存储后端**（根治「换构建方式聊天记录全丢」第一层根因）：真值源 userData/dsh-storage.json，persist-store 纯 Node 键值库（原子写/去抖/退出 flush/损坏自愈），preload sendSync 快照 + renderer 内存镜像 + localStorage 双写 + legacy 独有键自动迁移
+2. **TDZ 重大修复**（第二层根因，用户质疑复验发现）：启动恢复 loadSavedSessions 调用 registerMsg，而它是 const 声明在其后 → ReferenceError 被 catch 静默吞掉 → 空会话覆盖历史。msgStore/msgSeq/registerMsg 三件套已移到 loadSavedSessions 之前
+3. **架构会话隔离**（真实根因）：架构页打开时 ensure 只传 workspace 不传 sessionId → 建出共享项目全会话可见。ensure 带 activeId + loadProject 缓存键加会话维度
+4. **工具卡片上面说话（分段渲染）**：多步回合 DOM 从「全部卡片堆上+文字沉底」改为「说明段→卡片→说明段→卡片」交替（bodySegments 按 bodyAtStart 快照切段，流式只画最后段）；liveTurn 用 handler.draft 引用精确判定；FIND_SKIP 用 :not(.seg-box)（分段后 prose 嵌在 .tools 内被查找误拒的坑）；收尾 4 路径适配
+5. **每步开口结构性保证**：工具结果回传后动态注入 system nudge（__nudge 防累积，稳定 ≤1 条），配合系统提示「每步先说明再调用」
+6. **模型思考强度**：连接表单选择（关闭/低/中/高 = reasoning_effort），随接入点存储，主聊天+子代理委派双请求注入（off 不发参数）
+7. **README.md** 已写入并推送
 
-## 四、已确认未修 bug（下一批首项）
-1. **聊天记录不保存（深层根因未修完）**：表层（saveSessions 时序）已修，但**深层根因 = localStorage 按 origin 键控**——开发版 origin（file:///E:/dsh-desktop/renderer/index.html）与打包版 origin（app.asar 内路径）不同 → 两套 localStorage，换构建方式历史必丢。T4 只统一了 userData 目录（不够）。
-   **修复方案（已设计待实施）**：关键数据迁移出 localStorage → 文件存储 userData/dsh-storage.json（IPC 读写，origin 无关）。实施：main.js 加 storage:get/set/keys IPC + 启动时读文件经 preload bootstrap 传入渲染层 → renderer 的 readStorage 改读内存镜像、writeStorage 走 IPC 异步写文件+同步更新内存镜像（保持 sync 读语义）→ 首次启动把现有 localStorage 全量迁移进文件后清除。注意 storage 含 dsh.sessions.model/preview、dsh.conn、dsh.apis（掩码）、dsh.theme2、dsh.customPrompt 等全部 dsh.* 键。
-2. **叙述重复两遍**：F1 已修主体（streamed 标记+提示词收紧）——若用户仍复现，查多步回合 firstChunk 逻辑与 pair 模式叠加注入。
-3. **视频壁纸报错**：F1 已加固（句柄释放/格式识别/自动降级）——若仍报错，查 main.js wallpaper IPC 的具体报错日志（crash-log.jsonl）。
-4. **会话独立架构丢失恢复**：R3 runtime 侧已提交（e411e91，在另一条线上！）——恢复后 renderer 接线四步见 R3 报告：project_architecture args 带 sessionId、arch 页按 sessionId 过滤、/load 挂架构、项目名带短码。
-5. **会话级并行聊天恢复**：G5 已提交（676000d，在另一条线上！）——恢复后回归 g5-probe 29 项。
-6. **桌宠**：暂停归档（docs/pet-paused.md 五步恢复手册）；恢复条件 = 6780 网关生图配额刷新（当时报 insufficient_quota）；**网关已支持原生动画参数**（frame_count/frame_duration_ms/output_format=gif，一次请求直出动画，不再需要 280 关键帧方案）。
+## 四、专项探针（tools/，均绿）
+- persist-write/read（双实例持久化铁证）、storage-check 8/8、storage-probe 20/20
+- arch-iso 7/7（架构隔离）、narrate-live 4/4（工具说话实时性，[[narrslow]] 慢速多步场景）、narrate-gap 5/5
+- f1 17/17、g5 29/29、g3 44/44、dyn 36/36、tool-e2e 74/74、effort-probe 3/3
+- 已适配：abort-check 11/11（G5 后语义：pendingTurns/pendingQueue 会话级 Map、mock 连接自备、[[slow]] 触发词）
 
-## 五、验证体系
-- run-all 五段（语法/回归/自检/探针/e2e），--quick 跳过 Electron 段
-- 截图驱动验收（X5，通用化）：`node tools/shot-suite.js --profile dsh`（8 场景）/ `--url http://... --name xxx`（任意网页）/ `--update` 建基线 / gallery.html 可视化；pixdiff 像素对比阈值 0.5%
-- 单项探针：t1（保存/ID/上下文）、dyn（架构/任务两相位）、g3（密钥/查找/选区）、g4（Doctor/Statusline/Pair/三态）、g5（会话并行 29 项）、mcp-ui、f1-probe（三 bug 回归）、y2-probe（启动阶段）
-- 已知环境坑（全部记录在 docs/e2e-guide.md）：GPU 驱动间歇崩溃→测试模式已禁硬件加速；GitHub 直连间歇超时→ELECTRON_MIRROR=npmmirror；10ms GIF 帧被浏览器钳制→统一 20ms；并发代理同文件编辑→锚点式补丁脚本模式
+## 五、当前待办（按优先级）
+1. **用户实测复验**（新 exe 00:18 构建已交付）：①架构会话隔离 ②工具卡片上面说话（交替+间隙呼吸态）③思考强度设置 ④聊天记录保留（重启/换构建）。**等用户反馈，不符则按现象修**
+2. **桌宠恢复**（用户暂停中）：恢复手册 docs/pet-paused.md；条件=6780 网关生图配额刷新；网关已支持原生动画参数（frame_count/frame_duration_ms/output_format=gif 一次直出）
+3. runtime-ipc-check 探针需 Electron --script 通道（run-all 里跳过项），可补入 Electron 段
+4. G5 审批串行化边界（withApprovalLock 全局串行）——冻结项已知限制，不动
 
 ## 六、约束（不可违反）
-- 全程中文交流；委派/审批机制冻结（只读消费事件）；桌宠暂停（恢复手册齐备）
-- 密钥管理：所有 key 走环境变量或主进程保管，任何提交前跑密钥扫描（见二.3）
-- 动效遵循 Motion Tokens（styles.css 尾部）+ reduced-motion 全兜底 + Emil 方法论（.agents/skills 五技能）
-- 新功能走锚点式补丁脚本模式（tools/patches/apply-*.py）当 renderer 被并行占用时
+- 全程中文交流；委派/审批机制冻结（只读消费事件）；桌宠暂停
+- 密钥安全：sk-chatgpt2api-admin-… 与 zk2-… 绝不入库（字面量引用也不行，文档里写「<管理密钥字面量>」）；提交前 `git grep <字面量> $(git rev-list --all)` 必须为空；密钥走环境变量或主进程 safeStorage
+- 动效遵循 Motion Tokens（styles.css 尾部）+ reduced-motion 全兜底
+- 多代理并行改 renderer 时用锚点式补丁脚本（tools/patches/apply-*.py 模式）
 
-## 七、下一批优先级
-1. git 两线合并恢复（二.恢复步骤）→ 密钥终扫 → 推 GitHub
-2. 文件存储后端实施（四.1 方案）→ 根治聊天记录不保存
-3. 会话独立架构 renderer 接线（四.4）
-4. F1 三 bug 用户复验（若已修不复现则关闭）
-5. 桌宠恢复（等配额）
+## 七、已知坑（全踩过，勿重蹈）
+1. **JSON/Python 转义**：bash heredoc 里 `\\n` 经多层转义会变真实换行破坏 JS 字符串 → 用 chr(92) 构造 + repr 验字节 + 行级 splice
+2. **打包锁**：输出 exe 被运行中的应用锁住（virus scanner waiting）→ 构建超时。打包前确认 DSH 进程已关闭
+3. **mock 网关残留**：跑探针前按 docs/e2e-guide.md 杀净旧 mock-gateway 再起，验证唯一性
+4. **探针时序竞态**：mock 秒回会让「生成中/中断」断言全踩空 → 用 [[slow]]/[[narrslow]] 慢流触发词；插话新回合用 busy 细捕捉+summaries 判定（工具回合步骤间 activeTurnId 会清空）
+5. **探针盲区**：--script 在 did-finish-load 后跑，模块顶层 TDZ/启动路径问题测不到 → 双实例跨重启探针（persist-write/read 模式）才是铁证
+6. **GPU 驱动间歇崩溃**：测试模式（--shot/--script）已禁硬件加速；用户真实启动偶发卡加载属环境问题
+7. **console.log 不透传 stdout**（--shot 模式）：启动期诊断改存 window 全局变量由探针读取
+
+## 八、验收命令速查
+```bash
+node tools/run-all.js                    # 全量门禁
+node tools/release.js                    # 打包+字节校验（先关应用）
+npx electron . --user-data-dir=.s-x --shot --script=tools/xxx-probe.js   # 单探针（mock 网关先起）
+node tools/mock-gateway.js               # mock 网关 127.0.0.1:57321（触发词 [[slow]] [[narrslow]] [[narr]] [[many]] [[write]] [[read]] [[arch]] [[force]] [[tamper]]）
+git -c http.proxy=http://127.0.0.1:7877 push origin main   # 推送（走代理）
+```
