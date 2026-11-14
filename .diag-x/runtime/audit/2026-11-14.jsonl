@@ -1,0 +1,1 @@
+{"seq":1,"id":"aud_01M7D1FYTT11EN1F81A6WJF3X7","ts":1794660367194,"actor":{"kind":"runtime","id":"runtime"},"action":"agent.updated","outcome":"updated","eventSeq":1,"detail":{"agentId":"agt_01M7D1FYTS09R81176QR7KP0MJ","fromVersion":0,"toVersion":1},"prevHash":"genesis","hash":"sha256:e54bdac2737b75b5b68682bf31ea0cf17744b813b03e302469b55b230b378bf0"}

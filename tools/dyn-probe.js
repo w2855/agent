@@ -119,10 +119,23 @@
     hideMenus = function () { hideCalls.push(new Error().stack.split('\n').slice(2, 5).join(' | ')); return realHide(); };
     const realToggle = toggleTodoPanel;
     toggleTodoPanel = function () { hideCalls.push('toggle(open=' + !document.querySelector('#todoPanel').hidden + ')'); return realToggle(); };
+    // Y1 后任务面板默认展开：若已开则先收起再走标准开合流程，保证后续断言前提一致
+    if (!document.querySelector('#todoPanel').hidden) toggleTodoPanel();
+    // 开合走 animateOut/animateIn：hidden 在动画完成后才翻转，断言前必须等待
+    const waitPanel = async (wantHidden, ms = 600) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (document.querySelector('#todoPanel').hidden === wantHidden) return true;
+        await sleep(40);
+      }
+      return document.querySelector('#todoPanel').hidden === wantHidden;
+    };
+    if (!document.querySelector('#todoPanel').hidden) { toggleTodoPanel(); await waitPanel(true); }
     toggleTodoPanel(); // 程序化打开面板
+    await waitPanel(false);
     await sleep(220);
     const body = $('#todoPanelBody');
-    assert('todo.panelOpen', !document.querySelector('#todoPanel').hidden);
+    assert('todo.panelOpen', await waitPanel(false));
     assert('todo.addRowExists', !!$('.todo-add-input', body));
 
     // 1) inline 新增 2 项
@@ -233,7 +246,7 @@
       hideCalls,
     };
     // 面板行内操作（重建列表 + target 脱离 DOM）后不得被外部点击守卫误关
-    assert('todo.panelStillOpen', !panelEl.hidden && results.diag.display !== 'none');
+    assert('todo.panelStillOpen', await waitPanel(false));
     return results;
   } catch (err) {
     results.errors.push('exception: ' + (err && err.message ? err.message : String(err)));

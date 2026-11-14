@@ -1,0 +1,2 @@
+{"type":"boot","bootMs":566,"at":1794660367755}
+{"type":"boot-stages","complete":false,"stages":{"spawn":85,"whenReady":86,"createWindow":480,"did-finish-load":null},"at":1794660367800}

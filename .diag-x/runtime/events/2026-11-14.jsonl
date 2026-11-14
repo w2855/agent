@@ -1,0 +1,1 @@
+{"seq":1,"id":"evt_01M7D1FYTT11EN1F81A6WJF3X6","ts":1794660367194,"workspaceId":"ws_01M7D1FYTP6KDCR07MJA5DT684","type":"agent.updated","actor":{"kind":"runtime","id":"runtime"},"payload":{"agentId":"agt_01M7D1FYTS09R81176QR7KP0MJ","fromVersion":0,"toVersion":1},"redaction":"summary","schemaVersion":1}

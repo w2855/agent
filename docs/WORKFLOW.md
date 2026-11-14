@@ -217,3 +217,6 @@ lessons-check = **101/101**（R10-x2 起 39→101）
 - [x] X1 PII 三处接线（`53a679d`）：通知 strict 凭据 BLOCK / 导出 standard 脱敏 + 计数 toast / 崩溃日志 standard + targetPath 程序化导出 + 经验库 IPC（lessons:summary/tail，Doctor⑨可达方案）；mock20 + 探针 12 全过
 - [x] X2 经验 Hybrid 检索（`038311e`）：searchLessons 双路检索 + relatedLessonsForTask 双路关联（结构 taskId/前缀/tag + 语义关键词，去重取高分，verified/tainted 门槛照旧），空库/故障注入绝不抛错；lessons-check 101/101
 - [x] Y1+Y2 启动画面 + 启动提速 + 说话强化 + 清单常驻（`5821f6c`）：纯 CSS 首帧可见 + 就绪渐隐 + 异常兜底；立即显示/boot-stages 阶段打点/非关键初始化延后；UI 叙述行兜底 + 系统提示硬约束；任务清单右上角常驻（默认展开/计数徽标/记忆收起）+ 工具行 mcp 前缀 fallback
+
+### R12 · 2026-11-14 · 截图驱动验收系统（未提交）
+- [x] 视觉回归体系（`node tools/shot-suite.js`，通用引擎 + `tools/shot-profiles/dsh.json` 档案）：**需先 `--update` 建基线**（当前渲染 = 期望），此后每次改动跑对比，9 场景像素差异率 > 0.5% 即 CHANGED 并出 diff 图与 shots-output/gallery.html 报告
