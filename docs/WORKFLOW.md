@@ -115,11 +115,15 @@ for f in tools/runtime-*-check.js; do node "$f" 2>&1 | tail -5; done   # 9 脚�
 npx electron . --user-data-dir="E:/dsh-desktop/.e2e-userdata" --script=tools/tool-e2e.js   # 渲染层 e2e
 ```
 
-基线数字（2026-11-14 实测，全绿；R6-budget 起从 296 升至 339）：
-foundation 62 / orchestrator 58 / delegation 83 / project 43 / queue 29 / graph 24 / audit 17 / validation 23 = **339/339**
-lessons-check = **101/101**（R10-x2 起 39→101）
-最终门禁 = **22 项 21✓ 0✗ 1 跳**（R9-final 实测；runtime-ipc-check.js 需 Electron 上下文（`--script` 通道），node 直跑报 `window is not defined` 属预期，计为跳过）
-（并发代理扩容会改变各脚本计数，以聚合器当场实测为准；lib 自检另含 mcp 26 / skills 14 / ipc-mcp 18 / secret-mask 37 / h3 31 / lessons 101）
+基线数字（2026-11-15 实测，全绿）：
+foundation 62 / orchestrator 58 / delegation 83 / project 43 / queue 29 / graph 24 / audit 17 / validation 23 / **governance 36** = **375/375**
+lessons-check = **109/109**
+最终门禁 = **23 项 22✓ 0✗ 1 跳**（2026-11-15 实测；runtime-ipc-check.js 需 Electron 上下文（`--script` 通道），node 直跑报 `window is not defined` 属预期，计为跳过）
+（并发代理扩容会改变各脚本计数，以聚合器当场实测为准；lib 自检另含 mcp 26 / skills 14 / ipc-mcp 18 / secret-mask 37 / h3 31 / lessons 109）
+
+> 聚合器环境注意：宿主 IDE/agent 可能设置 `ELECTRON_RUN_AS_NODE=1`，会让 electron.exe
+> 退化成纯 Node（`app` undefined → 启动即崩 → 全部 Electron 探针假失败）。聚合器已统一剥离
+> 该变量再 spawn；手工跑探针时用 `env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron ...`。
 （run-all 五段汇总：语法门禁 → runtime 回归 → lib 自检 → Electron 探针 → tool-e2e，任一失败退出码 1；`--quick` 跳过探针/e2e，聚合器只跑现状不重试修复）
 
 ## 7. 轮次记录
@@ -220,3 +224,21 @@ lessons-check = **101/101**（R10-x2 起 39→101）
 
 ### R12 · 2026-11-14 · 截图驱动验收系统（未提交）
 - [x] 视觉回归体系（`node tools/shot-suite.js`，通用引擎 + `tools/shot-profiles/dsh.json` 档案）：**需先 `--update` 建基线**（当前渲染 = 期望），此后每次改动跑对比，9 场景像素差异率 > 0.5% 即 CHANGED 并出 diff 图与 shots-output/gallery.html 报告
+
+### R13 · 2026-11-14/15 · 文件存储 + 会话隔离 + 分段渲染（已提交）
+- [x] 真值源迁到 `userData/dsh-storage.json`（persist-store：原子写/去抖/flush/损坏自愈），修掉「换构建方式聊天记录全丢」
+- [x] TDZ 修复：`msgStore/msgSeq/registerMsg` 前移到 `loadSavedSessions` 之前
+- [x] 架构会话隔离：`ensure` 带 `sessionId`，缓存键加会话维度
+- [x] 工具卡片分段渲染（说明段→卡片→说明段）+ 每步开口 nudge + 思考强度（reasoning_effort）
+- [x] README / docs/HANDOFF.md 同步
+
+### R14 · 2026-11-15 · 安全审计整改（两轮审计 16 项）
+> 审计结论：问题不是缺功能，而是「旧执行系统与新 Runtime 并存」导致的治理不一致。
+- [x] **统一治理内核**（`lib/tool-gateway.js`）：`tool:exec` 与 `mcp:tool:call` 不再有独立审批通道，统一走 policy + 主进程原生确认框 + 审计链；移除对渲染层 `approved:true` 的信任
+- [x] **取消即中断**：`Runtime` 按 runId 持有 AbortController → 执行器注入 signal → 命令杀进程树 / fetch 中断 / 写文件原子化；取消后工具落 `unknown` 而非假装没跑
+- [x] **重启对账**：`StateStore._reconcileFromEvents()` 以事件链为真值补齐快照，消除「重复终态事件」与状态漂移；`readAll` 游标分页取代 `limit: 5000` 截断
+- [x] **SSRF 完整化**（`lib/net-safety.js`）：DNS 解析结果校验 + 手动逐跳重定向 + IPv4/IPv6 全段覆盖，策略层与执行层同源判定
+- [x] **边界加固**：workspace realpath 归一 + 写文件原子替换；`run_command`/MCP 子进程改环境变量白名单（不再继承主进程密钥）
+- [x] **容量与调度**：persist-store 整库 64MB / 4000 键上限；队列按 priority + 老化排序；Autopilot 进度落盘可恢复；经验库关联检索排除污染记录
+- [x] **审批一致性**：审批凭证绑定 toolCallId + runId + actionHash + TTL，过期就地清扫
+- [x] 新增 `tools/runtime-governance-check.js`（36 断言）+ `docs/security/policy-model.md`
