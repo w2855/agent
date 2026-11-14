@@ -43,6 +43,12 @@ class Runtime {
     this.providerConfigs = new Map();
     this.delegations = null;
     this.projects = null;
+    /* 取消链路：runId → AbortController。工具执行、模型请求都挂同一个信号，
+       这样「取消任务」能真正停掉正在跑的进程，而不只是改状态。 */
+    this.aborts = new Map();
+    /* 已取消的 runId：取消后新取的信号必须「出生即已中止」，
+       否则取消之后才发起的工具调用会拿到一个干净的信号，等于取消失效。 */
+    this.abortedRuns = new Set();
   }
 
   init() {
@@ -63,6 +69,7 @@ class Runtime {
         executeTool: this.executeToolImpl,
         workspacePath: this.workspacePath,
         workspaceId: this.workspaceId,
+        signalFor: (runId) => this.signalForRun(runId),
       });
     }
     this.delegations = new DelegationService({
@@ -80,6 +87,38 @@ class Runtime {
 
   get workspaceId() {
     return this.store.workspaceId;
+  }
+
+  /* ---------------- 取消信号 ---------------- */
+
+  /** 取该 Run 的取消信号（没有就建一个）。 */
+  signalForRun(runId) {
+    const key = String(runId || '');
+    if (!key) return null;
+    let ctl = this.aborts.get(key);
+    if (!ctl || ctl.signal.aborted) {
+      ctl = new AbortController();
+      this.aborts.set(key, ctl);
+    }
+    if (this.abortedRuns.has(key) && !ctl.signal.aborted) {
+      try { ctl.abort(new Error('run_aborted')); } catch { /* 忽略 */ }
+    }
+    return ctl.signal;
+  }
+
+  /** 中断该 Run 正在进行的工具/请求（幂等）。 */
+  abortRun(runId, reason = 'aborted') {
+    const key = String(runId || '');
+    this.abortedRuns.add(key);
+    const ctl = this.aborts.get(key);
+    if (!ctl) return false;
+    if (ctl.signal.aborted) return false;
+    try { ctl.abort(new Error(reason)); } catch { /* 忽略 */ }
+    return true;
+  }
+
+  _releaseRunAbort(runId) {
+    this.aborts.delete(String(runId || ''));
   }
 
   health() {
@@ -126,7 +165,7 @@ class Runtime {
     return this.store.subscribe(fn);
   }
 
-  evaluateTool(input) {
+  evaluateTool(input = {}) {
     return policy.evaluatePolicy({
       profile: input.profile,
       tool: input.tool,
@@ -134,7 +173,7 @@ class Runtime {
       agentId: input.agentId,
       runId: input.runId,
       context: input.context,
-      workspace: this.workspacePath,
+      workspace: typeof input.workspace === 'string' && input.workspace ? input.workspace : this.workspacePath,
       workspaceId: this.workspaceId,
     });
   }
@@ -164,6 +203,8 @@ class Runtime {
         budget: input.budget,
         priority: input.priority,
       });
+      // 新 Run 是全新生命周期：清掉同 id 的历史取消标记（理论上不会重复，防御性处理）
+      if (run) this.abortedRuns.delete(run.id);
       return ok({ task, run, deduped });
     } catch (err) { return fail('TASK_CREATE_FAILED', err); }
   }
@@ -314,12 +355,31 @@ class Runtime {
 
   cancelTask(input = {}) {
     try {
-      const task = this.stateStore.cancelTask({
-        taskId: String(input.taskId || ''),
-        reason: typeof input.reason === 'string' ? input.reason : 'user_canceled',
-      });
+      const taskId = String(input.taskId || '');
+      const reason = typeof input.reason === 'string' ? input.reason : 'user_canceled';
+      /* 顺序很重要：先发中断信号（杀进程/断请求），再改状态。
+         反过来的话状态已 canceled 而进程还在写文件，用户会看到「已取消」但文件变了。 */
+      for (const runId of this._runIdsForTaskTree(taskId)) {
+        this.abortRun(runId, 'task_canceled');
+      }
+      const task = this.stateStore.cancelTask({ taskId, reason });
+      for (const runId of this._runIdsForTaskTree(taskId)) this._releaseRunAbort(runId);
       return ok({ task });
     } catch (err) { return fail('TASK_CANCEL_FAILED', err); }
+  }
+
+  /** 任务树（自己 + 所有后代任务）下的全部 Run。 */
+  _runIdsForTaskTree(taskId) {
+    const ids = new Set([taskId]);
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const t of Object.values(this.stateStore.state.tasks)) {
+        if (t && t.parentTaskId && ids.has(t.parentTaskId) && !ids.has(t.id)) { ids.add(t.id); changed = true; }
+      }
+    }
+    return Object.values(this.stateStore.state.runs)
+      .filter((r) => r && ids.has(r.taskId))
+      .map((r) => r.id);
   }
 
   pauseTask(input = {}) {
@@ -375,7 +435,8 @@ class Runtime {
       const runId = String(input.runId || '');
       const detail = this.stateStore.getRunDetail(runId);
       if (!detail) return fail('RUN_NOT_FOUND', '运行不存在');
-      const all = this.store.read({ runId, limit: 5000 }).events;
+      // 游标分页读全量：以前只读第一页 5000 条，大 Run 的架构图会缺前半段
+      const all = this.store.readAll({ runId });
       const lastSeq = all.length ? all[all.length - 1].seq : 0;
       const beforeSeq = Number.isInteger(input.beforeSeq) ? Math.min(input.beforeSeq, lastSeq) : lastSeq;
       const visible = all.filter((e) => e.seq <= beforeSeq);
@@ -450,7 +511,7 @@ class Runtime {
   }
 
   _validationChecks(runId) {
-    const events = this.store.read({ runId, limit: 5000 }).events;
+    const events = this.store.readAll({ runId });
     const checks = [];
 
     const detail = this.stateStore.getRunDetail(runId);
@@ -529,6 +590,8 @@ class Runtime {
       const checks = run && wantsSucceeded && !['succeeded', 'failed', 'canceled', 'interrupted'].includes(run.status)
         ? this._validationChecks(runId)
         : [];
+      // 收尾前中断可能还在跑的工具，避免「任务已结束但命令还在写文件」
+      this.abortRun(runId, 'run_finished');
       const result = this.stateStore.finishRun({
         runId,
         outcome: String(input.outcome || 'succeeded'),
@@ -538,6 +601,7 @@ class Runtime {
         errorCode: input.errorCode,
         checks,
       });
+      this._releaseRunAbort(runId);
       return ok(result);
     } catch (err) { return fail('RUN_FINISH_FAILED', err); }
   }
@@ -851,6 +915,8 @@ class Runtime {
   proposeTool(input = {}) {
     try {
       if (!this.executor) return fail('EXECUTOR_UNAVAILABLE', '工具执行器未初始化');
+      // 过期审批就地清扫：不清理的话 run 会永久停在 waiting_approval，后续调用全被挡住
+      try { this.stateStore.sweepExpiredApprovals(); } catch { /* 清扫失败不影响本次提案 */ }
       const result = this.executor.propose({
         runId: input.runId,
         stepId: input.stepId,
@@ -866,6 +932,7 @@ class Runtime {
   async executeTool(input = {}) {
     try {
       if (!this.executor) return fail('EXECUTOR_UNAVAILABLE', '工具执行器未初始化');
+      try { this.stateStore.sweepExpiredApprovals(); } catch { /* 同上 */ }
       const call = this.stateStore.getToolCall(String(input.toolCallId || ''));
       if (call?.name === 'project_architecture') {
         const result = await this.runProjectTool({ toolCallId: call.id });
@@ -904,6 +971,7 @@ class Runtime {
 
   listApprovals(query = {}) {
     try {
+      try { this.stateStore.sweepExpiredApprovals(); } catch { /* 列表查询不做强一致要求 */ }
       return ok(this.stateStore.listApprovals({
         runId: query.runId,
         taskId: query.taskId,
@@ -929,6 +997,9 @@ class Runtime {
   }
 
   close() {
+    for (const runId of [...this.aborts.keys()]) this.abortRun(runId, 'runtime_close');
+    this.aborts.clear();
+    this.abortedRuns.clear();
     this.providerConfigs.clear();
     this.stateStore.close();
     this.audit.close();

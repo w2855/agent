@@ -33,7 +33,7 @@ function preview(text) {
 }
 
 class ToolExecutor {
-  constructor({ state, events, executeTool, workspacePath, workspaceId, agentId = 'agent_local', now = Date.now } = {}) {
+  constructor({ state, events, executeTool, workspacePath, workspaceId, agentId = 'agent_local', now = Date.now, signalFor = null } = {}) {
     if (!state) throw new Error('ToolExecutor 需要 state');
     if (typeof executeTool !== 'function') throw new Error('ToolExecutor 需要 executeTool');
     this.state = state;
@@ -43,6 +43,8 @@ class ToolExecutor {
     this.workspaceId = workspaceId;
     this.agentId = agentId;
     this.now = now;
+    // 取消链路：Runtime 按 runId 持有 AbortController，执行器只取信号，不自己造生命周期
+    this.signalFor = typeof signalFor === 'function' ? signalFor : null;
   }
 
   _denyEvent(call, decision, code, message) {
@@ -359,9 +361,13 @@ class ToolExecutor {
       if (fresh.decision === 'require_approval') {
         const approvalId = String(input.approvalId || call.approvalId || '');
         const approval = approvalId ? this.state.getApproval(approvalId) : null;
+        /* 审批凭证绑定：除 actionHash 外还必须指向同一个 toolCall（同 run、同工具、同参数），
+           否则「批准了 A 调用」可以被拿来放行 B 调用。 */
         const approvalOk = approval
           && approval.status === 'approved'
           && approval.actionHash === fresh.actionHash
+          && approval.toolCallId === call.id
+          && approval.runId === call.runId
           && this.now() <= approval.expiresAt;
         const grant = this.state.findRunGrant(call.runId, fresh.actionHash);
         if (!approvalOk && !grant) {
@@ -398,6 +404,7 @@ class ToolExecutor {
   }
 
   async _run(call, input) {
+    const signal = this.signalFor ? this.signalFor(call.runId) : null;
     let result;
     try {
       result = await this.executeTool(call.name, call.args, {
@@ -407,10 +414,13 @@ class ToolExecutor {
           || this.workspacePath,
         permission: input.profile,
         approved: true,
+        signal: signal || undefined,
       });
     } catch (err) {
       result = { ok: false, code: 'TOOL_EXCEPTION', error: err?.message || String(err) };
     }
+
+    if (signal && signal.aborted) return this._settleAborted(call, result);
 
     if (result?.ok) {
       const content = String(result.content || '');
@@ -463,6 +473,48 @@ class ToolExecutor {
       payload: { toolCallId: call.id, code, message, retryable: false },
     });
     return { ok: false, code, toolCallId: call.id, content: String(result?.content || ''), error: message, status: 'failed' };
+  }
+
+  /** 取消后的结算：绝不假设「没跑」。
+   *  - 状态已被 cancelTask 落成 unknown/canceled：只在拿到确定结果时把 unknown 校正为 succeeded；
+   *  - 还没落终态（取消竞态）：按是否有副作用分别落 unknown / canceled。 */
+  _settleAborted(call, result) {
+    const current = this.state.getToolCall(call.id);
+    const status = current?.status || call.status;
+    if (status === 'unknown') {
+      if (result?.ok) {
+        try {
+          this.state.reconcileToolCall({
+            toolCallId: call.id,
+            outcome: 'succeeded',
+            reason: '取消信号到达前工具已成功完成（自动核对）',
+            decidedBy: 'runtime',
+          });
+        } catch { /* 已核对过或状态不可转换，保持 unknown */ }
+      }
+      return { ok: false, code: 'ABORTED', toolCallId: call.id, content: String(result?.content || ''), error: '任务取消时该工具仍在执行，副作用须核对', status: 'unknown' };
+    }
+    if (['succeeded', 'failed', 'canceled', 'denied'].includes(status)) {
+      return { ok: false, code: 'ABORTED', toolCallId: call.id, content: String(result?.content || ''), error: '任务已取消', status };
+    }
+    const sideEffect = ['write_file', 'run_command', 'delegate_task', 'project_architecture'].includes(call.name);
+    const to = sideEffect ? 'unknown' : 'canceled';
+    try {
+      this.state.setToolCallStatus(call.id, to, {
+        failureCode: 'ABORTED',
+        failureMessage: sideEffect ? '取消时工具仍在执行，副作用未知' : '已取消',
+      });
+      this.events.append({
+        type: sideEffect ? 'tool.unknown' : 'tool.canceled',
+        taskId: call.taskId,
+        runId: call.runId,
+        stepId: call.stepId,
+        payload: sideEffect
+          ? { toolCallId: call.id, code: 'ABORTED', message: '取消时工具仍在执行，副作用未知', reconciliation: '核对实际结果后再标记 succeeded/failed' }
+          : { toolCallId: call.id, reason: 'aborted' },
+      });
+    } catch { /* 状态已不可写 */ }
+    return { ok: false, code: 'ABORTED', toolCallId: call.id, content: String(result?.content || ''), error: '已取消', status: to };
   }
 
   _maybeRecordArtifact(call) {

@@ -1,5 +1,9 @@
 'use strict';
 
+/* 会产生外部副作用的工具：中断/崩溃后无法从状态推断结果，必须落 unknown 走核对。 */
+const SIDE_EFFECT_TOOLS = new Set(['write_file', 'run_command', 'delegate_task', 'project_architecture']);
+
+
 const fs = require('node:fs');
 const path = require('node:path');
 const { newId } = require('./ids');
@@ -12,6 +16,9 @@ const lessons = require('../lib/lessons');
 
 const KEEP_TASKS = 300;
 const TERMINAL_TASK = new Set(['succeeded', 'failed', 'canceled', 'expired']);
+/* 队列老化：等待超过该时长提升一级，避免低优先级任务被持续插队饿死 */
+const QUEUE_AGING_MS = 60000;
+const QUEUE_PRIORITY_RANK = { high: 2, normal: 0, low: -1 };
 const TERMINAL_RUN = new Set(['succeeded', 'failed', 'canceled', 'interrupted']);
 const TERMINAL_DELEGATION = new Set(['succeeded', 'failed', 'canceled', 'rejected']);
 
@@ -72,6 +79,10 @@ class StateStore {
     this.ready = true;
     this._ensureDefaultAgent();
     this._migrateDefaultAgentTools();
+    /* 顺序：先按事件链对账（事件是唯一真值），再处理「事件里也没有」的中断残留。
+       以前直接 recoverInterrupted 会把「事件已 completed、快照没来得及落盘」的工具
+       记成 failed/unknown，制造出与审计链矛盾的第二个终态。 */
+    try { this._reconcileFromEvents(); } catch (err) { console.error('[runtime] 事件对账失败，跳过：', err?.message || err); }
     this.recoverInterrupted();
     if (corrupted) {
       this._append('state.corrupt-recovered', { payload: { backup: this.file + '.corrupt' } });
@@ -641,17 +652,37 @@ class StateStore {
     return Object.values(this.state.runs).filter((r) => r.status === 'running' || r.status === 'waiting_approval').length;
   }
 
+  /** 排队顺序：优先级 + 等待老化，同分按提交时间（FIFO）。
+   *  以前只按 taskOrder 严格 FIFO，priority 字段存了却从不生效。 */
+  _queueOrder() {
+    const now = this.now();
+    const rank = (task) => {
+      const raw = task.priority;
+      let base = 0;
+      if (typeof raw === 'string' && raw in QUEUE_PRIORITY_RANK) base = QUEUE_PRIORITY_RANK[raw];
+      else if (Number.isFinite(Number(raw))) base = Math.max(-3, Math.min(3, Number(raw)));
+      const waited = Math.max(0, now - (Number(task.createdAt) || now));
+      const aged = Math.min(3, Math.floor(waited / QUEUE_AGING_MS));
+      return base + aged;
+    };
+    return this.state.taskOrder
+      .map((id) => this.state.tasks[id])
+      .filter((task) => task && task.status === 'queued')
+      .sort((a, b) => (rank(b) - rank(a)) || ((Number(a.createdAt) || 0) - (Number(b.createdAt) || 0)));
+  }
+
   _reindexQueue() {
     let position = 0;
+    const queued = this._queueOrder();
+    const queuedIds = new Set(queued.map((t) => t.id));
+    for (const task of queued) {
+      position += 1;
+      task.queuePosition = position;
+    }
     for (const id of this.state.taskOrder) {
       const task = this.state.tasks[id];
       if (!task) continue;
-      if (task.status === 'queued') {
-        position++;
-        task.queuePosition = position;
-      } else if (task.queuePosition != null) {
-        delete task.queuePosition;
-      }
+      if (!queuedIds.has(task.id) && task.queuePosition != null) delete task.queuePosition;
     }
     return position;
   }
@@ -690,9 +721,7 @@ class StateStore {
   _drainQueue() {
     const limit = Math.max(1, Number(this.state.settings?.maxConcurrentRuns) || 1);
     let promoted = 0;
-    for (const id of this.state.taskOrder) {
-      const task = this.state.tasks[id];
-      if (!task || task.status !== 'queued') continue;
+    for (const task of this._queueOrder()) {
       if (this._activeRunCount() >= limit) break;
       if (this._admitTask(task)) promoted++;
     }
@@ -1018,6 +1047,28 @@ class StateStore {
     for (const call of Object.values(this.state.toolCalls)) {
       if (call.runId !== run.id || model.isTerminal('toolCall', call.status)) continue;
       if (call.status === 'succeeded' || call.status === 'failed' || call.status === 'denied') continue;
+      /* 关键区分：还在 executing 的是「正在跑」的工具，取消只能终止进程，
+         不能假设副作用没发生 —— 有副作用的工具一律落 unknown，等核对。 */
+      if (call.status === 'executing' && SIDE_EFFECT_TOOLS.has(call.name)) {
+        try {
+          model.assertTransition('toolCall', call.status, 'unknown');
+          call.status = 'unknown';
+          call.failureCode = 'CANCELED_IN_FLIGHT';
+          call.failureMessage = '任务取消时该工具仍在执行，实际副作用未知，需核对';
+          this._append('tool.unknown', {
+            taskId: call.taskId,
+            runId: call.runId,
+            stepId: call.stepId,
+            payload: {
+              toolCallId: call.id,
+              code: 'CANCELED_IN_FLIGHT',
+              message: call.failureMessage,
+              reconciliation: '确认该工具是否已产生副作用后再核对为 succeeded/failed',
+            },
+          });
+        } catch { /* 状态已不可取消 */ }
+        continue;
+      }
       try {
         model.assertTransition('toolCall', call.status, 'canceled');
         call.status = 'canceled';
@@ -1280,7 +1331,7 @@ class StateStore {
     return call;
   }
 
-  reconcileToolCall({ toolCallId, outcome, reason = 'user_reconciled' } = {}) {
+  reconcileToolCall({ toolCallId, outcome, reason = 'user_reconciled', decidedBy = 'user' } = {}) {
     const call = this.state.toolCalls[toolCallId];
     if (!call) throw new Error(`工具调用不存在：${toolCallId}`);
     const wanted = ['succeeded', 'failed', 'canceled'].includes(outcome) ? outcome : null;
@@ -1295,8 +1346,8 @@ class StateStore {
       taskId: call.taskId,
       runId: call.runId,
       stepId: call.stepId,
-      actor: { kind: 'user', id: 'local-user' },
-      payload: { toolCallId: call.id, name: call.name, outcome: wanted, reason: call.reconcileReason },
+      actor: decidedBy === 'runtime' ? { kind: 'runtime', id: 'runtime' } : { kind: 'user', id: 'local-user' },
+      payload: { toolCallId: call.id, name: call.name, outcome: wanted, reason: call.reconcileReason, decidedBy },
     });
     this._persist();
     return call;
@@ -1506,6 +1557,128 @@ class StateStore {
 
   /* ---------------- 恢复与清理 ---------------- */
 
+  /**
+   * 快照 ↔ 事件链对账（启动时一次）。
+   *
+   * 事件链是唯一真值：_append 先落事件、_persist 后落快照，所以崩溃时最常见的偏差是
+   * 「事件里有终态、快照还停在 executing/ready」。这里把这类实体按事件补齐，
+   * 只补状态、不重复写终态事件（避免同一 toolCall 出现两个终态）。
+   * 对账不修正的问题（事件也缺）交给 recoverInterrupted 按「未知」处理。
+   */
+  _reconcileFromEvents() {
+    const events = this.events.readAll({ batch: 5000, max: 100000 });
+    if (!events.length) return { repaired: 0 };
+    const toolTerm = new Map();
+    const runTerm = new Map();
+    const stepTerm = new Map();
+    const taskTerm = new Map();
+    const apprTerm = new Map();
+
+    for (const ev of events) {
+      const p = ev.payload || {};
+      switch (ev.type) {
+        case 'tool.completed':
+        case 'tool.failed':
+        case 'tool.unknown':
+        case 'tool.denied':
+        case 'tool.canceled':
+          if (p.toolCallId) {
+            toolTerm.set(p.toolCallId, {
+              status: ev.type === 'tool.completed' ? 'succeeded' : ev.type.slice('tool.'.length),
+              code: p.code || p.resultCode,
+              message: p.message || p.reason || '',
+            });
+          }
+          break;
+        case 'tool.reconciled':
+          if (p.toolCallId && p.outcome) toolTerm.set(p.toolCallId, { status: String(p.outcome), code: p.reason, message: p.reason || '' });
+          break;
+        case 'run.finished':
+        case 'run.interrupted':
+          if (ev.runId) runTerm.set(ev.runId, { status: ev.type === 'run.interrupted' ? 'interrupted' : (p.outcome || 'succeeded'), endedAt: ev.ts });
+          break;
+        case 'step.finished':
+          if (ev.stepId) stepTerm.set(ev.stepId, { status: p.status || 'succeeded', endedAt: ev.ts });
+          break;
+        case 'task.finished':
+        case 'task.canceled':
+          if (ev.taskId) taskTerm.set(ev.taskId, { status: ev.type === 'task.canceled' ? 'canceled' : (p.status || 'succeeded'), endedAt: ev.ts });
+          break;
+        case 'approval.decided':
+          if (p.approvalId) apprTerm.set(p.approvalId, { status: p.decision === 'approved' ? 'approved' : 'denied' });
+          break;
+        case 'approval.expired':
+        case 'approval.canceled':
+          if (p.approvalId) apprTerm.set(p.approvalId, { status: ev.type === 'approval.expired' ? 'expired' : 'canceled' });
+          break;
+        default:
+          break;
+      }
+    }
+
+    let repaired = 0;
+    const touched = new Set();
+
+    for (const call of Object.values(this.state.toolCalls)) {
+      const term = toolTerm.get(call.id);
+      if (!term) continue;
+      // 只补「快照还停在非终态」的：两边都终态却不一致，说明是更早的历史分歧，不在这里翻案
+      if (model.isTerminal('toolCall', call.status)) continue;
+      if (call.status === term.status) continue;
+      call.status = term.status;
+      if (term.code) call.failureCode = term.code;
+      if (term.message) call.failureMessage = String(term.message).slice(0, 500);
+      if (term.status === 'succeeded' && !call.resultDigest && term.code === 'OK') call.resultDigest = call.resultDigest || '';
+      touched.add(call.id);
+      repaired++;
+    }
+    for (const run of Object.values(this.state.runs)) {
+      const term = runTerm.get(run.id);
+      if (!term || run.status === term.status) continue;
+      if (TERMINAL_RUN.has(run.status) && TERMINAL_RUN.has(term.status)) continue;
+      run.status = term.status;
+      run.endedAt = term.endedAt || this.now();
+      touched.add(run.id);
+      repaired++;
+    }
+    for (const step of Object.values(this.state.steps)) {
+      const term = stepTerm.get(step.id);
+      if (!term || step.status === term.status) continue;
+      if (model.isTerminal('step', step.status)) continue;
+      step.status = term.status;
+      step.endedAt = term.endedAt || this.now();
+      repaired++;
+    }
+    for (const task of Object.values(this.state.tasks)) {
+      const term = taskTerm.get(task.id);
+      if (!term || task.status === term.status) continue;
+      if (TERMINAL_TASK.has(task.status)) continue;
+      task.status = term.status;
+      task.finishedAt = term.endedAt || this.now();
+      repaired++;
+    }
+    for (const approval of Object.values(this.state.approvals)) {
+      const term = apprTerm.get(approval.id);
+      if (!term || approval.status === term.status) continue;
+      if (approval.status !== 'pending') continue;
+      approval.status = term.status;
+      approval.decidedAt = this.now();
+      repaired++;
+    }
+
+    if (repaired) {
+      this._append('runtime.reconciled', {
+        payload: {
+          repaired,
+          reason: 'startup_event_replay',
+          entities: touched.size,
+        },
+      });
+      this._persist();
+    }
+    return { repaired };
+  }
+
   recoverInterrupted() {
     const now = this.now();
     let changed = 0;
@@ -1546,9 +1719,26 @@ class StateStore {
       }
       for (const call of Object.values(this.state.toolCalls)) {
         if (call.runId !== run.id || model.isTerminal('toolCall', call.status)) continue;
-        const to = call.status === 'executing' ? 'failed' : 'canceled';
+        const wasExecuting = call.status === 'executing';
+        // 有副作用的工具在「执行中被强杀」时结果必然未知：标 unknown 走人工核对，
+        // 不能像以前那样直接记 failed（会把「其实写成功了」永久记成失败）
+        const to = wasExecuting && SIDE_EFFECT_TOOLS.has(call.name) ? 'unknown' : call.status === 'executing' ? 'failed' : 'canceled';
         call.status = to;
-        if (to === 'failed') {
+        if (to === 'unknown') {
+          call.failureCode = 'UNKNOWN_OUTCOME';
+          call.failureMessage = '应用退出时该工具仍在执行，实际副作用未知';
+          this._append('tool.unknown', {
+            taskId: run.taskId,
+            runId: run.id,
+            payload: {
+              toolCallId: call.id,
+              name: call.name,
+              code: 'UNKNOWN_OUTCOME',
+              message: call.failureMessage,
+              reconciliation: '重启后请核对文件/命令实际结果，再标记 succeeded 或 failed',
+            },
+          });
+        } else if (to === 'failed') {
           this._append('tool.failed', {
             taskId: run.taskId,
             runId: run.id,

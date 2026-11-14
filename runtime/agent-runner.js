@@ -102,6 +102,8 @@ function approvalWait(runtime, approvalId, deadline, runId) {
 
 async function requestModel(runtime, { providerConfig, delegation, messages, tools, deadline }) {
   const remaining = Math.max(1000, deadline - Date.now());
+  // 取消传播：父任务/本 Run 被取消时，子代理的在途模型请求也要断（否则要等满超时）
+  const signal = runtime.signalForRun(delegation.childRunId) || undefined;
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -110,6 +112,7 @@ async function requestModel(runtime, { providerConfig, delegation, messages, too
         messages,
         tools,
         timeoutMs: Math.min(remaining, 120000),
+        signal,
       });
     } catch (err) {
       lastErr = err;
@@ -121,7 +124,8 @@ async function requestModel(runtime, { providerConfig, delegation, messages, too
 }
 
 function artifactList(runtime, childRunId) {
-  const events = runtime.store.read({ runId: childRunId, limit: 5000 }).events;
+  // 全量（游标分页）：长委派超过 5000 事件时以前会漏掉早先的产物
+  const events = runtime.store.readAll({ runId: childRunId });
   const latest = new Map();
   for (const ev of events) {
     if (ev.type !== 'artifact.created') continue;

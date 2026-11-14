@@ -154,11 +154,13 @@ class EventStore {
   read({ afterSeq = 0, limit = 500, runId } = {}) {
     const max = Math.max(1, Math.min(5000, Number(limit) || 500));
     const out = [];
-    let nextSeq = afterSeq;
+    // 游标必须跟着「扫描到的最后一条」前进，而不是「取到的最后一条」：
+    // 否则 runId 过滤掉整页时 afterSeq 不前进，分页会原地打转
+    let scanned = afterSeq;
     let hasMore = false;
 
     for (const name of this._files()) {
-      if (out.length > max) break;
+      if (out.length >= max) { hasMore = true; break; }
       let raw = '';
       try { raw = fs.readFileSync(path.join(this.eventsDir, name), 'utf8'); } catch { continue; }
       for (const line of raw.split(/\r?\n/)) {
@@ -167,12 +169,34 @@ class EventStore {
         try { ev = JSON.parse(line); } catch { continue; }
         if (!Number.isInteger(ev.seq) || ev.seq <= afterSeq) continue;
         if (runId && ev.runId !== runId) continue;
+        // 先判断“这一页满了”再推进游标：否则游标会跨过未取到的那条，翻页时丢事件
         if (out.length >= max) { hasMore = true; break; }
+        if (ev.seq > scanned) scanned = ev.seq;
         out.push(ev);
-        nextSeq = ev.seq;
       }
     }
-    return { events: out, nextSeq, hasMore };
+    return { events: out, nextSeq: scanned, hasMore };
+  }
+
+  /**
+   * 读全量事件（游标分页，直到没有更多）。
+   * 用于图投影 / 收尾校验这类「必须看到完整历史」的场景。
+   */
+  readAll({ runId, batch = 5000, max = 200000 } = {}) {
+    const cap = Number.isInteger(max) && max > 0 ? max : 200000;
+    const pageSize = Math.max(1, Math.min(5000, Number(batch) || 5000));
+    const out = [];
+    let afterSeq = 0;
+    for (let guard = 0; guard < 10000; guard++) {
+      const page = this.read({ afterSeq, limit: pageSize, runId });
+      if (page.events.length) out.push(...page.events);
+      // 没有新扫描位置说明到底了（空页）
+      if (page.nextSeq <= afterSeq && !page.events.length) break;
+      afterSeq = page.nextSeq;
+      if (!page.hasMore) break;
+      if (out.length >= cap) break;
+    }
+    return out;
   }
 
   stats() {
