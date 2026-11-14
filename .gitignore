@@ -1,0 +1,11 @@
+node_modules/
+*.log
+*.png
+!assets/**/*.png
+!renderer/**/*.png
+tmp-*.json*
+tmp-*.json-*-shm
+tmp-*.json-*-wal
+*.corrupt
+*.bak
+.DS_Store

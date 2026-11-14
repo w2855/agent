@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark" data-accent="mist">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; media-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+<title>DSH</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- 自定义视频壁纸：纯视频铺底 + 可选纯色压暗，全程不使用模糊/磨砂 -->
+<video id="wallpaper" muted loop autoplay playsinline></video>
+<div id="wallpaperTint"></div>
+
+<!-- ─────────── 图标精灵 ─────────── -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="4"/><path d="M9.5 4.5v15"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.3 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.3-3.6-8.5S9.6 5.8 12 3.5z"/></symbol>
+    <!-- 真正的齿轮轮廓：原来那个「圆+六条放射线」在 17px 下看起来像雪花 -->
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4.5 19.5h4l10-10a2.4 2.4 0 0 0-3.4-3.4l-10 10v3.4z"/><path d="M13.5 6.5l4 4"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="4"/><path d="M14.5 4.5v15"/></symbol>
+    <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3.5l1.8 5.2 5.2 1.8-5.2 1.8L12 17.5l-1.8-5.2L5 10.5l5.2-1.8z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V6M6.5 11.5L12 6l5.5 5.5"/></symbol>
+    <symbol id="i-laptop" viewBox="0 0 24 24"><rect x="4" y="5.5" width="16" height="10.5" rx="2"/><path d="M2.5 19h19"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3.5h7l5 5v12H6z"/><path d="M13 3.5v5h5"/></symbol>
+    <symbol id="i-sheet" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M4 9.5h16M4 15h16M10 9.5V20"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><circle cx="9" cy="10" r="1.6"/><path d="M4.5 17l4.6-4.6 3.2 3.2 2.6-2.6 4.6 4.6"/></symbol>
+    <symbol id="i-package" viewBox="0 0 24 24"><path d="M12 3.5l8 4.2v8.6L12 20.5l-8-4.2V7.7z"/><path d="M4 7.7l8 4.2 8-4.2M12 11.9v8.6"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.3" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-min" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-max" viewBox="0 0 24 24"><rect x="5.5" y="5.5" width="13" height="13" rx="2.5"/></symbol>
+    <symbol id="i-restore" viewBox="0 0 24 24"><rect x="4.5" y="7.5" width="11" height="11" rx="2.2"/><path d="M8.5 7.5V6a1.8 1.8 0 0 1 1.8-1.8h7.9A1.8 1.8 0 0 1 20 6v8.4a1.8 1.8 0 0 1-1.8 1.8H17"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><path d="M7.5 9.5l3 3-3 3M13 15.5h4"/></symbol>
+    <symbol id="i-read" viewBox="0 0 24 24"><path d="M4 5.5h6a3 3 0 0 1 3 3v10a2.4 2.4 0 0 0-2.4-2.4H4z"/><path d="M20 5.5h-4a3 3 0 0 0-3 3"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="M9 8l-4.5 4L9 16M15 8l4.5 4L15 16"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.5l7 2.7v5.6c0 4.3-2.9 7.4-7 8.7-4.1-1.3-7-4.4-7-8.7V6.2z"/><path d="M9 12l2.2 2.2L15.5 10"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2.4h7.4a2 2 0 0 1 2 2v7.6a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1.2 1.2"/><path d="M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1.2-1.2"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2.4" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13.5 3.5L6 13.2h5l-1 7.3 7.6-9.7h-5z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4.5V10h-5.5"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.2l8.2 14.3H3.8z"/><path d="M12 9.6v4.1"/><circle cx="12" cy="16.4" r="0.9" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-retry" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.6-5.9"/><path d="M4 4.5V10h5.5"/></symbol>
+    <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3.5a8.5 8.5 0 0 0 0 17c1.4 0 2-.9 2-1.8s-.7-1.7-.7-2.6c0-.9.7-1.6 1.6-1.6h1.6a4.5 4.5 0 0 0 4.5-4.5c0-3.6-3.7-6.5-9-6.5z"/><circle cx="8" cy="10" r="1.1" fill="currentColor" stroke="none"/><circle cx="12" cy="7.6" r="1.1" fill="currentColor" stroke="none"/><circle cx="15.6" cy="9.6" r="1.1" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-film" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M8 4.5v15M16 4.5v15M3.5 9.5h4.5M3.5 14.5h4.5M16 9.5h4.5M16 14.5h4.5"/></symbol>
+    <symbol id="i-checklist" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9l1.6 1.6L12 8.2M8 15l1.6 1.6L12 14.2M14.5 9.8h2M14.5 15.4h2"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.2c.6-3.1 2.8-4.8 5.5-4.8s4.9 1.7 5.5 4.8"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.3c2.4-.2 4.5 1.2 5 3.9"/></symbol>
+  </defs>
+</svg>
+
+<div class="app" id="app">
+
+  <!-- ─────────── 侧边栏 ─────────── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="side-head">
+      <div class="brand">
+        <img class="brand-glyph" id="brandGlyph" src="../assets/glyph-dark.svg" alt="" />
+        <span class="brand-name">DSH</span>
+      </div>
+      <div class="head-actions">
+        <button class="icon-btn" id="collapseBtn" title="收起侧边栏">
+          <svg class="ico"><use href="#i-sidebar"/></svg>
+        </button>
+        <button class="new-chat" id="newChatBtn">
+          <svg class="ico"><use href="#i-plus"/></svg><span>新对话</span>
+        </button>
+      </div>
+    </div>
+
+    <label class="search">
+      <svg class="ico"><use href="#i-search"/></svg>
+      <input id="searchInput" placeholder="搜索对话" spellcheck="false" />
+      <kbd>Ctrl K</kbd>
+    </label>
+
+    <div class="filters" id="filters">
+      <button class="chip is-active" data-filter="all">全部</button>
+      <button class="chip" data-filter="running">运行中</button>
+      <button class="chip" data-filter="pending">待确认</button>
+      <button class="chip" data-filter="unread">未读</button>
+    </div>
+
+    <div class="sessions" id="sessions"></div>
+
+    <div class="side-foot">
+      <button class="host" id="hostBtn">
+        <span class="host-ico"><svg class="ico"><use href="#i-laptop"/></svg></span>
+        <span class="host-text">
+          <b id="hostName">本机</b>
+          <small><i class="dot ok"></i><span id="hostState">运行中</span></small>
+        </span>
+      </button>
+      <button class="icon-btn round" id="themeBtn" title="切换明暗主题">
+        <svg class="ico"><use href="#i-globe"/></svg>
+      </button>
+      <button class="icon-btn round" id="settingsBtn" title="设置">
+        <svg class="ico"><use href="#i-settings"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ─────────── 主区 ─────────── -->
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn ghost burger" id="menuBtn" title="展开侧边栏">
+        <svg class="ico"><use href="#i-menu"/></svg>
+      </button>
+
+      <div class="title-block">
+        <h1 id="title">新对话</h1>
+        <div class="meta"><i class="dot live" id="titleDot"></i><span id="subtitle">就绪</span></div>
+        <div class="meta goal-line" id="goalLine" hidden></div>
+      </div>
+
+      <div class="top-right">
+        <button class="model" id="modelBtn" title="切换模型">
+          <svg class="ico"><use href="#i-sparkle"/></svg>
+          <span id="modelName">gemini-3.8-flash</span>
+          <svg class="ico tiny"><use href="#i-chevron"/></svg>
+        </button>
+        <button class="icon-btn ghost" id="renameBtn" title="重命名">
+          <svg class="ico"><use href="#i-edit"/></svg>
+        </button>
+        <button class="icon-btn ghost" id="archBtn" title="项目架构">
+          <svg class="ico"><use href="#i-package"/></svg>
+        </button>
+        <button class="icon-btn ghost" id="panelBtn" title="侧面板">
+          <svg class="ico"><use href="#i-panel"/></svg>
+        </button>
+        <button class="icon-btn ghost" id="todoBtn" title="任务清单">
+          <svg class="ico"><use href="#i-checklist"/></svg>
+        </button>
+
+        <div class="menu todo-panel" id="todoPanel" hidden>
+          <div class="menu-title">任务清单 <span id="todoPanelSummary"></span></div>
+          <div class="todo-body" id="todoPanelBody"></div>
+        </div>
+
+        <div class="win-btns">
+          <button class="win-btn" id="winMin" title="最小化"><svg class="ico"><use href="#i-min"/></svg></button>
+          <button class="win-btn" id="winMax" title="最大化"><svg class="ico"><use href="#i-max"/></svg></button>
+          <button class="win-btn danger" id="winClose" title="关闭"><svg class="ico"><use href="#i-close"/></svg></button>
+        </div>
+      </div>
+    </header>
+
+    <div class="chat" id="chat" tabindex="-1"></div>
+
+    <aside class="inspector" id="inspector" hidden>
+      <div class="insp-head">
+        <div class="insp-title">
+          <svg class="ico"><use href="#i-panel"/></svg>
+          <span>运行检查器</span>
+        </div>
+        <div class="insp-actions">
+          <button class="icon-btn ghost" id="inspRefresh" title="刷新">
+            <svg class="ico"><use href="#i-retry"/></svg>
+          </button>
+          <button class="icon-btn ghost" id="inspClose" title="关闭">
+            <svg class="ico"><use href="#i-close"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="insp-body" id="inspBody"></div>
+    </aside>
+
+    <div class="composer-area">
+      <div class="queue" id="queue" hidden>
+        <span class="queue-label"><i class="dot wait"></i>排队中 · 本轮结束后发送</span>
+        <span class="queue-text" id="queueText"></span>
+        <button class="queue-act" id="queueNow">立即发送</button>
+        <button class="queue-act" id="queueSteer">改为插话</button>
+        <button class="queue-act ghost" id="queueCancel">撤销</button>
+      </div>
+
+      <div class="attach-bar" id="attachBar" hidden></div>
+
+      <div class="perm-row">
+        <button class="perm" id="permBtn" title="选择权限级别">
+          <svg class="ico"><use href="#i-alert"/></svg>
+          <span id="permName">完全权限</span>
+          <svg class="ico tiny"><use href="#i-chevron"/></svg>
+        </button>
+      </div>
+
+      <div class="composer" id="composer">
+        <button class="plus" id="plusBtn" title="附件"><svg class="ico"><use href="#i-plus"/></svg></button>
+        <textarea id="input" rows="1" placeholder="给 DSH 发消息…" spellcheck="false"></textarea>
+        <div class="composer-right">
+          <button class="mode" id="modeBtn"><span id="modeName">现在</span><svg class="ico tiny"><use href="#i-chevron"/></svg></button>
+          <button class="send" id="sendBtn" disabled title="发送"><svg class="ico"><use href="#i-arrow-up"/></svg></button>
+        </div>
+      </div>
+
+      <div class="hint">
+        <span>Enter 发送 · Shift + Enter 换行 · / 唤起命令</span>
+        <span class="conn" id="connBadge"><i class="dot"></i>模型 API · 未验证</span>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ─────────── 浮层 ─────────── -->
+<div class="scrim" id="scrim" hidden></div>
+
+<div class="menu" id="permMenu" hidden>
+  <div class="menu-title">权限级别</div>
+  <button class="menu-item" data-perm="full"><span>完全权限</span><small>文件读写与命令执行都不再询问</small></button>
+  <button class="menu-item" data-perm="ask"><span>每次询问</span><small>每个敏感操作都要你确认</small></button>
+  <button class="menu-item" data-perm="readonly"><span>只读</span><small>拒绝一切写入与执行</small></button>
+</div>
+
+<div class="menu" id="modeMenu" hidden>
+  <div class="menu-title">发送方式</div>
+  <button class="menu-item is-active" data-mode="now"><span>现在发送</span><small>空闲时立即执行</small></button>
+  <button class="menu-item" data-mode="queue"><span>排队</span><small>等本轮结束后再发</small></button>
+  <button class="menu-item" data-mode="steer"><span>插话</span><small>打断当前步骤，改走新指令</small></button>
+</div>
+
+<div class="menu slash" id="slashMenu" hidden>
+  <div class="menu-title">命令</div>
+  <button class="menu-item" data-cmd="/new"><span>/new</span><small>新建会话</small></button>
+  <button class="menu-item" data-cmd="/model"><span>/model</span><small>选择模型</small></button>
+  <button class="menu-item" data-cmd="/compact"><span>/compact</span><small>压缩上下文</small></button>
+  <button class="menu-item" data-cmd="/arch"><span>/arch</span><small>打开项目架构</small></button>
+  <button class="menu-item" data-cmd="/stop"><span>/stop</span><small>中断当前回合</small></button>
+  <button class="menu-item" data-cmd="/goal"><span>/goal</span><small>设置/查看会话目标</small></button>
+</div>
+
+<!-- 模型选择：列表来自上游 GET /models -->
+<div class="sheet sheet-models" id="modelSheet" hidden>
+  <div class="sheet-head">
+    <div>
+      <h2>选择模型</h2>
+      <p id="modelSource">列表来自上游 <code>/models</code>，只显示该端点真实提供的模型。</p>
+    </div>
+    <button class="icon-btn" data-close><svg class="ico"><use href="#i-close"/></svg></button>
+  </div>
+
+  <div class="model-toolbar">
+    <label class="search inline">
+      <svg class="ico"><use href="#i-search"/></svg>
+      <input id="modelSearch" placeholder="筛选模型" spellcheck="false" />
+    </label>
+    <button class="btn ghost" id="refreshModels">
+      <svg class="ico tiny"><use href="#i-refresh"/></svg><span>刷新</span>
+    </button>
+  </div>
+
+  <div class="model-list" id="modelList"></div>
+  <div class="probe" id="modelStatus" hidden></div>
+
+  <div class="field manual-model" id="manualModelField" hidden>
+    <label for="manualModel">手动填写模型名 <span>（端点没有 /models 时用）</span></label>
+    <input id="manualModel" placeholder="gemini-3.8-flash" spellcheck="false" />
+  </div>
+
+  <div class="sheet-foot">
+    <button class="btn ghost" data-close>取消</button>
+    <button class="btn primary" id="modelApply">使用所选</button>
+  </div>
+</div>
+
+<!-- API 接入 -->
+<div class="sheet" id="connectSheet" hidden>
+  <div class="sheet-head">
+    <div>
+      <h2>API 接入</h2>
+      <p>选择消息从哪里来。桌面端本身不带运行时，不需要本地装 Ubuntu 或 Node。</p>
+    </div>
+    <button class="icon-btn" data-close><svg class="ico"><use href="#i-close"/></svg></button>
+  </div>
+
+  <div class="seg source-seg" id="sourceSeg">
+    <button data-source="model" class="is-active">模型 API</button>
+    <button data-source="preview">离线预览</button>
+  </div>
+
+  <div class="source-pane" id="paneModel">
+    <div class="field">
+      <label>连接 <span>（可保存多个 API 地址与 Key，随时切换）</span></label>
+      <div class="profiles" id="profileRow"></div>
+      <div class="profile-actions">
+        <button class="link-btn" id="addProfile" type="button">＋ 新建连接</button>
+        <button class="link-btn danger" id="deleteProfile" type="button">删除当前连接</button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="apiProfileName">连接名称 <span>（用于区分多个连接）</span></label>
+      <input id="apiProfileName" placeholder="例如：公司网关" spellcheck="false" />
+    </div>
+    <div class="field">
+      <label for="apiBaseUrl">API 地址 <span>（OpenAI 兼容 /v1 端点）</span></label>
+      <input id="apiBaseUrl" placeholder="https://jinitai.zh.kg/v1" spellcheck="false" />
+    </div>
+    <div class="field">
+      <label for="apiKey">API Key <span>（仅保存在本机 localStorage）</span></label>
+      <input id="apiKey" type="password" placeholder="sk-…" spellcheck="false" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label>模型 <span>（从上游列表选择，默认 gemini-3.8-flash）</span></label>
+      <button class="model-pick" id="openModelSheet">
+        <svg class="ico"><use href="#i-sparkle"/></svg>
+        <b id="apiModelName">gemini-3.8-flash</b>
+        <span id="apiModelCount">未获取列表</span>
+        <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
+      </button>
+    </div>
+    <button class="link-btn" id="resetApiCfg">恢复默认配置</button>
+
+    <div class="field tool-field">
+      <label>工具调用 <span>（默认启用：模型可读写文件、搜索、执行命令或联网，均在本机执行）</span></label>
+      <div class="tool-ws">
+        <small>工作目录</small>
+        <button class="ws-pick" id="pickWorkspace" type="button">
+          <svg class="ico"><use href="#i-folder"/></svg>
+          <span id="workspacePath">（默认：文档目录）</span>
+          <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
+        </button>
+      </div>
+      <p class="fine" id="toolsFine">加载中…</p>
+    </div>
+  </div>
+
+  <div class="source-pane pane-note" id="paneDemo" hidden>
+    离线预览使用内置的示例会话数据回放界面效果，不发起任何网络请求，也不会调用模型。用于断网时检查布局与交互；真实对话请切回「模型 API」。
+  </div>
+
+  <div class="probe" id="probeResult" hidden></div>
+  <div class="sheet-foot">
+    <button class="btn ghost" id="probeBtn">测试连接</button>
+    <button class="btn primary" id="connectBtn">保存并启用</button>
+  </div>
+  <p class="fine" id="connectFine"></p>
+</div>
+
+<!-- Agent 管理 -->
+<div class="sheet" id="agentSheet" hidden>
+  <div class="sheet-head">
+    <div><h2>Agent 管理</h2><p>新建、查看或归档可被委派的子 Agent</p></div>
+    <button class="icon-btn" data-close><svg class="ico"><use href="#i-close"/></svg></button>
+  </div>
+
+  <div class="group">
+    <div class="group-title">现有 Agent</div>
+    <div class="agent-list" id="agentList"><div class="fine">加载中…</div></div>
+  </div>
+
+  <div class="group">
+    <div class="group-title">新建 Agent</div>
+    <div class="field">
+      <label>名称</label>
+      <input id="agentName" placeholder="例如：研究助手" spellcheck="false" />
+    </div>
+    <div class="field">
+      <label>模型</label>
+      <div class="agent-model-row">
+        <select id="agentModelProfile" class="select"></select>
+        <select id="agentModel" class="select"></select>
+      </div>
+      <p class="fine">由主 Agent 为子 Agent 选择模型；子 Agent 运行时会使用所选模型执行委派任务。</p>
+    </div>
+    <div class="field">
+      <label>系统提示</label>
+      <textarea id="agentPrompt" rows="3" placeholder="说明这个 Agent 擅长什么、如何工作。子 Agent 看不到父对话，提示应自包含。" spellcheck="false"></textarea>
+    </div>
+    <div class="field">
+      <label>权限档位</label>
+      <div class="seg" id="agentPermSeg">
+        <button data-agent-perm="ask" class="is-active">每次询问</button>
+        <button data-agent-perm="full">完全权限</button>
+        <button data-agent-perm="readonly">只读</button>
+      </div>
+      <p class="fine">子 Agent 的实际权限还会被父级权限收窄，不能超过发起委派的 Agent。</p>
+    </div>
+    <button class="btn primary" id="agentCreate">创建 Agent</button>
+    <p class="fine" id="agentFine"></p>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div class="sheet" id="settingsSheet" hidden>
+  <div class="sheet-head">
+    <div><h2>设置</h2><p>外观、壁纸、重试与关于</p></div>
+    <button class="icon-btn" data-close><svg class="ico"><use href="#i-close"/></svg></button>
+  </div>
+
+  <div class="group">
+    <div class="group-title">个性化提示词</div>
+    <div class="field">
+      <label for="customPromptInput">自定义指令 <span>（注入到每一轮对话，优先于默认行为）</span></label>
+      <textarea id="customPromptInput" rows="4" placeholder="例如：回答保持简短、多用列表；称呼我阿泽；代码注释用中文。" spellcheck="false"></textarea>
+    </div>
+    <button class="btn primary" id="saveCustomPrompt" type="button">保存提示词</button>
+    <p class="fine">保存后立即对新对话生效；也在聊天空态里点「个性化提示词」直达这里。</p>
+  </div>
+
+  <div class="group">
+    <div class="group-title">外观</div>
+    <div class="seg" id="themeSeg">
+      <button data-theme="dark" class="is-active">深色</button>
+      <button data-theme="light">浅色</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-title">配色</div>
+    <div class="accents" id="accentRow">
+      <button class="accent" data-accent="mist" title="雾蓝"><i></i><span>雾蓝</span></button>
+      <button class="accent" data-accent="daiqing" title="黛青"><i></i><span>黛青</span></button>
+      <button class="accent" data-accent="dusk" title="暮紫"><i></i><span>暮紫</span></button>
+      <button class="accent" data-accent="turquoise" title="松石"><i></i><span>松石</span></button>
+      <button class="accent" data-accent="amber" title="琥珀"><i></i><span>琥珀</span></button>
+      <button class="accent" data-accent="graphite" title="石墨"><i></i><span>石墨</span></button>
+    </div>
+    <p class="fine">取自原应用 app/lib/ui/theme/accent.dart 的六套预设，明暗两套色阶各自独立。</p>
+  </div>
+
+  <div class="group">
+    <div class="group-title">视频壁纸</div>
+    <div class="wall-row">
+      <button class="btn ghost" id="pickWallpaper"><svg class="ico tiny"><use href="#i-film"/></svg><span>选择视频…</span></button>
+      <button class="btn soft" id="clearWallpaper">移除</button>
+    </div>
+    <p class="fine" id="wallpaperState">未设置 · 纯色界面，无模糊、无雾感</p>
+    <div class="wall-tint">
+      <label for="tintRange">视频压暗</label>
+      <input class="tint-range" type="range" id="tintRange" min="0" max="60" step="5" value="0" />
+      <output id="tintValue">0%</output>
+    </div>
+    <div class="wall-tint">
+      <label for="veilRange">面板厚度</label>
+      <input class="tint-range" type="range" id="veilRange" min="0" max="80" step="5" value="26" />
+      <output id="veilValue">26%</output>
+    </div>
+    <p class="fine">面板厚度同时控制侧栏、输入条与对话底板：越薄视频越清楚，越厚越容易读。全程只做纯色叠加与文字描边，不做任何模糊；两项都拖到 0% 时视频完全不被遮挡。</p>
+  </div>
+
+  <div class="group">
+    <div class="group-title">自动重试</div>
+    <div class="seg" id="retrySeg">
+      <button data-retries="0">关闭</button>
+      <button data-retries="2">2 次</button>
+      <button data-retries="3" class="is-active">3 次</button>
+      <button data-retries="5">5 次</button>
+    </div>
+    <p class="fine" id="retryFine">限流、5xx、网关超时与网络中断会自动重试：2s → 4s → 8s 指数退避，服务端给了 Retry-After 就按它等；参数错误与鉴权失败不重试。</p>
+  </div>
+
+  <div class="group">
+    <div class="group-title">项目</div>
+    <button class="row-btn" id="openArch">
+      <span class="row-ico"><svg class="ico"><use href="#i-package"/></svg></span>
+      <span class="row-body"><b>项目架构</b><small>主控 Agent、分层模块与实时进度</small></span>
+      <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
+    </button>
+  </div>
+
+  <div class="group">
+    <div class="group-title">Agent</div>
+    <button class="row-btn" id="openAgents">
+      <span class="row-ico"><svg class="ico"><use href="#i-users"/></svg></span>
+      <span class="row-body"><b>Agent 管理</b><small id="agentsSummary">管理可委派的子 Agent</small></span>
+      <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
+    </button>
+  </div>
+
+  <div class="group">
+    <div class="group-title">连接</div>
+    <button class="row-btn" id="openConnect">
+      <span class="row-ico"><svg class="ico"><use href="#i-link"/></svg></span>
+      <span class="row-body"><b>API 接入</b><small id="connSummary">未验证</small></span>
+      <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
+    </button>
+  </div>
+
+  <div class="group about">
+    <div class="group-title">关于</div>
+    <p>DSH Desktop 0.1.0 · 复刻自 dsh-go 1.0.15 的界面语言</p>
+    <p class="fine">原应用的业务逻辑跑在打包进 APK 的 proot Ubuntu + Node 里；桌面端去掉这一层，直接把对话交给外部模型 API。模型列表与对话都走上游真实接口。</p>
+  </div>
+</div>
+
+<!-- 独立项目架构页：主控 Agent + 分层模块图 + 实时状态 -->
+<section class="arch-page" id="archPage" hidden aria-label="项目架构">
+  <header class="arch-top">
+    <button class="icon-btn ghost" id="archBack" title="返回对话">
+      <svg class="ico"><use href="#i-back"/></svg>
+    </button>
+    <div class="arch-head-main">
+      <h2 id="archTitle">项目架构</h2>
+      <p id="archSubtitle">读取项目与主控 Agent…</p>
+    </div>
+    <div class="arch-head-actions">
+      <button class="btn ghost" id="archRefresh">
+        <svg class="ico tiny"><use href="#i-refresh"/></svg><span>刷新</span>
+      </button>
+      <button class="btn ghost" id="archExport">
+        <svg class="ico tiny"><use href="#i-package"/></svg><span>导出 SVG</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="arch-body">
+    <div class="arch-canvas-wrap">
+      <div class="arch-canvas" id="archCanvas"></div>
+      <div class="arch-detail" id="archDetail" hidden></div>
+    </div>
+    <aside class="arch-side" id="archSide">
+      <div class="arch-card" id="archMainAgent"></div>
+      <div class="arch-card" id="archStats"></div>
+      <div class="arch-card arch-goal-card">
+        <div class="arch-card-title">项目目标</div>
+        <textarea id="archGoal" rows="4" placeholder="例如：做一个可联机的像素风塔防游戏，先完成单机核心循环。" spellcheck="false"></textarea>
+        <button class="btn ghost" id="archSaveGoal">保存目标</button>
+        <p class="fine">保存后回到聊天框，让主控 Agent 依据目标规划整体架构。</p>
+      </div>
+      <div class="arch-card" id="archMilestones"></div>
+      <div class="arch-card" id="archDiscovery"></div>
+      <div class="arch-card" id="archTasks"></div>
+    </aside>
+  </div>
+</section>
+
+<div class="deleg-approvals" id="delegApprovals" hidden></div>
+<div class="toast" id="toast"></div>
+
+<script src="demo.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
