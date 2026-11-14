@@ -12,6 +12,7 @@ const {
   realish,
 } = require('../lib/safety');
 const { getManifest } = require('./tool-registry');
+const { isPrivateHostname } = require('../lib/net-safety');
 
 /* Policy Engine v1：三档预设 + 硬拒绝 + 工作区边界 + action_hash。
    规则以 docs/security/policy-model.md 为准。 */
@@ -91,20 +92,13 @@ function normalizeUrl(input) {
   return { href: url.href, key: `url:${url.host.toLowerCase()}${url.pathname}` };
 }
 
+/* 与 lib/net-safety 同一套判定：策略层只能做同步的「语法 + 字面量 IP」检查，
+   DNS 解析与逐跳重定向校验在执行层（lib/net-safety.safeFetch）完成。
+   两层都拦，避免策略放行、执行层单独承担全部风险。 */
 function isPrivateUrlHost(hostname) {
   const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
-  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const [a, b] = v4.slice(1).map(Number);
-    if (a === 127 || a === 10 || a === 0 || (a === 169 && b === 254)) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    return false;
-  }
-  if (host === '::1' || host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return true;
-  return false;
+  // isPrivateHostname 内部已覆盖「字面量 IP → 私有段判定」，域名只做语法/后缀拦截
+  return isPrivateHostname(host);
 }
 
 function elevateRisk(base, extra) {
