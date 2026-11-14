@@ -50,7 +50,21 @@ function actionHash(parts) {
 
 const PATH_TOOLS = new Set(['list_dir', 'read_file', 'write_file', 'search_files']);
 
-const DOWNLOAD_EXEC = /\b(curl|wget|iwr|invoke-webrequest)\b[^\n]*\|\s*(sh|bash|powershell|pwsh|cmd)\b/i;
+/* 下载后执行检测：三条均为线性正则（无嵌套量词），匹配前做与 hardDenyCommand
+   一致的空白归一化（\s+ → 单空格），避免 tab/换行变体绕过。
+   1) DOWNLOAD_EXEC_PIPE：curl/wget/iwr 等直连管道交给 shell（含 sudo、iex 变体）；
+   2) DOWNLOAD_OUT_TO_EXEC：curl -o/--output、wget -O/--output-document 把网络内容
+      写成可执行文件（后续执行是必然动作，写入即视为下载执行）；
+   3) POWERSHELL_DOWNLOAD_EXEC：iex/Invoke-Expression 与下载源同现。 */
+const DOWNLOAD_EXEC_PIPE = /\b(?:curl|wget|iwr|invoke-webrequest|invoke-restmethod|irm)\b[^\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|ash|powershell|pwsh|cmd|iex|invoke-expression)\b/i;
+const DOWNLOAD_OUT_TO_EXEC = /\b(?:curl|wget)\b[^\n]*\s-{1,2}(?:output-document|output|remote-name|O|o)(?:=|\s|(?=[^\s-]))["']?[^\s"'|;&<>]*?\.(?:exe|bat|cmd|ps1|sh|dll|msi|scr|vbs)(?=[\s"'|;&<>]|$)/i;
+const POWERSHELL_DOWNLOAD_EXEC = /\b(?:iex|invoke-expression)\b[^\n]*\b(?:iwr|invoke-webrequest|invoke-restmethod|irm|webclient|downloadstring|downloadfile|curl|wget)\b/i;
+
+function isDownloadExecCommand(command) {
+  const cmd = String(command || '').replace(/\s+/g, ' ').trim();
+  if (!cmd) return false;
+  return DOWNLOAD_EXEC_PIPE.test(cmd) || DOWNLOAD_OUT_TO_EXEC.test(cmd) || POWERSHELL_DOWNLOAD_EXEC.test(cmd);
+}
 const SECRET_FILE = /(^|[\\/])(\.env(\.\w+)?|id_rsa|id_ed25519|credentials(\.json)?|\.npmrc|\.pypirc|[^\\/]+\.(pem|key|p12))$/i;
 const EXECUTABLE_FILE = /\.(exe|bat|cmd|ps1|sh|dll|msi|scr|vbs)$/i;
 
@@ -170,7 +184,7 @@ function evaluatePolicy(input) {
       const command = normalizeCommand(args.command);
       normalizedArgs = { ...args, command };
       resourceKey = `cmd:${sha256(command)}`;
-      if (DOWNLOAD_EXEC.test(command)) risk = elevateRisk(risk, 'critical');
+      if (isDownloadExecCommand(command)) risk = elevateRisk(risk, 'critical');
     } else if (tool === 'fetch_url') {
       const url = normalizeUrl(args.url);
       normalizedArgs = { ...args, url: url.href };
@@ -179,6 +193,17 @@ function evaluatePolicy(input) {
       resourceKey = `run:${runId || 'unknown'}:tasks`;
     } else if (tool === 'delegate_task') {
       resourceKey = `agent:${String(args.agentId || '').slice(0, 80)}`;
+      /* workspaceOnly 声明：workspace 相关参数（contextRefs 共享文件路径）必须落在
+         工作区内。delegation.js 只在执行时校验，这里在策略层提前拒绝越界共享。 */
+      if (manifest.resource.workspaceOnly && Array.isArray(args.contextRefs)) {
+        for (const raw of args.contextRefs) {
+          const value = String(raw || '').trim();
+          if (!value) continue;
+          if (!isWithinWorkspace(workspace, resolvePath(value, workspace))) {
+            throw new Error(`共享文件必须位于工作区内：${value}`);
+          }
+        }
+      }
     } else if (tool === 'project_architecture') {
       resourceKey = `project:${sha256(workspace).slice(0, 16)}`;
     }

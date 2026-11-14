@@ -120,6 +120,22 @@ function makeRuntime(dir, workspace) {
   const g2 = rt.runGraph({ runId: task2.run.id }).data.graph;
   add('取消运行图以 canceled 结束', g2.status === 'canceled' && g2.nodes.find((n) => n.kind === 'end')?.status === 'canceled', g2.status);
 
+  /* 5. end 后事件抑制与断点续跑重开（P2） */
+  rt.append({ type: 'tool.proposed', runId, payload: { toolCallId: 'call_stray', name: 'read_file', argsSummary: '迟到的事件', sideEffect: 'read', risk: 'low', version: '1.0.0' } });
+  const g3 = rt.runGraph({ runId }).data.graph;
+  add('end 后事件不计入投影', g3.stats.toolCalls === 3 && g3.nodes.every((n) => n.toolCallId !== 'call_stray'), JSON.stringify({ tools: g3.stats.toolCalls, stray: g3.nodes.some((n) => n.toolCallId === 'call_stray') }));
+  add('end 后事件显式计数标记', g3.postEndEvents === 1, g3.postEndEvents);
+  const resumeEvents = [
+    { seq: 1, ts: 1, type: 'run.started', payload: {} },
+    { seq: 2, ts: 2, type: 'run.interrupted', payload: { reason: 'runtime_restart' } },
+    { seq: 3, ts: 3, type: 'run.status_changed', payload: { from: 'interrupted', to: 'running', reason: 'delegation_checkpoint_resume' } },
+    { seq: 4, ts: 4, type: 'step.started', stepId: 'step_resume', payload: { index: 1, kind: 'model' } },
+    { seq: 5, ts: 5, type: 'run.finished', payload: { outcome: 'succeeded' } },
+  ];
+  const g4 = projectGraph(resumeEvents, { runId: 'run_resume' });
+  add('断点续跑后投影重新打开', g4.nodes.some((n) => n.stepId === 'step_resume') && g4.nodes.filter((n) => n.id === 'end').length === 1 && g4.status === 'succeeded', JSON.stringify(g4.nodes.map((n) => n.id)));
+  add('断点续跑标记不计入 end 后事件', g4.postEndEvents === 0, g4.postEndEvents);
+
   rt.close();
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 忽略 */ }
 

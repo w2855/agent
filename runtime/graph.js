@@ -23,6 +23,7 @@ function projectGraph(events, meta = {}) {
   const delegationNodes = new Map();
   let lastStepId = null;
   let ended = false;
+  let postEndEvents = 0;
 
   const push = (node, parentId, kind = 'next') => {
     nodes.push(node);
@@ -43,6 +44,15 @@ function projectGraph(events, meta = {}) {
   for (const ev of events) {
     if (!ev || typeof ev.type !== 'string') continue;
     const p = ev.payload || {};
+    /* run 终止（run.finished/run.interrupted）后写入的事件不再计入投影，只显式计数：
+       避免 run 结束后迟到的 step/tool/delegation 事件污染已闭合的事件链。
+       例外 1：task.* 是任务级收尾事件，在 run 结束后到达属于正常时序；
+       例外 2：run.status_changed → running 是断点续跑标记，放行以重新打开投影。 */
+    const resuming = ev.type === 'run.status_changed' && p.to === 'running';
+    if (ended && !resuming) {
+      if (!ev.type.startsWith('task.')) postEndEvents++;
+      continue;
+    }
     switch (ev.type) {
       case 'run.started':
         runNode.startedAt = ev.ts;
@@ -349,6 +359,21 @@ function projectGraph(events, meta = {}) {
         break;
       }
 
+      case 'run.status_changed': {
+        /* 断点续跑：interrupted → running 重新打开投影，撤掉已推送的 end 节点，
+           后续事件恢复计入；最终 run.finished 会再推送新的 end 节点。 */
+        if (p.to === 'running') {
+          ended = false;
+          runNode.status = 'running';
+          delete runNode.endedAt;
+          const endIdx = nodes.findIndex((n) => n.id === 'end');
+          if (endIdx >= 0) nodes.splice(endIdx, 1);
+          const endEdgeIdx = edges.findIndex((e) => e.to === 'end');
+          if (endEdgeIdx >= 0) edges.splice(endEdgeIdx, 1);
+        }
+        break;
+      }
+
       case 'run.finished':
       case 'run.interrupted': {
         if (ended) break;
@@ -385,6 +410,7 @@ function projectGraph(events, meta = {}) {
       approvals: approvalNodes.size,
       delegations: delegationNodes.size,
     },
+    postEndEvents,
     lastSeq: events.length ? events[events.length - 1].seq : 0,
   };
 }

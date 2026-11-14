@@ -1409,10 +1409,10 @@ class StateStore {
 
   _prune() {
     while (this.state.taskOrder.length > KEEP_TASKS) {
-      const oldestId = this.state.taskOrder[0];
-      const task = this.state.tasks[oldestId];
-      if (task && !TERMINAL_TASK.has(task.status)) break;
-      this.state.taskOrder.shift();
+      const idx = this._prunableIndex();
+      if (idx < 0) break;
+      const oldestId = this.state.taskOrder[idx];
+      this.state.taskOrder.splice(idx, 1);
       delete this.state.tasks[oldestId];
       for (const [id, run] of Object.entries(this.state.runs)) {
         if (run.taskId !== oldestId) continue;
@@ -1428,6 +1428,27 @@ class StateStore {
       }
       this.state.delegationOrder = this.state.delegationOrder.filter((id) => this.state.delegations[id]);
     }
+  }
+
+  /** 从最旧开始找第一个可清理条目：幽灵条目、已终态且没有子任务仍通过 parentTaskId 引用它。
+      被引用的父任务跳过（不能删），但继续向后清理，避免一个被引用任务永久卡死清理。 */
+  _prunableIndex() {
+    for (let i = 0; i < this.state.taskOrder.length; i++) {
+      const id = this.state.taskOrder[i];
+      const task = this.state.tasks[id];
+      if (!task) return i;
+      if (!TERMINAL_TASK.has(task.status)) continue;
+      if (this._isReferencedParent(id)) continue;
+      return i;
+    }
+    return -1;
+  }
+
+  _isReferencedParent(taskId) {
+    for (const other of Object.values(this.state.tasks)) {
+      if (other && other.parentTaskId === taskId) return true;
+    }
+    return false;
   }
 
   stats() {

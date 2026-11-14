@@ -357,9 +357,9 @@ function approveIfNeeded(rt, proposal) {
     expectedOutput: '不应被允许。',
     contextRefs: ['../outside.txt'],
   });
-  approveIfNeeded(rt, outsideProposal.proposal);
-  const outsideExec = await rt.executeTool({ toolCallId: outsideProposal.proposal.data.toolCallId, providerConfig: PROVIDER, profile: 'full' });
-  add('工作区外共享文件被拒绝', outsideExec.ok && outsideExec.data.ok === false && outsideExec.data.code === 'CONTEXT_REF_OUTSIDE', outsideExec.data?.code);
+  // P2 修复后 workspaceOnly 校验前移到 policy 层：提案阶段即拒绝（invalid-resource），
+  // 不再等待审批后由 delegation.js 返回 CONTEXT_REF_OUTSIDE。
+  add('工作区外共享文件在策略层被拒绝', outsideProposal.proposal.data?.status === 'denied' && outsideProposal.proposal.data?.policy?.ruleIds?.includes('invalid-resource'), JSON.stringify({ status: outsideProposal.proposal.data?.status, ruleIds: outsideProposal.proposal.data?.policy?.ruleIds }));
 
   const missingProposal = proposeDelegation(rt, parent.run.id, {
     agentId: target.data.agent.id,
