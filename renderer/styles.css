@@ -31,6 +31,7 @@
   --tone-agent: #9B8BF4;
   --tone-plan: #E1BE78;
   --tone-neutral: #9AA0AC;
+  --tone-mcp: #4DA3E8;
 
   --ok: #5BC49A;
   --warn: #E0B36A;
@@ -134,6 +135,7 @@
   --tone-agent: #5B3FC4;
   --tone-plan: #7D5C12;
   --tone-neutral: #5A606C;
+  --tone-mcp: #0A5D95;
   --ok: #157452;
   --warn: #855B10;
   --bad: #A33F39;
@@ -2668,3 +2670,114 @@ input.tint-range::-webkit-slider-thumb {
 
 /* 工具行增量更新的包装层：display:contents 让包装 div 不参与布局，.tools 原有排布不变 */
 .tool-wrap { display: contents; }
+
+/* ───────── 设置页 MCP / 技能 pane（2026-11 增补） ─────────
+   与会话删除的两段确认同款交互；状态点脉冲与全局 dotPulse 不同轴（2.4s 慢呼吸）。 */
+.pane-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.pane-actions .btn { padding: 6px 12px; font-size: 11.8px; }
+
+/* 服务器列表 */
+.mcp-list { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.mcp-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--fill);
+  animation: rowIn 200ms var(--ease-lively) both;
+}
+.mcp-row:nth-child(2) { animation-delay: 40ms; }
+.mcp-row:nth-child(3) { animation-delay: 80ms; }
+.mcp-row:nth-child(n+4) { animation-delay: 120ms; }
+.mcp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mcp-main b { font-size: 12.4px; font-weight: 500; display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.mcp-main b span { font-size: 10.5px; font-weight: 400; color: var(--text-4); flex: none; }
+.mcp-cmd {
+  font-family: var(--mono); font-size: 10.8px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mcp-err {
+  font-size: 10.5px; color: var(--bad);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mcp-count { flex: none; font-size: 11px; color: var(--text-3); white-space: nowrap; }
+.mcp-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.mcp-actions .btn { padding: 4px 10px; font-size: 11.5px; }
+.mcp-del {
+  border: 1px solid transparent; background: transparent; color: var(--text-4);
+  font-size: 11.5px; padding: 4px 8px; border-radius: 7px; cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+.mcp-del:hover { background: var(--fill-hover); color: var(--bad); }
+.mcp-del.is-armed {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+
+/* 状态点：connected 绿色慢呼吸脉冲 / starting 琥珀快脉冲 / error 红色常亮 / stopped 灰色 */
+.mcp-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--tone-neutral); }
+.mcp-dot.is-connected { background: var(--ok); --mcp-dot-c: var(--ok); animation: mcpPulse 2.4s ease-in-out infinite; }
+.mcp-dot.is-starting { background: var(--warn); --mcp-dot-c: var(--warn); animation: mcpPulse 1.1s ease-in-out infinite; }
+.mcp-dot.is-error { background: var(--bad); }
+@keyframes mcpPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--mcp-dot-c, var(--ok)) 30%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--mcp-dot-c, var(--ok)) 0%, transparent); }
+}
+
+/* 已连接 server 的工具汇总 */
+.mcp-tools { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
+.mcp-tool { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; border-radius: 8px; }
+.mcp-tool:hover { background: var(--fill); }
+.mcp-tool code { font-family: var(--mono); font-size: 11.2px; color: var(--tone-mcp); }
+.mcp-tool small { font-size: 10.5px; color: var(--text-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 技能列表 */
+.skills-list { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.skill-row {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--fill);
+  padding: 8px 10px;
+  cursor: pointer;
+  animation: rowIn 200ms var(--ease-lively) both;
+}
+.skill-row:nth-child(2) { animation-delay: 40ms; }
+.skill-row:nth-child(3) { animation-delay: 80ms; }
+.skill-row:nth-child(n+4) { animation-delay: 120ms; }
+.skill-row:hover { background: var(--fill-hover); }
+.skill-row.is-open { cursor: default; }
+.skill-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.skill-head b { font-size: 12.4px; font-weight: 500; flex: none; }
+.skill-badge {
+  flex: none; padding: 2px 7px; border-radius: 6px; font-size: 10.3px;
+  color: var(--tone-mcp); background: color-mix(in srgb, var(--tone-mcp) 12%, transparent);
+}
+.skill-badge.is-project { color: var(--tone-web); background: color-mix(in srgb, var(--tone-web) 12%, transparent); }
+.skill-desc { flex: 1; min-width: 0; font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-chev { flex: none; color: var(--text-4); }
+.skill-open { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; animation: cardIn 200ms var(--ease-lively) both; }
+.skill-body {
+  margin: 0; max-height: 220px; overflow: auto;
+  padding: 10px; border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--panel);
+  font-family: var(--mono); font-size: 11px; line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-wrap; word-break: break-word;
+}
+.skill-open > small { font-size: 10.5px; color: var(--text-4); }
+.skills-dir-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center; gap: 18px;
+  padding: 10px 6px; margin: 0 -6px;
+  border-radius: 10px;
+}
+.skills-dir-row:hover { background: var(--fill); }
+.skills-dir-row + .skills-dir-row { border-top: 1px solid var(--rule); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mcp-row, .skill-row, .skill-open { animation-duration: 1ms; }
+  .mcp-dot.is-connected, .mcp-dot.is-starting { animation: none; }
+}
+

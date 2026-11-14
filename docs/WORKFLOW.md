@@ -132,8 +132,22 @@ foundation 43 / orchestrator 58 / delegation 63 / project 43 / queue 29 / graph 
 - 发现既有小瑕疵：中文标点后 `*斜体*` 不生效（inline() 边界类不认中文标点）→ 转 R4
 
 ### R4 · 2026-11-14 · 收尾轮
-- [x] italic 中文标点边界修复（inline() 边界类补中文标点，截图验证 `*斜体*` 正确渲染）
-- [~] electron-builder 打包实测：win-unpacked 已产出、nsis.7z 82MB 已产出，最终 portable exe 组装被 540s 超时截断一次，重跑中
-- [~] e2e 最终回归：诊断出**关键坑——陈旧 mock 网关污染测试**。老网关进程存活数小时后被 kill 中断的会话状态留在内存里，后续 e2e 在 /chat/completions 步骤全部挂起；而「重启」因 EADDRINUSE 静默失败实际仍是老进程在服务。正确流程固化到 docs/e2e-guide.md（杀干净 → 起新 → 验证唯一性 → 再跑）
-- [~] 三路并行修复中：A=runtime 安全向 P2（delegate_task 校验/download-exec 变体/_prune 保护/end 后事件抑制）、B=e2e+打包收尾、C=renderer R5 UX（重试 shimmer/折叠自动收起）
-- 诊断工具沉淀：tools/diag.js（启动状态 + 主进程网络 + 渲染层 fetch 可达性一次查清）
+- [x] italic 中文标点边界修复（inline() 边界类补中文标点，截图验证）
+- [x] 打包实测：release/DSH-Desktop-0.1.0.exe 105.7MB（ELECTRON_MIRROR=npmmirror 绕过 GitHub 下载超时）
+- [x] e2e 挂起诊断四层根因（详见 R6 记录 + docs/e2e-guide.md）
+- [x] 诊断工具沉淀：tools/diag.js（启动状态 + 主进程网络 + 渲染层 fetch 一次查清）
+- [x] C 子代理：重试原因呼吸 + 工具折叠自动收起（用户手动优先）
+- [x] R5 渲染批次：工具调用前模型开口（系统提示）+ 运行中文字呼吸 + 思考三点波浪 + 全局差异化开合动效 + 主题切换过渡 + 输入历史/消息复制等
+
+### R6 · 2026-11-14 · 三路并行（全部已提交）
+- **E 委派预算**（`62fa051`，用户授权解冻）：子消耗幂等并入父 usage（差值 + usageMerged 标记）、在途子消耗计入预留、跨重启并入新父 Run 只计一次；回归 314→339 全绿
+- **D 设置页**（`40a37d9`）：ZCode 式左导航 6 分类 + 右内容区，53 个 ID 零丢失迁移；openConnect/openAgentSheet 改路由；e2e 适配（#paneConnect + 动画竞态改 waitUntil）；关闭按钮升级
+- **F MCP + Skills 后端**（`8020305`）：零依赖 stdio MCP 客户端（JSON-RPC/握手/超时/崩溃恢复/进程树清理，26 项自检）+ 技能扫描（frontmatter/防越界，14 项）+ IPC 合流（18 项）；MCP 工具 `mcp_<server>_<tool>` 命名走既有审批路径；测试模式禁用硬件加速
+- **e2e 之谜全部解密**：①GPU 驱动间歇崩溃 → 渲染进程启动即死 → did-finish-load 不触发 →「无输出挂起」（测试模式已禁硬件加速）；②网关「零日志」= stdout 重定向错位假象；③npx 从错误目录拉错 electron 版本；④并发改码使结果无效（对齐 e2e-guide.md）
+- **工具行闪烁修复**：renderTools 全量重建 → 增量更新（签名对比，未变行零 DOM 写入）
+- 验证：回归 339/339 ✓ · e2e 74/74 ✓（全量树）
+
+### R7 · 2026-11-14 · 进行中
+- [~] G1 子代理：MCP/Skills 渲染层 UI（设置页 paneMcp/paneSkills + /skills 斜杠 + 工具行 MCP 标签容错）
+- [ ] G2 接力：密钥主进程化（用户已授权）+ Ctrl+F 会话查找 + 选区浮动菜单
+- [ ] 最终打包：electron-builder 重出 exe（当前 exe 是设置页之前的版本）

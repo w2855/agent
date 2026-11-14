@@ -240,6 +240,7 @@
   <button class="menu-item" data-cmd="/arch"><span>/arch</span><small>打开项目架构</small></button>
   <button class="menu-item" data-cmd="/stop"><span>/stop</span><small>中断当前回合</small></button>
   <button class="menu-item" data-cmd="/goal"><span>/goal</span><small>设置/查看会话目标</small></button>
+  <button class="menu-item" data-cmd="/skills"><span>/skills</span><small>打开技能面板</small></button>
 </div>
 
 <!-- 模型选择：列表来自上游 GET /models -->
@@ -305,6 +306,12 @@
         </button>
         <button class="settings-nav-item" data-sp="tools">
           <svg class="ico"><use href="#i-shield"/></svg><span>工具与权限</span>
+        </button>
+        <button class="settings-nav-item" data-sp="mcp">
+          <svg class="ico"><use href="#i-package"/></svg><span>MCP 服务器</span>
+        </button>
+        <button class="settings-nav-item" data-sp="skills">
+          <svg class="ico"><use href="#i-sparkle"/></svg><span>技能</span>
         </button>
         <button class="settings-nav-item" data-sp="agents">
           <svg class="ico"><use href="#i-users"/></svg><span>Agent</span>
@@ -514,6 +521,87 @@
             </div>
             <span class="perm-value" id="permSettingValue">完全权限</span>
           </div>
+        </div>
+      </div>
+
+      <!-- MCP 服务器：stdio server 的启动/停止/工具发现都在主进程，渲染层只同步配置与展示状态 -->
+      <div class="settings-pane" id="paneMcp" hidden>
+        <div class="sp-head">
+          <h3>MCP 服务器</h3>
+          <p>通过 stdio 连接 MCP server；连接成功后其工具自动并入模型可用工具（命名 mcp_服务器_工具，调用前需审批）。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">服务器列表</div>
+          <div class="mcp-list" id="mcpServerList"><div class="fine">加载中…</div></div>
+          <div class="pane-actions">
+            <button class="btn ghost" id="mcpToggleAdd" type="button"><svg class="ico tiny"><use href="#i-plus"/></svg><span>展开添加表单</span></button>
+            <button class="btn ghost" id="mcpRefresh" type="button"><svg class="ico tiny"><use href="#i-refresh"/></svg><span>刷新</span></button>
+          </div>
+        </div>
+
+        <div class="settings-card" id="mcpAddCard" hidden>
+          <div class="group-title">添加 MCP 服务器</div>
+          <div class="field">
+            <label for="mcpAddName">名称 <span>（也用作工具名前缀）</span></label>
+            <input id="mcpAddName" placeholder="例如：filesystem" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="mcpAddCommand">命令 <span>（可执行文件或脚本入口，如 node / npx 脚本）</span></label>
+            <input id="mcpAddCommand" placeholder="node E:/servers/fs.js" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="mcpAddArgs">参数 <span>（空格或换行分隔，整段拆成一个参数数组）</span></label>
+            <textarea id="mcpAddArgs" rows="2" placeholder="--root E:/workspace --quiet" spellcheck="false"></textarea>
+          </div>
+          <div class="field">
+            <label for="mcpAddEnv">环境变量 <span>（每行一条 KEY=VALUE）</span></label>
+            <textarea id="mcpAddEnv" rows="2" placeholder="API_KEY=sk-…" spellcheck="false"></textarea>
+          </div>
+          <div class="pane-actions">
+            <button class="btn ghost" id="mcpCancelAdd" type="button">收起</button>
+            <button class="btn primary" id="mcpSaveAdd" type="button">保存并启动</button>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">全部工具 <span id="mcpToolCount"></span></div>
+          <div class="mcp-tools" id="mcpToolList"><div class="fine">暂无工具：启动 server 后自动汇总。</div></div>
+          <p class="fine">只汇总已连接 server 的工具；工具名即模型实际看到的函数名。</p>
+        </div>
+      </div>
+
+      <!-- 技能：userData/skills 与 工作区/.dsh/skills 的扫描与注入 -->
+      <div class="settings-pane" id="paneSkills" hidden>
+        <div class="sp-head">
+          <h3>技能</h3>
+          <p>技能是含 SKILL.md 的目录或单个 .md 文件；点「使用」把技能全文填进输入框，确认内容后自己发送。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">技能列表 <span id="skillsSummary"></span></div>
+          <div class="skills-list" id="skillsList"><div class="fine">加载中…</div></div>
+          <div class="pane-actions">
+            <button class="btn ghost" id="skillsScan" type="button"><svg class="ico tiny"><use href="#i-refresh"/></svg><span>重新扫描</span></button>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">技能目录</div>
+          <div class="skills-dir-row">
+            <div class="sp-row-main">
+              <b>用户技能目录</b>
+              <small>应用数据目录（userData）下的 skills 子目录，随安装位置而定。</small>
+            </div>
+          </div>
+          <div class="skills-dir-row">
+            <div class="sp-row-main">
+              <b>工作区技能目录</b>
+              <small id="skillsProjectDir">未设置工作目录</small>
+            </div>
+            <button class="btn ghost" id="skillsOpenDir" type="button">打开目录</button>
+          </div>
+          <p class="fine">扫描顺序：先用户级，后项目级；两个目录里同名技能靠序号后缀区分。</p>
         </div>
       </div>
 

@@ -152,6 +152,9 @@ const state = {
   vaultOk: false,
   /* 个性化提示词（每轮注入；持久化到 localStorage） */
   customPrompt: readStorage('dsh.customPrompt', ''),
+  /* MCP 服务器（配置同步到主进程，状态跟随 3s 轮询）与技能（设置页两 pane 的数据源） */
+  mcp: { configs: [], servers: [], loading: false, error: '', sig: '' },
+  skills: { items: [], scanning: false, error: '', expandedId: '' },
 };
 
 /** 等待用户审批的工具调用：msgId -> { resolve, draft, node } */
@@ -1141,8 +1144,17 @@ function describeToolTarget(name, args) {
     const auto = !rawAgent || rawAgent === 'new' || rawAgent === 'auto';
     target = `${auto ? '自动创建子 Agent' : rawAgent}${args?.model ? ' · ' + args.model : ''} · ${args?.objective || ''}`;
   }
+  else if (name.startsWith('mcp_')) target = args && Object.keys(args).length ? JSON.stringify(args) : '';
   else target = args?.path || args?.url || args?.command || '';
   return String(target).replace(/\s+/g, ' ').slice(0, 160);
+}
+
+/** 工具展示元数据：本地工具查 specs 返回的 meta 表；MCP 工具（mcp_ 前缀）无本地条目，走蓝色兜底。 */
+function toolMetaFor(name) {
+  const meta = state.toolMeta[name];
+  if (meta) return meta;
+  if (String(name || '').startsWith('mcp_')) return { verb: 'MCP', icon: 'i-package', tone: 'mcp' };
+  return { verb: name || '工具', icon: 'i-terminal', tone: 'neutral' };
 }
 
 /* 免审批 key 用完整参数（含名称），避免长命令被截断后前缀碰撞导致误放行 */
@@ -2196,7 +2208,7 @@ function runApiTurn(ctx, opts) {
   /** 执行一个工具调用；返回给模型的工具消息。中断返回 null。 */
   const runToolCall = async (call) => {
     const name = String(call?.function?.name || '');
-    const meta = state.toolMeta[name] || { verb: name || '工具', icon: 'i-terminal', tone: 'neutral' };
+    const meta = toolMetaFor(name);
     let args = {};
     let parseError = '';
     try {
@@ -2757,8 +2769,9 @@ function handleCommand(text) {
     case '/compact': compactContext(); break;
     case '/arch': openArchPage(); break;
     case '/goal': handleGoal(parts.slice(1).join(' ').trim()); break;
+    case '/skills': openSettings('skills'); break;
     default:
-      toast(`未识别的命令「${cmd}」，可用：/new、/model、/compact、/arch、/stop、/goal`);
+      toast(`未识别的命令「${cmd}」，可用：/new、/model、/compact、/arch、/stop、/goal、/skills`);
   }
 }
 
@@ -2981,6 +2994,8 @@ const SETTINGS_PANES = {
   chat:       { pane: 'paneChat',       desc: '个性化提示词与失败自动重试' },
   connect:    { pane: 'paneConnect',    desc: '选择消息从哪里来' },
   tools:      { pane: 'paneTools',      desc: '工具调用与权限档位' },
+  mcp:        { pane: 'paneMcp',        desc: 'MCP 服务器与外部工具' },
+  skills:     { pane: 'paneSkills',     desc: '技能扫描与注入' },
   agents:     { pane: 'paneAgents',     desc: '可委派的子 Agent' },
   about:      { pane: 'paneAbout',      desc: '版本信息与运行环境' },
 };
@@ -2997,6 +3012,18 @@ function switchSettingsPane(category) {
   }
   const sub = $('#settingsSubtitle');
   if (sub) sub.textContent = meta.desc;
+  /* pane 生命周期：MCP 状态轮询只在 pane 可见时跑（3s），离开或关页即停 */
+  if (category === 'mcp') {
+    state.mcp.sig = ''; // 强制重渲染一次，入场即见当前状态
+    refreshMcpServers();
+    startMcpPoll();
+  } else {
+    stopMcpPoll();
+  }
+  if (category === 'skills') {
+    renderSkillsDirs();
+    scanSkills();
+  }
 }
 
 function openSettings(category = settingsCategory || 'appearance') {
@@ -3012,6 +3039,7 @@ function openSettings(category = settingsCategory || 'appearance') {
 function closeSettings() {
   const page = $('#settingsPage');
   if (!page || page.hidden) return;
+  stopMcpPoll();
   animateOut(page, 200);
 }
 
@@ -3023,6 +3051,328 @@ function renderAboutSystem() {
   set('#sysElectron', v.electron || '未知');
   set('#sysChrome', v.chrome || '未知');
   set('#sysNode', v.node || '未知');
+}
+
+/* ───────── 设置页：MCP 服务器 pane ─────────
+   配置同步走 mcp.setServers（主进程校验并顺手停掉被删除的运行中 server）；
+   状态轮询跟随 pane 可见性：切走或关页即 clearInterval（同 inspector 定时器纪律）。
+   轮询结果做签名比对，数据没变就不重渲染，避免 innerHTML 重建每 3s 重播入场动画。 */
+
+const MCP_STATUS_LABEL = { connected: '已连接', error: '错误', starting: '启动中', stopped: '已停止' };
+const mcpDeleteArmed = new Set();
+let mcpPollTimer = null;
+
+function startMcpPoll() {
+  if (mcpPollTimer) return;
+  mcpPollTimer = setInterval(() => { refreshMcpServers(); }, 3000);
+}
+
+function stopMcpPoll() {
+  if (mcpPollTimer) {
+    clearInterval(mcpPollTimer);
+    mcpPollTimer = null;
+  }
+}
+
+async function refreshMcpServers() {
+  if (!window.dsh?.mcp?.getServers) {
+    state.mcp.error = '当前不在桌面外壳里运行，MCP 不可用';
+    renderMcpPane();
+    return;
+  }
+  state.mcp.loading = true;
+  try {
+    const r = await window.dsh.mcp.getServers();
+    if (!r?.ok) throw new Error(r?.error || '主进程没有返回 MCP 状态');
+    state.mcp.configs = Array.isArray(r.configs) ? r.configs : [];
+    state.mcp.servers = Array.isArray(r.servers) ? r.servers : [];
+    state.mcp.error = '';
+  } catch (err) {
+    state.mcp.error = err?.message || String(err);
+  } finally {
+    state.mcp.loading = false;
+    const sig = JSON.stringify([
+      state.mcp.configs,
+      state.mcp.servers.map((s) => ({ id: s.id, status: s.status, toolCount: s.toolCount, lastError: s.lastError })),
+    ]);
+    if (sig !== state.mcp.sig) {
+      state.mcp.sig = sig;
+      renderMcpPane();
+    }
+  }
+}
+
+function mcpStatusClass(status) {
+  if (status === 'connected') return 'is-connected';
+  if (status === 'error') return 'is-error';
+  if (status === 'starting') return 'is-starting';
+  return 'is-stopped';
+}
+
+/** 与主进程 lib/mcp.js 的 makeToolName 完全一致的工具名推导，仅用于展示。 */
+function mcpSanitizePart(value, max) {
+  const s = String(value == null ? '' : value)
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, max);
+  return s || 'x';
+}
+
+function mcpToolFullName(srv, toolName) {
+  const byName = mcpSanitizePart(srv?.name, 20);
+  const serverKey = byName !== 'x' ? srv.name : (srv?.id || 'x');
+  return `mcp_${mcpSanitizePart(serverKey, 20)}_${mcpSanitizePart(toolName, 36)}`;
+}
+
+function renderMcpPane() {
+  const box = $('#mcpServerList');
+  if (!box) return;
+  if (state.mcp.error) {
+    box.innerHTML = `<div class="fine">MCP 状态读取失败：${esc(state.mcp.error)}</div>`;
+  } else if (state.mcp.loading && !state.mcp.configs.length) {
+    box.innerHTML = '<div class="fine">加载中…</div>';
+  } else if (!state.mcp.configs.length) {
+    box.innerHTML = '<div class="fine">还没有配置 MCP server。展开下方表单：填名称和启动命令即可。</div>';
+  } else {
+    box.innerHTML = state.mcp.configs.map((c) => {
+      const srv = state.mcp.servers.find((s) => s.id === c.id) || null;
+      const status = srv?.status || 'stopped';
+      const label = MCP_STATUS_LABEL[status] || status;
+      const toolCount = srv && status === 'connected' ? (srv.toolCount ?? (srv.tools || []).length) : 0;
+      const errText = status === 'error' ? String(srv?.lastError || '未知错误') : '';
+      return `<div class="mcp-row ${mcpStatusClass(status)}">
+        <span class="mcp-dot ${mcpStatusClass(status)}" title="${esc(label)}"></span>
+        <div class="mcp-main">
+          <b>${esc(c.name || c.id)}<span>${esc(label)}</span></b>
+          <small class="mcp-cmd">${esc([c.command, ...(c.args || [])].join(' '))}</small>
+          ${errText ? `<small class="mcp-err" title="${esc(errText)}">${esc(errText)}</small>` : ''}
+        </div>
+        <span class="mcp-count">${toolCount} 工具</span>
+        <div class="mcp-actions">
+          ${status === 'connected' || status === 'starting'
+            ? `<button class="btn ghost" data-mcp-stop="${esc(c.id)}">${status === 'starting' ? '等待中' : '停止'}</button>`
+            : `<button class="btn ghost" data-mcp-start="${esc(c.id)}">启动</button>`}
+          <button class="mcp-del ${mcpDeleteArmed.has(c.id) ? 'is-armed' : ''}" data-mcp-del="${esc(c.id)}" title="删除配置">${mcpDeleteArmed.has(c.id) ? '确认?' : '删除'}</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  renderMcpTools();
+}
+
+function renderMcpTools() {
+  const box = $('#mcpToolList');
+  if (!box) return;
+  const tools = state.mcp.servers
+    .filter((s) => s.status === 'connected' && Array.isArray(s.tools))
+    .flatMap((s) => (s.tools || []).map((t) => ({ ...t, srv: s })));
+  const count = $('#mcpToolCount');
+  if (count) count.textContent = tools.length ? `${tools.length} 个` : '';
+  if (!tools.length) {
+    box.innerHTML = '<div class="fine">暂无工具：启动 server 后自动汇总。</div>';
+    return;
+  }
+  box.innerHTML = tools.map((t) => `
+    <div class="mcp-tool">
+      <code>${esc(mcpToolFullName(t.srv, t.name))}</code>
+      <small title="${esc(t.description || '')}">${esc(t.description || '无描述')}</small>
+    </div>`).join('');
+}
+
+function mcpSetAddOpen(open) {
+  const card = $('#mcpAddCard');
+  if (!card) return;
+  card.hidden = !open;
+  const label = $('#mcpToggleAdd span');
+  if (label) label.textContent = open ? '收起添加表单' : '展开添加表单';
+}
+
+/** 名称 → 合法 id（同主进程规则：字母/数字/下划线/中划线，≤64），重名自动加序号。 */
+function mcpIdFromName(name) {
+  const base = String(name || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  const taken = new Set(state.mcp.configs.map((c) => c.id));
+  let id = base || `srv-${Date.now().toString(36)}`;
+  let n = 2;
+  while (taken.has(id)) id = `${base || 'srv'}-${n++}`;
+  return id;
+}
+
+async function mcpSaveAdd() {
+  const name = $('#mcpAddName')?.value.trim() || '';
+  const command = $('#mcpAddCommand')?.value.trim() || '';
+  if (!name) { toast('请填写 MCP server 名称'); return; }
+  if (!command) { toast('请填写启动命令'); return; }
+  const args = ($('#mcpAddArgs')?.value || '').split(/\s+/).filter(Boolean);
+  const env = {};
+  for (const line of ($('#mcpAddEnv')?.value || '').split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    const eq = t.indexOf('=');
+    if (eq <= 0) { toast(`环境变量行「${t.slice(0, 40)}」不是 KEY=VALUE 格式`); return; }
+    env[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+  }
+  if (!window.dsh?.mcp?.setServers) { toast('当前不在桌面外壳里运行，MCP 不可用'); return; }
+  const cfg = { id: mcpIdFromName(name), name, command, args, env };
+  try {
+    const r = await window.dsh.mcp.setServers([...state.mcp.configs, cfg]);
+    if (!r?.ok) { toast(`保存失败：${r?.error || '未知错误'}`); return; }
+  } catch (err) {
+    toast(`保存失败：${err?.message || err}`);
+    return;
+  }
+  for (const id of ['mcpAddName', 'mcpAddCommand', 'mcpAddArgs', 'mcpAddEnv']) {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  }
+  mcpSetAddOpen(false);
+  toast('已保存配置，正在尝试启动…');
+  await mcpStart(cfg.id);
+}
+
+async function mcpStart(id) {
+  if (!window.dsh?.mcp?.startServer) { toast('当前不在桌面外壳里运行，MCP 不可用'); return; }
+  try {
+    const r = await window.dsh.mcp.startServer(id);
+    if (!r?.ok) {
+      // lib 的 lastError 已带「启动失败：」前缀，避免 toast 里重复两遍
+      const why = String(r?.error || '').replace(/^启动失败：/, '');
+      toast(`启动失败：${why || r?.code || '未知错误'}`);
+    } else {
+      toast(`MCP server 已连接：${id}`);
+    }
+  } catch (err) {
+    toast(`启动失败：${err?.message || err}`);
+  }
+  await refreshMcpServers();
+}
+
+async function mcpStop(id) {
+  if (!window.dsh?.mcp?.stopServer) { toast('当前不在桌面外壳里运行，MCP 不可用'); return; }
+  try {
+    const r = await window.dsh.mcp.stopServer(id);
+    if (!r?.ok) toast(`停止失败：${r?.error || '未知错误'}`);
+    else toast('已停止 MCP server');
+  } catch (err) {
+    toast(`停止失败：${err?.message || err}`);
+  }
+  await refreshMcpServers();
+}
+
+/** 删除配置：两段确认（3 秒内再点一次），与会话删除同款交互；setServers 会顺手停掉运行中的 server。 */
+async function mcpDelete(id) {
+  const cfg = state.mcp.configs.find((c) => c.id === id);
+  if (!cfg) return;
+  if (!mcpDeleteArmed.has(id)) {
+    mcpDeleteArmed.add(id);
+    setTimeout(() => { if (mcpDeleteArmed.delete(id)) renderMcpPane(); }, 3000);
+    renderMcpPane();
+    toast('再点一次确认删除');
+    return;
+  }
+  mcpDeleteArmed.delete(id);
+  const next = state.mcp.configs.filter((c) => c.id !== id);
+  try {
+    const r = await window.dsh.mcp.setServers(next);
+    if (!r?.ok) toast(`删除失败：${r?.error || '未知错误'}`);
+    else toast('已删除 MCP 配置');
+  } catch (err) {
+    toast(`删除失败：${err?.message || err}`);
+  }
+  await refreshMcpServers();
+}
+
+/* ───────── 设置页：技能 pane ─────────
+   打开 pane 即扫描（userData/skills + 工作区/.dsh/skills）；
+   「使用」= 把技能全文连标题一起填进输入框，发送与否由用户决定。 */
+
+const SKILL_SOURCE_LABEL = { user: '用户', project: '项目' };
+
+async function scanSkills() {
+  if (!window.dsh?.skills?.scan) {
+    state.skills.error = '当前不在桌面外壳里运行，技能扫描不可用';
+    renderSkillsList();
+    return;
+  }
+  state.skills.scanning = true;
+  renderSkillsList();
+  try {
+    const r = await window.dsh.skills.scan(state.workspace || '');
+    if (!r?.ok) throw new Error(r?.error || '主进程没有返回技能列表');
+    state.skills.items = Array.isArray(r.skills) ? r.skills : [];
+    state.skills.error = '';
+  } catch (err) {
+    state.skills.error = err?.message || String(err);
+  } finally {
+    state.skills.scanning = false;
+    renderSkillsList();
+  }
+}
+
+function renderSkillsList() {
+  const box = $('#skillsList');
+  if (!box) return;
+  const summary = $('#skillsSummary');
+  if (summary) summary.textContent = state.skills.items.length ? `${state.skills.items.length} 个` : '';
+  if (state.skills.scanning && !state.skills.items.length) { box.innerHTML = '<div class="fine">扫描中…</div>'; return; }
+  if (state.skills.error) { box.innerHTML = `<div class="fine">扫描失败：${esc(state.skills.error)}</div>`; return; }
+  if (!state.skills.items.length) {
+    box.innerHTML = '<div class="fine">两个技能目录里还没有可用技能。放一个 SKILL.md（或任意 .md）后重新扫描。</div>';
+    return;
+  }
+  box.innerHTML = state.skills.items.map((s) => {
+    const open = state.skills.expandedId === s.id;
+    return `<div class="skill-row ${open ? 'is-open' : ''}" data-skill-id="${esc(s.id)}">
+      <div class="skill-head">
+        <span class="skill-badge is-${esc(s.source)}">${esc(SKILL_SOURCE_LABEL[s.source] || s.source)}</span>
+        <b>${esc(s.name)}</b>
+        <span class="skill-desc" title="${esc(s.description || '')}">${esc(s.description || '无描述')}</span>
+        ${ico(open ? 'i-chevron' : 'i-chevron-right', 'ico tiny skill-chev')}
+      </div>
+      ${open ? `<div class="skill-open">
+        <pre class="skill-body">${esc(s.body || '（空正文）')}</pre>
+        <button class="btn primary" data-skill-use="${esc(s.id)}" type="button">${ico('i-sparkle', 'ico tiny')}<span>使用</span></button>
+        <small>「使用」把技能全文填入输入框，确认内容后再发送。</small>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function renderSkillsDirs() {
+  const el = $('#skillsProjectDir');
+  if (!el) return;
+  el.textContent = state.workspace
+    ? `${state.workspace.replace(/[\\/]+$/, '')}\\.dsh\\skills`
+    : '未设置工作目录（在「工具与权限」里选择后生效）';
+}
+
+function useSkill(id) {
+  const s = state.skills.items.find((x) => x.id === id);
+  if (!s) return;
+  if (state.busy) { toast('生成中不能填入输入框'); return; }
+  const ta = $('#input');
+  ta.value = `#技能：${s.name}\n\n${s.body || ''}`;
+  closeSettings();
+  autoGrow();
+  updateSendState();
+  ta.focus();
+  toast(`已填入技能「${s.name}」，确认后发送`);
+}
+
+/** 打开工作区技能目录：走 run_command（explorer），失败只 toast 不打断。 */
+async function openSkillsDir() {
+  if (!state.workspace) { toast('先在「工具与权限」里设置工作目录'); return; }
+  const dir = `${state.workspace.replace(/[\\/]+$/, '')}\\.dsh\\skills`;
+  try {
+    const r = await window.dsh.tools.exec('run_command', { command: `explorer "${dir}"` }, {
+      workspace: state.workspace,
+      permission: 'full',
+      approved: true,
+    });
+    if (r && r.ok === false) toast(`打开目录失败：${r.error || '未知错误'}`);
+  } catch (err) {
+    toast(`打开目录失败：${err?.message || err}`);
+  }
 }
 
 /* Toast 队列：依次展示，互相不覆盖——旧实现单槽会把重要告警（如存储失败）顶掉 */
@@ -4823,6 +5173,37 @@ function bind() {
     if (b) switchSettingsPane(b.dataset.sp);
   });
   $('#saveCustomPrompt').addEventListener('click', saveCustomPrompt);
+
+  /* MCP pane：行内按钮随 innerHTML 重建，全部走事件委托 */
+  $('#mcpServerList').addEventListener('click', (e) => {
+    const start = e.target.closest('[data-mcp-start]');
+    if (start) { mcpStart(start.dataset.mcpStart); return; }
+    const stop = e.target.closest('[data-mcp-stop]');
+    if (stop) { mcpStop(stop.dataset.mcpStop); return; }
+    const del = e.target.closest('[data-mcp-del]');
+    if (del) { e.stopPropagation(); mcpDelete(del.dataset.mcpDel); }
+  });
+  $('#mcpToggleAdd').addEventListener('click', () => {
+    const card = $('#mcpAddCard');
+    if (card) mcpSetAddOpen(card.hidden);
+  });
+  $('#mcpCancelAdd').addEventListener('click', () => mcpSetAddOpen(false));
+  $('#mcpSaveAdd').addEventListener('click', mcpSaveAdd);
+  $('#mcpRefresh').addEventListener('click', () => refreshMcpServers());
+
+  /* 技能 pane：行点击展开正文，「使用」填入输入框 */
+  $('#skillsList').addEventListener('click', (e) => {
+    const use = e.target.closest('[data-skill-use]');
+    if (use) { e.stopPropagation(); useSkill(use.dataset.skillUse); return; }
+    const row = e.target.closest('.skill-row');
+    if (!row) return;
+    const id = row.dataset.skillId;
+    state.skills.expandedId = state.skills.expandedId === id ? '' : id;
+    renderSkillsList();
+  });
+  $('#skillsScan').addEventListener('click', () => scanSkills());
+  $('#skillsOpenDir').addEventListener('click', openSkillsDir);
+
   $('#openAgents').addEventListener('click', openAgentSheet);
   $('#agentPermSeg').addEventListener('click', (e) => {
     const b = e.target.closest('button');

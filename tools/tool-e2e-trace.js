@@ -1,7 +1,7 @@
-(async () => {
+(async () => { console.log('[trace] e2e script started');
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const out = { checks: [] };
-  const add = (name, pass, detail) => { out.checks.push({ name, pass: !!pass, detail: String(detail ?? '') }); void window.dsh.tools.exec('write_file', { path: 'e2e-trace.txt', content: '[mark] ' + name }, { permission: 'full' }).catch(() => {}); };
+  const add = (name, pass, detail) => { out.checks.push({ name, pass: !!pass, detail: String(detail ?? '') }); void window.dsh.tools.exec('write_file', { path: 'e2e-trace.txt', content: '[mark] ' + name }, { permission: 'full' }).catch((e) => console.error('[trace-beacon-err]', e?.message || String(e))); };
   const waitUntil = async (fn, ms = 15000) => {
     const t = Date.now();
     while (Date.now() - t < ms) {
