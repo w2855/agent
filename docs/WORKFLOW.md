@@ -118,7 +118,7 @@ npx electron . --user-data-dir="E:/dsh-desktop/.e2e-userdata" --script=tools/too
 基线数字（2026-11-15 实测，全绿）：
 foundation 62 / orchestrator 58 / delegation 83 / project 43 / queue 29 / graph 24 / audit 17 / validation 23 / **governance 36** = **375/375**
 lessons-check = **109/109**
-最终门禁 = **23 项 22✓ 0✗ 1 跳**（2026-11-15 实测；runtime-ipc-check.js 需 Electron 上下文（`--script` 通道），node 直跑报 `window is not defined` 属预期，计为跳过）
+最终门禁 = **25 项 24✓ 0✗ 1 跳**（2026-11-15 实测；runtime-ipc-check.js 需 Electron 上下文（`--script` 通道），node 直跑报 `window is not defined` 属预期，计为跳过）
 （并发代理扩容会改变各脚本计数，以聚合器当场实测为准；lib 自检另含 mcp 26 / skills 14 / ipc-mcp 18 / secret-mask 37 / h3 31 / lessons 109）
 
 > 聚合器环境注意：宿主 IDE/agent 可能设置 `ELECTRON_RUN_AS_NODE=1`，会让 electron.exe

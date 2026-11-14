@@ -1,20 +1,67 @@
 # DSH Desktop 任务交接提示词（新会话直接粘贴本文件全文即可续跑）
 
-> 更新于 2026-11-15（R14 完成）。R13 的「文件存储 / 会话隔离 / 分段渲染」与 R14 的「安全审计整改 16 项」均已提交。
+> 更新于 2026-11-15（R15 完成）。R13「文件存储/会话隔离/分段渲染」、R14「安全审计整改 16 项」、R15「第三轮审计 A1–A13」均已提交。
 
 ## 一、项目与路径
 - 应用：E:\dsh-desktop（Electron 纯 JS，零 npm 运行时依赖，中文 AI agent 桌面应用「DSH Desktop」）
 - 远端：https://github.com/w2855/agent（main；GitHub 访问走本机代理 127.0.0.1:7877）
-- 启动：`npx electron .`（开发）/ 桌面快捷方式 → release\DSH-Desktop-0.1.0.exe（打包版为 R13 构建，R14 改动需重新打包）
-- 验收：`node tools/run-all.js`（五段聚合：语法 61 + runtime 375 + lib 自检 6 套 + Electron 探针 + e2e 74）——最近一次全绿
+- 启动：`npx electron .`（开发）/ 桌面快捷方式 → release\DSH-Desktop-0.1.0.exe（打包版为 R13 构建，R14/R15 改动需重新打包）
+- 验收：`node tools/run-all.js`（五段聚合：语法 + runtime + lib 自检 7 套（含 r15-check 47）+ Electron 探针 + e2e 74）——最近一次全绿
 - 打包：`node tools/release.js`（无参数=构建+字节校验；**--verify 只校验不构建**，别误用）
-- 文档：docs/WORKFLOW.md（R0-R14 轮次 + 回归基线）、docs/security/policy-model.md（治理模型契约）、docs/e2e-guide.md、docs/feature-gap-analysis.md、docs/pet-paused.md、tools/RELEASE.md、README.md
+- 文档：docs/WORKFLOW.md（R0-R15 轮次 + 回归基线）、docs/security/policy-model.md（治理模型契约）、docs/security/audit-r15.md（第三轮审计报告与修复落点）、docs/e2e-guide.md、docs/feature-gap-analysis.md、docs/pet-paused.md、tools/RELEASE.md、README.md
 
 ## 二、git 状态（干净）
 - 单线 main，工作树 0 未提交，全部历史已推送（密钥终扫全历史干净）
 - git 身份：仓库级 user.name=dsh-workflow / user.email=workflow@local（之前丢过一次，丢失时按此重设）
 
-## 三、R14 已交付（安全审计整改，本轮核心）
+## 三、R15 已交付（第三轮审计整改 A1–A13，本轮核心）
+> 审计报告：`docs/security/audit-r15.md`（含证据、影响、修法）；回归断言：`tools/r15-check.js` 48 项。
+> 审计方向：Context Engine / Model Adapter / Delegation 深层 / Renderer XSS-IPC / Backup。
+
+1. **A1 档位权威收归主进程**（P0）：新增 `lib/permission-authority.js`（纯函数裁定）。
+   渲染层传的 `permission` / `profile` 只是「请求」，只能比权威值（`dsh.perm`）更严格；
+   提升到 full 需主进程原生确认框（`--shot`/`--script` 一律拒绝）；`dsh.perm` 禁止走通用
+   storage 通道（set / set-many / remove 三处挡住，否则删键即等于提权）。
+   `runtime.evaluateTool` 补 Agent 档位收敛，与 `executor.execute` 同源。
+2. **A2 技能目录专用通道**：`skills:open-dir`（realpath 归一 + `shell.openPath`），
+   删除「`run_command` + 硬编码 `permission:'full'`」的越权路径。
+3. **A3 委派失败回滚**：配额判定前置到自动创建 Agent 之前；autoCreate 之后的失败统一
+   `rejectAfterCreate` → `state.deleteAgent`（有引用则归档）+ `delegation.rollback` 事件。
+   修掉「单 Run 委派满 5 次后每次越界都留一个 active 孤儿 Agent」。
+4. **A4 上下文压缩重做**：`set` 覆盖 → 追加语义（早期摘要在第二次压缩后不再丢）；
+   单条 120→400 字符；摘要池 24000 上限（头 30% + 尾）；保留工具名与目标锚点。
+5. **A5 预算口径修正**：默认 700000→120000 字符（≈12 万 token，对 128k 窗口安全）、
+   上限 2000000→400000、旧超大值回落默认；自动压缩阈值 90%→75%。
+6. **A6 子代理上下文预算**：`trimChildMessages`（120000 字符）+ `repairToolPairs`
+   （裁剪后修 tool_calls/tool 配对，避免上游 400）+ 检查点只存最近 40 条（消除 O(n²) 写盘）；
+   无 `usage` 时用字符估算兜底计入 `maxTokens`（兼容网关不返回 usage 时预算才真正生效）。
+7. **A7 备份补全**：源从「经验库 + 水位」扩到 `dsh-storage.json` / `state.json` / `audit/`
+   （目录递归，`cpSync`）/ 最近 3 天事件分片；新增 `backup:list` / `backup:open`（防穿越）；
+   设置页「数据备份」卡片显示最近一份并可打开目录。
+8. **A8 SSE 缓冲上限**：4MB，超限按 `STREAM_ERROR` 收尾（此前只保护已解析正文）。
+9. **A9 规划器接线**：`lib/context-plan.js` 经 preload 透传，接入 `forModel` 的超预算提示
+   （不再是自己拍脑袋截断 + 一句「已截断」）。
+10. **A10 token 估算统一**：新增 `lib/token-estimate.js`（中文 1 字≈1 token，其它 4 字符≈1 token），
+    替换渲染层与子代理的 `length/4`（中文场景此前低估 4–6 倍）。
+11. **A11 误判（复核后撤回）**：原报告称「子代理审批无 UI 入口」，实际 `#delegApprovals` 早已是
+    事件驱动的一条完整链路（容器 + 卡片 + `decideDelegationApproval` 回传 + 过期清理）。
+    本轮曾加了一套轮询投影，与既有机制双写并打断 e2e 时序，已全部撤回；`r15-check` 改为守护既有实现。
+12. **A12 退避可中断**：子代理重试改用 `retry.sleep(ms, signal)`，取消时不再多等 2.4 秒。
+13. **A13 仓库清理**：取消跟踪 `tools/patches/__pycache__` 与旧 `app.js` 副本；
+    `.gitignore` 去掉重复项并补 `__pycache__/`、`*.pyc`、`tools/patches/backup/`。
+14. **A17 门禁隔离失效**（收尾验证时发现）：`.runall-probe` 清不干净，上一轮 `dsh.perm` 会漏进下一轮。
+    网关日志改写到 `os.tmpdir()`；清理改为「回读校验 + 清不掉就整目录改名让开」；
+    并把「隔离 userData 已清空」作为一条门禁行暴露（全量由 24 项变 25 项）。
+
+### R15 行为变化（交付说明）
+- 切到「完全权限」会弹一次主进程原生确认框；无头模式提权一律被拒（v2-check 已按新语义断言）。
+- 上下文窗口默认 120000 字符；存过 700000 的老用户会回落新默认（避免继续撞上限）。
+- 备份体积变大（多备会话存储/任务状态/审计目录/3 天事件），保留仍 7 份。
+- 子代理需要审批时会出现时间线卡片（既有实现，本轮未改）。
+- 探针规范：需要「更严档位」时只改渲染层请求值（`requestPerm`），不要再动主进程权威值——
+  无头模式不能提权，先把权威值降下去就升不回来。
+
+## 四、R14 已交付（安全审计整改 16 项）
 > 审计结论：问题不是缺功能，而是「旧执行系统与新 Runtime 并存」导致治理不一致。逐条对应：
 
 1. **P0 统一治理内核**（`lib/tool-gateway.js`）：`tool:exec` 与 `mcp:tool:call` 不再有独立审批通道，统一走 policy（复用 `runtime.evaluateTool`，同一 workspaceId）+ 主进程原生确认框 + 审计链（事件 `tool.gateway`）。**渲染层传 `approved:true` 已完全无效**（自检含伪造用例）
@@ -32,7 +79,7 @@
 13. **P2 经验库**：关联检索额外过滤 tainted 记录
 14. 新增自检 `tools/runtime-governance-check.js`（36 断言）+ `docs/security/policy-model.md`
 
-## 四、R13 已交付（上一轮，全部在 GitHub）
+## 五、R13 已交付
 1. 文件存储后端（真值源 `userData/dsh-storage.json`，persist-store 原子写/去抖/损坏自愈）
 2. TDZ 重大修复（`msgStore/msgSeq/registerMsg` 前移到 `loadSavedSessions` 之前）
 3. 架构会话隔离（ensure 带 sessionId + 缓存键加会话维度）
@@ -41,25 +88,27 @@
 6. 模型思考强度（reasoning_effort，主聊天 + 子代理双注入，off 不发）
 7. README.md
 
-## 五、专项探针（tools/，均绿）
+## 六、专项探针（tools/，均绿）
 - 新增 governance 36/36（治理/取消/对账/分页/容量/Autopilot/SSRF/环境变量/队列）
 - f1 17/17、g5 29/29、g3 44/44、dyn 44/44（两相位）、tool-e2e 74/74、effort-probe 3/3
 - arch-iso 7/7、narrate-live 4/4、narrate-gap 5/5、persist-write/read、storage-check 8/8、storage-probe 20/20、abort-check 11/11
 
-## 六、当前待办（按优先级）
+## 七、当前待办（按优先级）
 1. **用户实测复验**：①架构会话隔离 ②工具卡片上面说话 ③思考强度 ④聊天记录保留（R14 已重新打包后复验）⑤**新增：ask 档工具现在弹主进程原生确认框**（降级通道），主路径仍在应用内卡片
 2. **桌宠恢复**（用户暂停中）：恢复手册 docs/pet-paused.md；条件=6780 网关生图配额刷新
 3. runtime-ipc-check 探针需 Electron `--script` 通道（run-all 跳过项），可补入 Electron 段
 4. G5 审批串行化边界（withApprovalLock 全局串行）——冻结项已知限制，不动
 5. 下一轮审计建议（未做）：Context Engine（上下文丢失/Token 预算）、Model Adapter（超时/重试/流式中断）、Delegation 深层与循环、Renderer XSS/IPC 边界
 
-## 七、约束（不可违反）
+## 八、约束（不可违反）
 - 全程中文交流；委派/审批机制冻结（只读消费事件）；桌宠暂停
 - 密钥安全：`<管理密钥字面量>` 与 `zk2-…` 绝不入库（字面量引用也不行）；提交前 `git grep <字面量> $(git rev-list --all)` 必须为空；密钥走环境变量或主进程 safeStorage
 - 动效遵循 Motion Tokens（styles.css 尾部）+ reduced-motion 全兜底
 - 渲染层不再拥有审批权：任何「加个 approved 参数就放行」的改动都视为回归
+- **渲染层也不再拥有档位权（R15）**：任何「让渲染层直接决定 policy profile」的改动都视为回归；
+  `dsh.perm` 只能经 `permission:set` 写，通用 storage 通道必须继续拦住这个键
 
-## 八、已知坑（全踩过，勿重蹈）
+## 九、已知坑（全踩过，勿重蹈）
 1. **ELECTRON_RUN_AS_NODE**（R14 新坑，坑掉一整轮门禁）：宿主 IDE/agent 会设 `ELECTRON_RUN_AS_NODE=1`，electron 退化成纯 Node → `app` undefined → 5 个探针全假失败。聚合器已剥离；手工跑用 `env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron ...`
 2. **JSON/Python 转义**：bash heredoc 里 `\\n` 多层转义会变真实换行 → 用 chr(92) 构造 + repr 验字节 + 行级 splice
 3. **打包锁**：输出 exe 被运行中的应用锁住 → 构建超时。打包前确认 DSH 进程已关闭
@@ -70,10 +119,11 @@
 8. **`console.log` 不透传 stdout**（`--shot`）：启动期诊断存 window 全局变量
 9. **事件游标**：分页必须先判「页满」再推进游标，否则跨页丢事件（R14 修过一次，改 read 时注意）
 
-## 九、验收命令速查
+## 十、验收命令速查
 ```bash
-node tools/run-all.js                    # 全量门禁（23 项：22✓ + runtime-ipc 跳过）
+node tools/run-all.js                    # 全量门禁（25 项：24✓ + runtime-ipc 跳过）
 node tools/runtime-governance-check.js   # 只跑治理/一致性 36 断言
+node tools/r15-check.js                  # 只跑 R15 整改 48 断言
 node tools/release.js                    # 打包+字节校验（先关应用）
 env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron . --user-data-dir=.s-x --shot --script=tools/xxx-probe.js
 node tools/mock-gateway.js               # mock 网关 127.0.0.1:57321（[[slow]] [[narrslow]] [[narr]] [[many]] [[write]] [[read]] [[arch]] [[force]] [[tamper]]）
