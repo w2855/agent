@@ -304,6 +304,9 @@ function renderPerm() {
   btn.dataset.level = state.permission;
   $('#permName').textContent = PERM_LABELS[state.permission];
   $$('#permMenu .menu-item').forEach((m) => m.classList.toggle('is-active', m.dataset.perm === state.permission));
+  // 设置页「工具与权限」里的只读展示行：只跟随显示，不提供任何切换控件
+  const ro = $('#permSettingValue');
+  if (ro) ro.textContent = PERM_LABELS[state.permission];
 }
 
 function setPermission(level) {
@@ -621,10 +624,36 @@ function renderTasks(node, msg) {
   if (slot) slot.innerHTML = taskCard(msg.tasks);
 }
 
+/* 工具行增量更新：按 data-tool-id 定位，内容签名没变的行不碰 DOM。
+   旧实现每次全量 innerHTML 重建，扫光/展开态/悬停态全部重来一次，就是用户看到的闪烁 */
+function toolSignature(t) {
+  return [t.status || 'ok', t.verb || '', t.target || '', t.meta || '', !!t.expanded,
+    String(t.result || '').length, String(t.error || '').length].join('\u0001');
+}
+
 function renderTools(node, msg) {
   const box = $('.tools', node);
   if (!box) return;
-  box.innerHTML = (msg.tools || []).map(toolRow).join('');
+  const tools = msg.tools || [];
+  const seen = new Set();
+  const existing = new Map();
+  $$('.tool-wrap', box).forEach((el) => existing.set(el.dataset.toolId, el));
+  for (const t of tools) {
+    const id = String(t.id || '');
+    seen.add(id);
+    const sig = toolSignature(t);
+    const old = existing.get(id);
+    if (old && old.dataset.sig === sig) continue; // 没变化的行零 DOM 写入
+    const wrap = document.createElement('div');
+    wrap.className = 'tool-wrap';
+    wrap.dataset.toolId = id;
+    wrap.dataset.sig = sig;
+    wrap.innerHTML = toolRow(t);
+    if (old) box.replaceChild(wrap, old);
+    else box.appendChild(wrap);
+  }
+  // 防御：清掉已不存在的工具行（消息数组被替换的场景）
+  for (const [id, el] of existing) if (!seen.has(id)) el.remove();
 }
 
 function fileIconFor(name) {
@@ -760,7 +789,7 @@ function emptyNode() {
   $$('.suggest', node).forEach((b) =>
     b.addEventListener('click', () => {
       if (b.id === 'customPromptBadge') {
-        openSheet('settingsSheet');
+        openSettings('chat');
         $('#customPromptInput')?.focus();
         return;
       }
@@ -2942,6 +2971,60 @@ function closeSheet(id) {
   closeSheets();
 }
 
+/* ───────── 设置页（ZCode 式：左导航 + 右内容全屏页） ─────────
+   原三个 sheet（connect/agent/settings）的 DOM 迁入 #settingsPage 对应 pane，
+   元素 ID 原样保留，绑定零改动。openConnect 仍是全局入口（main.js --open-connect
+   与 tool-e2e 都调用它），现在只是打开设置页的 connect pane。 */
+
+const SETTINGS_PANES = {
+  appearance: { pane: 'paneAppearance', desc: '主题、配色与视频壁纸' },
+  chat:       { pane: 'paneChat',       desc: '个性化提示词与失败自动重试' },
+  connect:    { pane: 'paneConnect',    desc: '选择消息从哪里来' },
+  tools:      { pane: 'paneTools',      desc: '工具调用与权限档位' },
+  agents:     { pane: 'paneAgents',     desc: '可委派的子 Agent' },
+  about:      { pane: 'paneAbout',      desc: '版本信息与运行环境' },
+};
+let settingsCategory = 'appearance';
+
+function switchSettingsPane(category) {
+  const meta = SETTINGS_PANES[category];
+  if (!meta) return;
+  settingsCategory = category;
+  $$('#settingsNav [data-sp]').forEach((b) => b.classList.toggle('is-active', b.dataset.sp === category));
+  for (const [key, m] of Object.entries(SETTINGS_PANES)) {
+    const el = document.getElementById(m.pane);
+    if (el) el.hidden = key !== category; // hidden 切换会重触发 pane 的入场动画
+  }
+  const sub = $('#settingsSubtitle');
+  if (sub) sub.textContent = meta.desc;
+}
+
+function openSettings(category = settingsCategory || 'appearance') {
+  hideMenus();
+  closeSheets();
+  switchSettingsPane(SETTINGS_PANES[category] ? category : 'appearance');
+  const page = $('#settingsPage');
+  if (!page) return;
+  page.classList.remove('is-closing'); // 可能正播出场动画，取消它
+  page.hidden = false;
+}
+
+function closeSettings() {
+  const page = $('#settingsPage');
+  if (!page || page.hidden) return;
+  animateOut(page, 200);
+}
+
+/** 关于 pane 的运行环境行：preload 暴露的 platform / versions，静态渲染一次。 */
+function renderAboutSystem() {
+  const v = window.dsh?.versions || {};
+  const set = (sel, text) => { const el = $(sel); if (el) el.textContent = text; };
+  set('#sysPlatform', window.dsh?.platform || '未知');
+  set('#sysElectron', v.electron || '未知');
+  set('#sysChrome', v.chrome || '未知');
+  set('#sysNode', v.node || '未知');
+}
+
 /* Toast 队列：依次展示，互相不覆盖——旧实现单槽会把重要告警（如存储失败）顶掉 */
 const toastQueue = [];
 let toastBusy = false;
@@ -3008,8 +3091,7 @@ async function refreshAgentModelList() {
 }
 
 async function openAgentSheet() {
-  closeSheets();
-  openSheet('agentSheet');
+  openSettings('agents');
   await loadAgents();
   renderAgentList();
   await refreshAgentModelList();
@@ -4046,7 +4128,8 @@ function showModelStatus(ok, text) {
 function openModelSheet(origin = 'topbar') {
   const fromConnect = origin === 'connect';
   state.modelSheetFrom = fromConnect ? 'connect' : 'topbar';
-  state.modelReturnSheet = fromConnect ? 'connectSheet' : '';
+  // 从设置页里打开模型列表：关掉列表时设置页仍在下层，不需要 return-sheet 行为
+  state.modelReturnSheet = '';
   if (fromConnect) {
     state.pendingModel = formModel();
   } else {
@@ -4128,7 +4211,7 @@ function openConnect() {
   syncSourcePane(src);
   $('#probeResult').hidden = true;
   if (!state.toolsReady) loadTools(); else renderToolsSetting();
-  openSheet('connectSheet');
+  openSettings('connect');
 }
 
 function persistConn(c) {
@@ -4732,7 +4815,12 @@ function bind() {
   $('#settingsBtn').addEventListener('click', () => {
     const el = $('#customPromptInput');
     if (el) el.value = state.customPrompt || '';
-    openSheet('settingsSheet');
+    openSettings('appearance');
+  });
+  $('#settingsClose').addEventListener('click', closeSettings);
+  $('#settingsNav').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sp]');
+    if (b) switchSettingsPane(b.dataset.sp);
   });
   $('#saveCustomPrompt').addEventListener('click', saveCustomPrompt);
   $('#openAgents').addEventListener('click', openAgentSheet);
@@ -4878,7 +4966,10 @@ function bind() {
     if (mod && e.key.toLowerCase() === 'n') { e.preventDefault(); newChat(); }
     if (e.key === 'Escape') {
       hideMenus();
+      // 有浮层开着时只关浮层（模型列表叠在设置页上时 Esc 先关列表，不动设置页）
+      const sheetOpen = $$('.sheet').some((s) => !s.hidden);
       closeSheets();
+      if (!sheetOpen) closeSettings();
       if (state.projectOpen && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName || '')) closeArchPage();
     }
   });
@@ -4985,6 +5076,7 @@ function boot() {
   applyTheme(state.theme);
   applyAccent(state.accent);
   renderPerm();
+  renderAboutSystem();
   loadProfiles(false);
   loadProfile(state.activeProfileId);
   hydrateProfilesFromVault();

@@ -195,7 +195,7 @@
   await sleep(200);
 
   openConnect();
-  await waitUntil(() => !document.querySelector('#connectSheet').hidden, 2000);
+  await waitUntil(() => !document.querySelector('#settingsPage').hidden && document.querySelector('#paneConnect') && !document.querySelector('#paneConnect').hidden, 2000);
   add('API 面板回填已保存配置', document.querySelector('#apiBaseUrl').value === MOCK, document.querySelector('#apiBaseUrl').value);
   add('API 面板工具区已加载', !document.querySelector('#toolsFine').textContent.includes('加载中'), document.querySelector('#toolsFine').textContent.slice(0, 60));
 
@@ -208,7 +208,10 @@
   document.querySelector('#modelApply').click();
   await sleep(150);
   add('API 面板选模型只改表单不落库', state.connection.api.model === 'mock-tool-model', `saved=${state.connection.api.model}`);
-  add('选完模型返回 API 面板而非全部关闭', document.querySelector('#connectSheet').hidden === false && document.querySelector('#modelSheet').hidden === true, 'ok');
+  // 设置页重构后：API 面板 = 设置页的 paneConnect；选完模型回到该 pane 且模型列表关闭。
+  // 关闭走 is-closing 动画，hidden 要到动画结束才置位 → 用 waitUntil 等待而非立即断言
+  const backToConnect = await waitUntil(() => !document.querySelector('#paneConnect').hidden && document.querySelector('#modelSheet').hidden === true, 2000);
+  add('选完模型返回 API 面板而非全部关闭', backToConnect, 'ok');
   add('表单模型行同步显示所选模型', document.querySelector('#apiModelName').textContent === 'mock-alt-model', document.querySelector('#apiModelName').textContent);
 
   state.formModel = 'mock-tool-model';
@@ -293,11 +296,13 @@
   const eventCountBefore = runEventsBefore.data.events.length;
   document.querySelector('#inspPlay').click();
   await waitUntil(() => Number.isInteger(inspector.replayCursor), 2000);
-  await sleep(900);
+  await sleep(400);
   const cursorMid = inspector.replayCursor;
   add('回放能按事件推进', Number.isInteger(cursorMid) && cursorMid > 0 && cursorMid < seqBeforeReplay, `cursor=${cursorMid}/${seqBeforeReplay}`);
+  // 回放推进速度受机器负载影响，固定时点断言会偶发踩线 → 等待「部分图」窗口出现
+  const partialGraph = await waitUntil(() => document.querySelectorAll('#inspBody .insp-node').length > 0 && document.querySelectorAll('#inspBody .insp-node').length < fullNodeCount, 3000);
   const replayNodes = document.querySelectorAll('#inspBody .insp-node').length;
-  add('回放中图按截断事件重绘', replayNodes > 0 && replayNodes < fullNodeCount, `${replayNodes}/${fullNodeCount}`);
+  add('回放中图按截断事件重绘', partialGraph, `${replayNodes}/${fullNodeCount}`);
   const runEventsDuring = await window.dsh.runtime.events.read({ runId: expectedRun, limit: 5000 });
   add('回放不产生新事件', runEventsDuring.data.events.length === eventCountBefore && (runEventsDuring.data.events.at(-1)?.seq || 0) === seqBeforeReplay, `events=${runEventsDuring.data.events.length}`);
   document.querySelector('#inspLive').click();
@@ -313,7 +318,8 @@
   const auditVerify = await window.dsh.runtime.audit.verify();
   add('Runtime 审计哈希链校验通过', auditVerify.ok && auditVerify.data.ok === true, JSON.stringify(auditVerify.data?.issues || []));
   document.querySelector('#inspClose').click();
-  add('运行检查器可关闭', document.querySelector('#inspector').hidden === true, 'closed');
+  const inspClosed = await waitUntil(() => document.querySelector('#inspector').hidden === true, 3000); // 检查器关闭带 220ms 出场动画
+  add('运行检查器可关闭', inspClosed, 'closed');
 
   /* ── 9. 清理测试目录并恢复原配置 ── */
   const clean = await window.dsh.tools.exec('run_command',

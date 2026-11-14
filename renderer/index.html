@@ -276,225 +276,328 @@
   </div>
 </div>
 
-<!-- API 接入 -->
-<div class="sheet" id="connectSheet" hidden>
-  <div class="sheet-head">
-    <div>
-      <h2>API 接入</h2>
-      <p>选择消息从哪里来。桌面端本身不带运行时，不需要本地装 Ubuntu 或 Node。</p>
+<!-- 设置：ZCode 式左导航 + 右内容全屏页（.arch-page 同范式）。
+     原三个 sheet（connectSheet/agentSheet/settingsSheet）的全部元素 ID 原样迁入对应 pane，
+     app.js 里的 $('#apiBaseUrl') 等绑定零改动。modelSheet 仍是独立浮层，叠加在本页之上。 -->
+<section class="settings-page" id="settingsPage" hidden aria-label="设置">
+  <header class="settings-top">
+    <div class="settings-head-main">
+      <h2>设置</h2>
+      <p id="settingsSubtitle">外观、对话、模型连接、工具权限与 Agent</p>
     </div>
-    <button class="icon-btn" data-close><svg class="ico"><use href="#i-close"/></svg></button>
-  </div>
+    <button class="icon-btn" id="settingsClose" title="关闭设置">
+      <svg class="ico"><use href="#i-close"/></svg>
+    </button>
+  </header>
 
-  <div class="seg source-seg" id="sourceSeg">
-    <button data-source="model" class="is-active">模型 API</button>
-    <button data-source="preview">离线预览</button>
-  </div>
+  <div class="settings-body">
+    <aside class="settings-nav" id="settingsNav">
+      <div class="settings-nav-group">设置</div>
+      <nav class="settings-nav-items">
+        <button class="settings-nav-item is-active" data-sp="appearance">
+          <svg class="ico"><use href="#i-palette"/></svg><span>外观</span>
+        </button>
+        <button class="settings-nav-item" data-sp="chat">
+          <svg class="ico"><use href="#i-read"/></svg><span>对话</span>
+        </button>
+        <button class="settings-nav-item" data-sp="connect">
+          <svg class="ico"><use href="#i-link"/></svg><span>模型与连接</span>
+        </button>
+        <button class="settings-nav-item" data-sp="tools">
+          <svg class="ico"><use href="#i-shield"/></svg><span>工具与权限</span>
+        </button>
+        <button class="settings-nav-item" data-sp="agents">
+          <svg class="ico"><use href="#i-users"/></svg><span>Agent</span>
+        </button>
+        <button class="settings-nav-item" data-sp="about">
+          <svg class="ico"><use href="#i-laptop"/></svg><span>关于</span>
+        </button>
+      </nav>
 
-  <div class="source-pane" id="paneModel">
-    <div class="field">
-      <label>连接 <span>（可保存多个 API 地址与 Key，随时切换）</span></label>
-      <div class="profiles" id="profileRow"></div>
-      <div class="profile-actions">
-        <button class="link-btn" id="addProfile" type="button">＋ 新建连接</button>
-        <button class="link-btn danger" id="deleteProfile" type="button">删除当前连接</button>
-      </div>
-    </div>
-    <div class="field">
-      <label for="apiProfileName">连接名称 <span>（用于区分多个连接）</span></label>
-      <input id="apiProfileName" placeholder="例如：公司网关" spellcheck="false" />
-    </div>
-    <div class="field">
-      <label for="apiBaseUrl">API 地址 <span>（OpenAI 兼容 /v1 端点）</span></label>
-      <input id="apiBaseUrl" placeholder="https://jinitai.zh.kg/v1" spellcheck="false" />
-    </div>
-    <div class="field">
-      <label for="apiKey">API Key <span>（仅保存在本机 localStorage）</span></label>
-      <input id="apiKey" type="password" placeholder="sk-…" spellcheck="false" autocomplete="off" />
-    </div>
-    <div class="field">
-      <label>模型 <span>（从上游列表选择，默认 gemini-3.8-flash）</span></label>
-      <button class="model-pick" id="openModelSheet">
-        <svg class="ico"><use href="#i-sparkle"/></svg>
-        <b id="apiModelName">gemini-3.8-flash</b>
-        <span id="apiModelCount">未获取列表</span>
-        <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
-      </button>
-    </div>
-    <button class="link-btn" id="resetApiCfg">恢复默认配置</button>
-
-    <div class="field tool-field">
-      <label>工具调用 <span>（默认启用：模型可读写文件、搜索、执行命令或联网，均在本机执行）</span></label>
-      <div class="tool-ws">
-        <small>工作目录</small>
-        <button class="ws-pick" id="pickWorkspace" type="button">
-          <svg class="ico"><use href="#i-folder"/></svg>
-          <span id="workspacePath">（默认：文档目录）</span>
+      <!-- 原 settingsSheet 里的三张入口卡：ID 与绑定原样保留，收进导航底部当快捷入口 -->
+      <div class="settings-nav-foot">
+        <button class="row-btn" id="openArch">
+          <span class="row-ico"><svg class="ico"><use href="#i-package"/></svg></span>
+          <span class="row-body"><b>项目架构</b><small>主控 Agent 与实时进度</small></span>
+          <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
+        </button>
+        <button class="row-btn" id="openAgents">
+          <span class="row-ico"><svg class="ico"><use href="#i-users"/></svg></span>
+          <span class="row-body"><b>Agent 管理</b><small id="agentsSummary">管理可委派的子 Agent</small></span>
+          <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
+        </button>
+        <button class="row-btn" id="openConnect">
+          <span class="row-ico"><svg class="ico"><use href="#i-link"/></svg></span>
+          <span class="row-body"><b>API 接入</b><small id="connSummary">未验证</small></span>
           <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
         </button>
       </div>
-      <p class="fine" id="toolsFine">加载中…</p>
-    </div>
-  </div>
+    </aside>
 
-  <div class="source-pane pane-note" id="paneDemo" hidden>
-    离线预览使用内置的示例会话数据回放界面效果，不发起任何网络请求，也不会调用模型。用于断网时检查布局与交互；真实对话请切回「模型 API」。
-  </div>
+    <div class="settings-content" id="settingsContent">
 
-  <div class="probe" id="probeResult" hidden></div>
-  <div class="sheet-foot">
-    <button class="btn ghost" id="probeBtn">测试连接</button>
-    <button class="btn primary" id="connectBtn">保存并启用</button>
-  </div>
-  <p class="fine" id="connectFine"></p>
-</div>
+      <!-- 外观 -->
+      <div class="settings-pane" id="paneAppearance">
+        <div class="sp-head">
+          <h3>外观</h3>
+          <p>深浅主题与六套强调色即时切换；视频壁纸只做纯色叠加，全程无模糊。</p>
+        </div>
 
-<!-- Agent 管理 -->
-<div class="sheet" id="agentSheet" hidden>
-  <div class="sheet-head">
-    <div><h2>Agent 管理</h2><p>新建、查看或归档可被委派的子 Agent</p></div>
-    <button class="icon-btn" data-close><svg class="ico"><use href="#i-close"/></svg></button>
-  </div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="sp-row-main">
+              <b>主题</b>
+              <small>深浅两套色阶独立校准，切换全局平滑过渡。</small>
+            </div>
+            <div class="seg" id="themeSeg">
+              <button data-theme="dark" class="is-active">深色</button>
+              <button data-theme="light">浅色</button>
+            </div>
+          </div>
+        </div>
 
-  <div class="group">
-    <div class="group-title">现有 Agent</div>
-    <div class="agent-list" id="agentList"><div class="fine">加载中…</div></div>
-  </div>
+        <div class="settings-card">
+          <div class="group-title">配色</div>
+          <div class="accents" id="accentRow">
+            <button class="accent" data-accent="mist" title="雾蓝"><i></i><span>雾蓝</span></button>
+            <button class="accent" data-accent="daiqing" title="黛青"><i></i><span>黛青</span></button>
+            <button class="accent" data-accent="dusk" title="暮紫"><i></i><span>暮紫</span></button>
+            <button class="accent" data-accent="turquoise" title="松石"><i></i><span>松石</span></button>
+            <button class="accent" data-accent="amber" title="琥珀"><i></i><span>琥珀</span></button>
+            <button class="accent" data-accent="graphite" title="石墨"><i></i><span>石墨</span></button>
+          </div>
+          <p class="fine">取自原应用 app/lib/ui/theme/accent.dart 的六套预设，明暗两套色阶各自独立。</p>
+        </div>
 
-  <div class="group">
-    <div class="group-title">新建 Agent</div>
-    <div class="field">
-      <label>名称</label>
-      <input id="agentName" placeholder="例如：研究助手" spellcheck="false" />
-    </div>
-    <div class="field">
-      <label>模型</label>
-      <div class="agent-model-row">
-        <select id="agentModelProfile" class="select"></select>
-        <select id="agentModel" class="select"></select>
+        <div class="settings-card">
+          <div class="group-title">视频壁纸</div>
+          <div class="wall-row">
+            <button class="btn ghost" id="pickWallpaper"><svg class="ico tiny"><use href="#i-film"/></svg><span>选择视频…</span></button>
+            <button class="btn soft" id="clearWallpaper">移除</button>
+          </div>
+          <p class="fine" id="wallpaperState">未设置 · 纯色界面，无模糊、无雾感</p>
+          <div class="wall-tint">
+            <label for="tintRange">视频压暗</label>
+            <input class="tint-range" type="range" id="tintRange" min="0" max="60" step="5" value="0" />
+            <output id="tintValue">0%</output>
+          </div>
+          <div class="wall-tint">
+            <label for="veilRange">面板厚度</label>
+            <input class="tint-range" type="range" id="veilRange" min="0" max="80" step="5" value="26" />
+            <output id="veilValue">26%</output>
+          </div>
+          <p class="fine">面板厚度同时控制侧栏、输入条与对话底板：越薄视频越清楚，越厚越容易读。全程只做纯色叠加与文字描边，不做任何模糊；两项都拖到 0% 时视频完全不被遮挡。</p>
+        </div>
       </div>
-      <p class="fine">由主 Agent 为子 Agent 选择模型；子 Agent 运行时会使用所选模型执行委派任务。</p>
-    </div>
-    <div class="field">
-      <label>系统提示</label>
-      <textarea id="agentPrompt" rows="3" placeholder="说明这个 Agent 擅长什么、如何工作。子 Agent 看不到父对话，提示应自包含。" spellcheck="false"></textarea>
-    </div>
-    <div class="field">
-      <label>权限档位</label>
-      <div class="seg" id="agentPermSeg">
-        <button data-agent-perm="ask" class="is-active">每次询问</button>
-        <button data-agent-perm="full">完全权限</button>
-        <button data-agent-perm="readonly">只读</button>
+
+      <!-- 对话 -->
+      <div class="settings-pane" id="paneChat" hidden>
+        <div class="sp-head">
+          <h3>对话</h3>
+          <p>自定义指令注入每一轮对话；网络类失败按指数退避自动重试。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">个性化提示词</div>
+          <div class="field">
+            <label for="customPromptInput">自定义指令 <span>（注入到每一轮对话，优先于默认行为）</span></label>
+            <textarea id="customPromptInput" rows="4" placeholder="例如：回答保持简短、多用列表；称呼我阿泽；代码注释用中文。" spellcheck="false"></textarea>
+          </div>
+          <button class="btn primary" id="saveCustomPrompt" type="button">保存提示词</button>
+          <p class="fine">保存后立即对新对话生效；也在聊天空态里点「个性化提示词」直达这里。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">自动重试</div>
+          <div class="settings-row">
+            <div class="sp-row-main">
+              <b>失败自动重试</b>
+              <small id="retryFine">限流、5xx、网关超时与网络中断会自动重试：2s → 4s → 8s 指数退避，服务端给了 Retry-After 就按它等；参数错误与鉴权失败不重试。</small>
+            </div>
+            <div class="seg" id="retrySeg">
+              <button data-retries="0">关闭</button>
+              <button data-retries="2">2 次</button>
+              <button data-retries="3" class="is-active">3 次</button>
+              <button data-retries="5">5 次</button>
+            </div>
+          </div>
+        </div>
       </div>
-      <p class="fine">子 Agent 的实际权限还会被父级权限收窄，不能超过发起委派的 Agent。</p>
+
+      <!-- 模型与连接（原 connectSheet） -->
+      <div class="settings-pane" id="paneConnect" hidden>
+        <div class="sp-head">
+          <h3>API 接入</h3>
+          <p>桌面端本身不带运行时，不需要本地装 Ubuntu 或 Node；模型 API 走 OpenAI 兼容 /v1 端点。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="seg source-seg" id="sourceSeg">
+            <button data-source="model" class="is-active">模型 API</button>
+            <button data-source="preview">离线预览</button>
+          </div>
+
+          <div class="source-pane" id="paneModel">
+            <div class="field">
+              <label>连接 <span>（可保存多个 API 地址与 Key，随时切换）</span></label>
+              <div class="profiles" id="profileRow"></div>
+              <div class="profile-actions">
+                <button class="link-btn" id="addProfile" type="button">＋ 新建连接</button>
+                <button class="link-btn danger" id="deleteProfile" type="button">删除当前连接</button>
+              </div>
+            </div>
+            <div class="field">
+              <label for="apiProfileName">连接名称 <span>（用于区分多个连接）</span></label>
+              <input id="apiProfileName" placeholder="例如：公司网关" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label for="apiBaseUrl">API 地址 <span>（OpenAI 兼容 /v1 端点）</span></label>
+              <input id="apiBaseUrl" placeholder="https://jinitai.zh.kg/v1" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label for="apiKey">API Key <span>（仅保存在本机 localStorage）</span></label>
+              <input id="apiKey" type="password" placeholder="sk-…" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label>模型 <span>（从上游列表选择，默认 gemini-3.8-flash）</span></label>
+              <button class="model-pick" id="openModelSheet">
+                <svg class="ico"><use href="#i-sparkle"/></svg>
+                <b id="apiModelName">gemini-3.8-flash</b>
+                <span id="apiModelCount">未获取列表</span>
+                <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
+              </button>
+            </div>
+            <button class="link-btn" id="resetApiCfg">恢复默认配置</button>
+          </div>
+
+          <div class="source-pane pane-note" id="paneDemo" hidden>
+            离线预览使用内置的示例会话数据回放界面效果，不发起任何网络请求，也不会调用模型。用于断网时检查布局与交互；真实对话请切回「模型 API」。
+          </div>
+
+          <div class="probe" id="probeResult" hidden></div>
+          <div class="sheet-foot">
+            <button class="btn ghost" id="probeBtn">测试连接</button>
+            <button class="btn primary" id="connectBtn">保存并启用</button>
+          </div>
+          <p class="fine" id="connectFine"></p>
+        </div>
+      </div>
+
+      <!-- 工具与权限 -->
+      <div class="settings-pane" id="paneTools" hidden>
+        <div class="sp-head">
+          <h3>工具与权限</h3>
+          <p>工具始终在本机执行，只需选择工作目录；权限档位在聊天左下角切换。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="field tool-field">
+            <label>工具调用 <span>（默认启用：模型可读写文件、搜索、执行命令或联网，均在本机执行）</span></label>
+            <div class="tool-ws">
+              <small>工作目录</small>
+              <button class="ws-pick" id="pickWorkspace" type="button">
+                <svg class="ico"><use href="#i-folder"/></svg>
+                <span id="workspacePath">（默认：文档目录）</span>
+                <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
+              </button>
+            </div>
+            <p class="fine" id="toolsFine">加载中…</p>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">权限级别</div>
+          <div class="settings-row">
+            <div class="sp-row-main">
+              <b>当前权限档位</b>
+              <small>文件读写与命令执行的放行策略；点聊天左下角的「权限级别」按钮随时切换。</small>
+            </div>
+            <span class="perm-value" id="permSettingValue">完全权限</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Agent（原 agentSheet） -->
+      <div class="settings-pane" id="paneAgents" hidden>
+        <div class="sp-head">
+          <h3>Agent 管理</h3>
+          <p>子 Agent 看不到父对话，系统提示应自包含；实际权限被父级收窄。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">现有 Agent</div>
+          <div class="agent-list" id="agentList"><div class="fine">加载中…</div></div>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">新建 Agent</div>
+          <div class="field">
+            <label>名称</label>
+            <input id="agentName" placeholder="例如：研究助手" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label>模型</label>
+            <div class="agent-model-row">
+              <select id="agentModelProfile" class="select"></select>
+              <select id="agentModel" class="select"></select>
+            </div>
+            <p class="fine">由主 Agent 为子 Agent 选择模型；子 Agent 运行时会使用所选模型执行委派任务。</p>
+          </div>
+          <div class="field">
+            <label>系统提示</label>
+            <textarea id="agentPrompt" rows="3" placeholder="说明这个 Agent 擅长什么、如何工作。子 Agent 看不到父对话，提示应自包含。" spellcheck="false"></textarea>
+          </div>
+          <div class="field">
+            <label>权限档位</label>
+            <div class="seg" id="agentPermSeg">
+              <button data-agent-perm="ask" class="is-active">每次询问</button>
+              <button data-agent-perm="full">完全权限</button>
+              <button data-agent-perm="readonly">只读</button>
+            </div>
+            <p class="fine">子 Agent 的实际权限还会被父级权限收窄，不能超过发起委派的 Agent。</p>
+          </div>
+          <button class="btn primary" id="agentCreate">创建 Agent</button>
+          <p class="fine" id="agentFine"></p>
+        </div>
+      </div>
+
+      <!-- 关于（原 settingsSheet 尾部 + 运行环境静态行） -->
+      <div class="settings-pane" id="paneAbout" hidden>
+        <div class="sp-head">
+          <h3>关于</h3>
+          <p>复刻 dsh-go 1.0.15 的界面语言，对话直接交给外部模型 API。</p>
+        </div>
+
+        <div class="settings-card about">
+          <div class="group-title">关于</div>
+          <p>DSH Desktop 0.1.0 · 复刻自 dsh-go 1.0.15 的界面语言</p>
+          <p class="fine">原应用的业务逻辑跑在打包进 APK 的 proot Ubuntu + Node 里；桌面端去掉这一层，直接把对话交给外部模型 API。模型列表与对话都走上游真实接口。</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="group-title">运行环境</div>
+          <div class="settings-row">
+            <div class="sp-row-main"><b>平台</b></div>
+            <span class="sp-mono" id="sysPlatform">—</span>
+          </div>
+          <div class="settings-row">
+            <div class="sp-row-main"><b>Electron</b></div>
+            <span class="sp-mono" id="sysElectron">—</span>
+          </div>
+          <div class="settings-row">
+            <div class="sp-row-main"><b>Chromium</b></div>
+            <span class="sp-mono" id="sysChrome">—</span>
+          </div>
+          <div class="settings-row">
+            <div class="sp-row-main"><b>Node</b></div>
+            <span class="sp-mono" id="sysNode">—</span>
+          </div>
+        </div>
+      </div>
+
     </div>
-    <button class="btn primary" id="agentCreate">创建 Agent</button>
-    <p class="fine" id="agentFine"></p>
   </div>
-</div>
-
-<!-- 设置 -->
-<div class="sheet" id="settingsSheet" hidden>
-  <div class="sheet-head">
-    <div><h2>设置</h2><p>外观、壁纸、重试与关于</p></div>
-    <button class="icon-btn" data-close><svg class="ico"><use href="#i-close"/></svg></button>
-  </div>
-
-  <div class="group">
-    <div class="group-title">个性化提示词</div>
-    <div class="field">
-      <label for="customPromptInput">自定义指令 <span>（注入到每一轮对话，优先于默认行为）</span></label>
-      <textarea id="customPromptInput" rows="4" placeholder="例如：回答保持简短、多用列表；称呼我阿泽；代码注释用中文。" spellcheck="false"></textarea>
-    </div>
-    <button class="btn primary" id="saveCustomPrompt" type="button">保存提示词</button>
-    <p class="fine">保存后立即对新对话生效；也在聊天空态里点「个性化提示词」直达这里。</p>
-  </div>
-
-  <div class="group">
-    <div class="group-title">外观</div>
-    <div class="seg" id="themeSeg">
-      <button data-theme="dark" class="is-active">深色</button>
-      <button data-theme="light">浅色</button>
-    </div>
-  </div>
-
-  <div class="group">
-    <div class="group-title">配色</div>
-    <div class="accents" id="accentRow">
-      <button class="accent" data-accent="mist" title="雾蓝"><i></i><span>雾蓝</span></button>
-      <button class="accent" data-accent="daiqing" title="黛青"><i></i><span>黛青</span></button>
-      <button class="accent" data-accent="dusk" title="暮紫"><i></i><span>暮紫</span></button>
-      <button class="accent" data-accent="turquoise" title="松石"><i></i><span>松石</span></button>
-      <button class="accent" data-accent="amber" title="琥珀"><i></i><span>琥珀</span></button>
-      <button class="accent" data-accent="graphite" title="石墨"><i></i><span>石墨</span></button>
-    </div>
-    <p class="fine">取自原应用 app/lib/ui/theme/accent.dart 的六套预设，明暗两套色阶各自独立。</p>
-  </div>
-
-  <div class="group">
-    <div class="group-title">视频壁纸</div>
-    <div class="wall-row">
-      <button class="btn ghost" id="pickWallpaper"><svg class="ico tiny"><use href="#i-film"/></svg><span>选择视频…</span></button>
-      <button class="btn soft" id="clearWallpaper">移除</button>
-    </div>
-    <p class="fine" id="wallpaperState">未设置 · 纯色界面，无模糊、无雾感</p>
-    <div class="wall-tint">
-      <label for="tintRange">视频压暗</label>
-      <input class="tint-range" type="range" id="tintRange" min="0" max="60" step="5" value="0" />
-      <output id="tintValue">0%</output>
-    </div>
-    <div class="wall-tint">
-      <label for="veilRange">面板厚度</label>
-      <input class="tint-range" type="range" id="veilRange" min="0" max="80" step="5" value="26" />
-      <output id="veilValue">26%</output>
-    </div>
-    <p class="fine">面板厚度同时控制侧栏、输入条与对话底板：越薄视频越清楚，越厚越容易读。全程只做纯色叠加与文字描边，不做任何模糊；两项都拖到 0% 时视频完全不被遮挡。</p>
-  </div>
-
-  <div class="group">
-    <div class="group-title">自动重试</div>
-    <div class="seg" id="retrySeg">
-      <button data-retries="0">关闭</button>
-      <button data-retries="2">2 次</button>
-      <button data-retries="3" class="is-active">3 次</button>
-      <button data-retries="5">5 次</button>
-    </div>
-    <p class="fine" id="retryFine">限流、5xx、网关超时与网络中断会自动重试：2s → 4s → 8s 指数退避，服务端给了 Retry-After 就按它等；参数错误与鉴权失败不重试。</p>
-  </div>
-
-  <div class="group">
-    <div class="group-title">项目</div>
-    <button class="row-btn" id="openArch">
-      <span class="row-ico"><svg class="ico"><use href="#i-package"/></svg></span>
-      <span class="row-body"><b>项目架构</b><small>主控 Agent、分层模块与实时进度</small></span>
-      <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
-    </button>
-  </div>
-
-  <div class="group">
-    <div class="group-title">Agent</div>
-    <button class="row-btn" id="openAgents">
-      <span class="row-ico"><svg class="ico"><use href="#i-users"/></svg></span>
-      <span class="row-body"><b>Agent 管理</b><small id="agentsSummary">管理可委派的子 Agent</small></span>
-      <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
-    </button>
-  </div>
-
-  <div class="group">
-    <div class="group-title">连接</div>
-    <button class="row-btn" id="openConnect">
-      <span class="row-ico"><svg class="ico"><use href="#i-link"/></svg></span>
-      <span class="row-body"><b>API 接入</b><small id="connSummary">未验证</small></span>
-      <svg class="ico tiny"><use href="#i-chevron-right"/></svg>
-    </button>
-  </div>
-
-  <div class="group about">
-    <div class="group-title">关于</div>
-    <p>DSH Desktop 0.1.0 · 复刻自 dsh-go 1.0.15 的界面语言</p>
-    <p class="fine">原应用的业务逻辑跑在打包进 APK 的 proot Ubuntu + Node 里；桌面端去掉这一层，直接把对话交给外部模型 API。模型列表与对话都走上游真实接口。</p>
-  </div>
-</div>
+</section>
 
 <!-- 独立项目架构页：主控 Agent + 分层模块图 + 实时状态 -->
 <section class="arch-page" id="archPage" hidden aria-label="项目架构">
