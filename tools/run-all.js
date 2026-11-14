@@ -84,10 +84,16 @@ function killTree(child) {
   } catch { /* 进程可能已退出 */ }
 }
 
+/* 宿主环境可能设置 ELECTRON_RUN_AS_NODE=1（部分 agent/IDE 运行时如此），
+   会让 electron.exe 退化成纯 Node 进程：main.js 里 require('electron').app 为 undefined
+   → 启动即崩 → 全部 Electron 探针假失败（"无 [script] 输出"）。统一剥离后再spawn。 */
+const CLEAN_ENV = { ...process.env };
+delete CLEAN_ENV.ELECTRON_RUN_AS_NODE;
+
 /** 跑一个命令并限时；返回 {code, stdout, stderr, timedOut} */
 function run(cmd, args, { timeoutMs = 60000, cwd = ROOT } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, windowsHide: true, env: process.env });
+    const child = spawn(cmd, args, { cwd, windowsHide: true, env: CLEAN_ENV });
     let stdout = '', stderr = '', timedOut = false, settled = false;
     const timer = setTimeout(() => { timedOut = true; killTree(child); }, timeoutMs);
     child.stdout.on('data', (d) => { stdout += d; });
@@ -157,6 +163,10 @@ async function runElectronProbe(script, { timeoutMs = 120000, fresh = true, clea
   if (errLine) return { fail: errLine.slice('[script-error] '.length).slice(0, 300), raw: r };
   const line = r.stdout.split(/\r?\n/).find((l) => l.startsWith('[script] '));
   if (!line) {
+    const blob = (r.stdout || '') + (r.stderr || '');
+    if (/disableHardwareAcceleration|ELECTRON_RUN_AS_NODE/.test(blob)) {
+      return { fail: 'electron 被当成纯 Node 运行（ELECTRON_RUN_AS_NODE 污染），非代码问题：用 env -u ELECTRON_RUN_AS_NODE 重跑', raw: r };
+    }
     return { fail: '无 [script] 输出（页面未加载完或脚本 promise 未决，见 docs/e2e-guide.md）', raw: r };
   }
   let obj;
