@@ -183,6 +183,28 @@ function handleChat(body, res) {
     return;
   }
 
+  // [[slow]] 分片慢流：纯文本、无工具调用，按 130ms 一片慢慢吐——
+  // 供会话级并行探针（g5-probe.js）断言「后台会话的 draft.body 持续增长」。
+  // 总时长 ≈ chunks × 130ms；不支持并发复用同一连接（每请求独立 setInterval）。
+  if (String(userText).includes('[[slow')) {
+    const chunks = 60;
+    let i = 0;
+    const timer = setInterval(() => {
+      i += 1;
+      sse(res, { choices: [{ index: 0, delta: { content: `后台分片 ${i}。` } }] });
+      if (i >= chunks) {
+        clearInterval(timer);
+        sse(res, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+        sse(res, { usage: { prompt_tokens: 12, completion_tokens: 260, total_tokens: 272 } });
+        res.write('data: [DONE]\n\n');
+        res.end();
+      }
+    }, 130);
+    // 客户端提前断开（超时/中断）时停表，避免句柄泄漏
+    res.on('close', () => clearInterval(timer));
+    return;
+  }
+
   if (isTodoUpdate) {
     return streamToolCall(res, 'todo_write', { tasks: TODO_INITIAL });
   }

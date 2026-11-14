@@ -445,6 +445,54 @@ input.tint-range::-webkit-slider-thumb {
   font-weight: 600;
 }
 
+/* ───────── 会话级并行：「N 个会话运行中」轻提示 ─────────
+   与侧栏会话行的 .s-spin（1.7s 脉冲）、顶栏 .dot.live（1.8s 心跳）刻意差异化：
+   用 2.6s 慢呼吸 + 轻微缩放，一眼区分「全局活动」和「这条会话在跑」。 */
+.running-pill {
+  display: flex; align-items: center; gap: 8px;
+  margin: 2px 1px 6px; padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--fill);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 140ms ease, color 140ms ease;
+}
+.running-pill:hover { background: var(--fill-hover); color: var(--text); }
+.running-pill .rp-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+  animation: rp-breathe 2.6s ease-in-out infinite;
+}
+@keyframes rp-breathe {
+  0%, 100% { opacity: 0.4; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+/* reduced-motion 兜底：全局规则已把动画时长压到 0.01ms，这里再把呼吸的中间态
+   显式钉回常亮，保证静态呈现也完整可读 */
+@media (prefers-reduced-motion: reduce) {
+  .running-pill .rp-dot { animation: none; opacity: 1; transform: none; }
+}
+/* 运行中会话列表菜单项：状态点 + 会话名 + 状态词（横向一行；基类 .menu-item 是纵向堆叠） */
+#runningMenu { min-width: 220px; }
+#runningMenu .menu-item { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+#runningMenu .rm-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); flex: none;
+  animation: rp-breathe 2.6s ease-in-out infinite;
+}
+#runningMenu .rm-dot.wait { background: var(--warn); animation: none; }
+#runningMenu .rm-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  #runningMenu .rm-dot { animation: none; opacity: 1; }
+}
+
 .sessions {
   flex: 1; min-height: 0;
   overflow-y: auto; overflow-x: hidden;
@@ -3169,4 +3217,45 @@ input.tint-range::-webkit-slider-thumb {
   .doctor-item, .doctor-item.is-warn .doctor-ico, .doctor-item.is-fail .doctor-ico,
   .todo-dot.blocked { animation: none !important; }
   .doctor-bar-fill { transition: none; }
+}
+
+/* ═════════ Motion Tokens（Emil 体系：曲线按用途分层，进场弹簧/退场收束/微交互利落）═════════
+   审计结论（2026-11-14）：无 transition:all；3 处布局过渡均为内容重排类正当例外（tools 折叠/inspector 让位/retry 宽度）；
+   缺口 = 曲线只有一条弹簧被全场景混用。以下令牌逐步retrofit，新增动效一律引用令牌。 */
+:root {
+  --ease-spring: cubic-bezier(.22, 1.15, .36, 1);   /* 进场/弹入（原 --ease-lively 别名） */
+  --ease-exit: cubic-bezier(.4, 0, 1, 1);            /* 退场：收束不弹跳 */
+  --ease-out-soft: cubic-bezier(.2, .9, .3, 1);      /* 微交互/hover */
+  --dur-fast: 130ms;                                 /* 微交互：hover/按压/焦点 */
+  --dur-base: 200ms;                                 /* 常规：面板/行内 */
+  --dur-slow: 280ms;                                 /* 大面：sheet/页面 */
+}
+
+/* Origin-aware 菜单：从锚点方向长出来，而不是从自身中心冒出 */
+.menu { transform-origin: top left; }
+.menu.is-flipped-y { transform-origin: bottom left; }
+.menu.is-flipped-x { transform-origin: top right; }
+
+/* 按压反馈：可点元素按下微缩（transform 合成层，零重排） */
+.btn:active, button:active:not(.win-btn):not(.no-press), .menu-item:active, .suggest:active, .chip:active {
+  transform: scale(.97);
+}
+.btn, button, .menu-item, .suggest, .chip, .session, .tool, .profile, .ws-pick, .model-pick {
+  transition: transform var(--dur-fast) var(--ease-out-soft), background var(--dur-fast) ease, color var(--dur-fast) ease, border-color var(--dur-fast) ease, opacity var(--dur-fast) ease;
+}
+
+/* 键盘焦点环：可访问性 + 一致性（此前只有零散 outline） */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* 退场动画统一收束曲线（覆盖此前散落的 ease） */
+.sheet.is-closing { animation-timing-function: var(--ease-exit); }
+.menu.is-closing { animation-timing-function: var(--ease-exit); }
+.inspector.is-closing { animation-timing-function: var(--ease-exit); }
+
+@media (prefers-reduced-motion: reduce) {
+  .btn:active, button:active:not(.win-btn):not(.no-press), .menu-item:active, .suggest:active, .chip:active { transform: none; }
 }

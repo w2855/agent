@@ -93,6 +93,11 @@
       <button class="chip" data-filter="unread">未读</button>
     </div>
 
+    <!-- 会话级并行：N 个会话运行中的轻提示。A 会话跑任务时切走也不丢进度；点击展开可切换列表 -->
+    <button class="running-pill" id="runningPill" hidden title="有会话正在后台生成，点击查看">
+      <i class="rp-dot"></i><span id="runningPillText">0 个会话运行中</span>
+    </button>
+
     <div class="sessions" id="sessions"></div>
 
     <div class="side-foot">
@@ -255,6 +260,9 @@
   <button class="menu-item" data-mode="queue"><span>排队</span><small>等本轮结束后再发</small></button>
   <button class="menu-item" data-mode="steer"><span>插话</span><small>打断当前步骤，改走新指令</small></button>
 </div>
+
+<!-- 运行中会话列表（由「N 个会话运行中」轻提示展开；列表动态填充） -->
+<div class="menu" id="runningMenu" hidden></div>
 
 <div class="menu slash" id="slashMenu" hidden>
   <div class="menu-title">命令</div>

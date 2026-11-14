@@ -133,8 +133,11 @@ const state = {
      （新装体验最好），已存过 dark/light 的老用户保持原选择不动。 */
   theme: ['system', 'light', 'dark'].includes(readStorage('dsh.theme2', 'system')) ? readStorage('dsh.theme2', 'system') : 'system',
   accent: ACCENTS.includes(readStorage('dsh.accent', 'mist')) ? readStorage('dsh.accent', 'mist') : 'mist',
-  pending: null,
-  pendingTurn: null,
+  /* 会话级并行：排队 / 插话按会话隔离（sessionId → 文本）。
+     旧全局 state.pending/state.pendingTurn 已移除——多会话并行后单一全局值会把
+     A 会话的插话串到 B 会话的收尾上。 */
+  pendingTurns: new Map(),
+  pendingQueue: new Map(),
   permission: ['full', 'ask', 'readonly'].includes(readStorage('dsh.perm', 'full')) ? readStorage('dsh.perm', 'full') : 'full',
   attachments: [],
   compacted: new Map(),
@@ -187,8 +190,30 @@ const state = {
   skills: { items: [], scanning: false, error: '', expandedId: '' },
 };
 
-/** 等待用户审批的工具调用：msgId -> { resolve, draft, node } */
+/** 等待用户审批的工具调用：msgId -> { resolve, draft, node, sessionId } */
 const approvalWaiters = new Map();
+
+/* ───────── 会话级并行：每会话独立回合控制 ─────────
+   sessionTurnCtl：sessionId → { stopRequested, repaint }。
+   stopRequested 不再是全局开关——中断 A 会话绝不能波及正在运行的 B 会话；
+   repaint 供 renderChat 在切回会话重建节点后恢复流式更新（reattach）。
+   sessionStepId：sessionId → 该会话当前 requestStep 的 id，主进程 abort 精确定位用。
+   旧 state.activeTurnId 保留（指向最近一次模型请求），旧探针仍在读。 */
+const sessionTurnCtl = new Map();
+const sessionStepId = new Map();
+
+/** 该会话是否有进行中的回合（running=生成中，pending=等待审批）。 */
+function sessionBusy(id) {
+  const s = state.sessions.find((x) => x.id === id);
+  if (!s) return false;
+  return s.state === 'running' || s.state === 'pending';
+}
+
+/* 全局 state.busy 现在是「活跃会话忙」的派生值：只喂给仍依赖它的旧 UI 展示。
+   所有行为守卫一律走 sessionBusy(具体会话)，不再读 state.busy。 */
+function syncBusyFlag() {
+  state.busy = sessionBusy(state.activeId);
+}
 
 /* 审批弹窗串行化：并行 delegate_task 各自等待确认时，一次只显示一个审批卡片 */
 let approvalLock = Promise.resolve();
@@ -466,6 +491,10 @@ function sessionMatches(s) {
 }
 
 function renderSessions() {
+  // 任何会话状态变化（开始/结束/切活跃）都会走到这里：顺手校准「活跃会话忙」派生值，
+  // 并刷新「N 个会话运行中」轻提示
+  syncBusyFlag();
+  renderRunningPill();
   const box = $('#sessions');
   const q = state.query.trim().toLowerCase();
   const list = state.sessions.filter((s) => {
@@ -503,13 +532,43 @@ function renderSessions() {
   box.innerHTML = html;
 }
 
+/* ─────────「N 个会话运行中」轻提示（会话级并行） ─────────
+   侧栏过滤条下方的常驻 pill：0 个运行中时隐藏；点击展开运行中会话列表，
+   点列表项直接切过去（只读旁观或接管都行）。 */
+const runningSessions = () => state.sessions.filter((s) => s.state === 'running' || s.state === 'pending');
+
+function renderRunningPill() {
+  const pill = $('#runningPill');
+  if (!pill) return;
+  const running = runningSessions();
+  pill.hidden = running.length === 0;
+  const text = $('#runningPillText');
+  if (text) text.textContent = running.length === 1 ? '1 个会话运行中' : `${running.length} 个会话运行中`;
+  const menu = $('#runningMenu');
+  if (menu && !menu.hidden) renderRunningMenu();
+}
+
+function renderRunningMenu() {
+  const menu = $('#runningMenu');
+  if (!menu) return;
+  const running = runningSessions();
+  menu.innerHTML = running.length
+    ? `<div class="menu-title">运行中的会话</div>` + running.map((s) => `
+      <button class="menu-item" data-goto-session="${esc(s.id)}">
+        <span class="rm-dot${s.state === 'pending' ? ' wait' : ''}"></span>
+        <span class="rm-name">${esc(s.title || '新对话')}</span>
+        <small>${s.state === 'running' ? '生成中' : '待确认'}</small>
+      </button>`).join('')
+    : '<div class="menu-title">没有运行中的会话</div>';
+}
+
 /* 会话删除：两段确认（3 秒内再点一次），运行中的会话不可删 */
 const deleteArmed = new Set();
 function deleteSession(id) {
   const s = state.sessions.find((x) => x.id === id);
   if (!s) return;
   if (s.state === 'running' || s.state === 'pending') { toast('该会话正在运行，结束后才能删除'); return; }
-  if (s.id === state.activeId && state.busy) { toast('生成中不能删除当前会话'); return; }
+  if (sessionBusy(s.id)) { toast('该会话正在生成，结束后才能删除'); return; }
   if (!deleteArmed.has(id)) {
     deleteArmed.add(id);
     setTimeout(() => { if (deleteArmed.delete(id)) renderSessions(); }, 3000);
@@ -553,9 +612,10 @@ function renderHeader() {
   }
   const label = sourceOf() === 'model' ? currentModel() : '离线预览';
   $('#modelName').textContent = label;
-  const running = s.state === 'running';
-  $('#subtitle').textContent = `${label} · ${state.busy || running ? '生成中' : '就绪'}`;
-  $('#titleDot').className = 'dot' + (state.busy || running ? ' live' : ' ok');
+  // 忙碌按当前会话判定：其他会话在后台运行不改变这里的状态点
+  const live = sessionBusy(s.id);
+  $('#subtitle').textContent = `${label} · ${live ? '生成中' : '就绪'}`;
+  $('#titleDot').className = 'dot' + (live ? ' live' : ' ok');
   const goalEl = $('#goalLine');
   if (goalEl) {
     if (s.goal?.trim()) {
@@ -836,22 +896,37 @@ function stableBoundary(src) {
 }
 
 // 两条流式路径共用：稳定块落 div.md-stable（边界推进时才重解析），活动尾落 div.md-live（每帧只解析小段），光标常驻不重建
+// 会话级并行：mount() 支持把 painter 重挂到重建后的 prose 元素（切走再切回时 renderChat 会整棵重建 DOM）
 function createStreamPainter(prose) {
-  const stableEl = document.createElement('div');
-  stableEl.className = 'md-stable';
-  const liveEl = document.createElement('div');
-  liveEl.className = 'md-live';
-  const caret = document.createElement('span');
-  caret.className = 'caret';
-  prose.replaceChildren(stableEl, liveEl, caret);
+  let curProse = prose;
+  let stableEl = null;
+  let liveEl = null;
   let stableLen = -1;
   let lastTailPaint = 0;
+  const mount = (target) => {
+    if (!target || target === curProse) return false;
+    curProse = target;
+    stableEl = document.createElement('div');
+    stableEl.className = 'md-stable';
+    liveEl = document.createElement('div');
+    liveEl.className = 'md-live';
+    const caret = document.createElement('span');
+    caret.className = 'caret';
+    target.replaceChildren(stableEl, liveEl, caret);
+    stableLen = -1; // 重建后整段重绘一次：stable 边界重算 + 已有正文一次成型
+    lastTailPaint = 0;
+    return true;
+  };
+  mount(prose);
   return {
+    mount,
     // 首个 token 到达前的思考指示（三点波浪），第一个 paint 自然把它冲掉
     think() {
-      liveEl.innerHTML = '<span class="thinking"><i></i><i></i><i></i></span>';
+      if (liveEl) liveEl.innerHTML = '<span class="thinking"><i></i><i></i><i></i></span>';
     },
     paint(body) {
+      // 会话切走时节点已不在 DOM：数据由调用方写进 draft，这里静默跳过，不写悬空元素
+      if (!curProse || !curProse.isConnected) return;
       const cut = stableBoundary(body);
       if (cut !== stableLen) {
         stableEl.innerHTML = markdown(body.slice(0, cut));
@@ -871,6 +946,12 @@ function createStreamPainter(prose) {
       }
     },
   };
+}
+
+/* 流式消息节点定位：按 data-msg-id 在当前 DOM 里找（切会话重建后 id 不变） */
+function liveDraftNode(draft) {
+  const node = document.querySelector(`[data-msg-id="${CSS.escape(String(draft.id || ''))}"]`);
+  return node && node.isConnected ? node : null;
 }
 
 /* ───────── 消息渲染 ───────── */
@@ -1039,14 +1120,30 @@ function summaryText(sm) {
   return `<span>${ico(icon)}${esc(sm.label)}</span>${tail}`;
 }
 
+/* 收尾附言（指标行 / 中断续跑 / 失败重试）从消息数据投影：
+   旧实现只在 finish() 里往当时的节点插 DOM，切会话重建节点后会丢按钮——这里改为数据驱动 */
+function msgTailHtml(msg) {
+  if (!msg || msg.role !== 'assistant' || !msg.finishedAt) return '';
+  const parts = [];
+  if (msg.metrics) parts.push(`<div class="metrics">${esc(msg.metrics)} ${ico('i-chevron-right', 'ico tiny')}</div>`);
+  if (msg.aborted && msg.resumeFrom) {
+    parts.push('<div class="resume-row"><span>本轮已中断</span><button class="link-strong" data-resume>继续</button></div>');
+  } else if (msg.error) {
+    parts.push('<div class="resume-row"><span>本轮调用失败</span><button class="link-strong" data-resume>重试</button></div>');
+  }
+  return parts.join('');
+}
+
 function assistantNode(msg) {
   const node = document.createElement('div');
   node.className = 'msg assistant';
   node.dataset.msgId = registerMsg(msg);
 
   const hasTools = !!(msg.tools && msg.tools.length);
-  const summaryCls = hasTools ? 'summary' : 'summary collapsed';
-  const toolsCls = hasTools ? 'tools' : 'tools hidden';
+  // toolsCollapsed：流式回合里自动/手动收起的状态记在消息数据上，切会话重建节点后不丢
+  const collapsed = hasTools && msg.toolsCollapsed === true;
+  const summaryCls = hasTools && !collapsed ? 'summary' : 'summary collapsed';
+  const toolsCls = hasTools && !collapsed ? 'tools' : 'tools hidden';
   node.innerHTML = `
     <button class="${summaryCls}" ${hasTools ? '' : 'data-empty="1"'}>
       ${summaryText(msg.summary)}
@@ -1058,7 +1155,7 @@ function assistantNode(msg) {
     <div class="slot-approval">${approvalCard(msg.approval)}</div>
     <div class="prose"></div>
     <div class="slot-files">${filesCard(msg.files)}</div>
-    <div class="slot-metrics">${msg.metrics ? `<div class="metrics">${esc(msg.metrics)} ${ico('i-chevron-right', 'ico tiny')}</div>` : ''}</div>
+    <div class="slot-metrics">${msgTailHtml(msg)}</div>
     <div class="msg-actions"><button data-copy-msg title="复制全文"><svg class="ico tiny"><use href="#i-copy"/></svg></button></div>
   `;
 
@@ -1074,6 +1171,7 @@ function assistantNode(msg) {
     summary.classList.toggle('collapsed', tools.classList.contains('hidden'));
     // 标记用户手动操作过折叠区：流式回合中 runApiTurn 的自动收起据此跳过（ZCode 规则）
     node.dataset.toolsTouched = '1';
+    msg.toolsCollapsed = tools.classList.contains('hidden');
   });
   return node;
 }
@@ -1144,6 +1242,10 @@ function renderChat() {
     inner.appendChild(node);
   }
   scrollToBottom(true);
+  // 会话级并行 reattach：切回运行中的会话时 DOM 已整棵重建，
+  // 把流式 painter 重挂到新节点（painter.mount 重置稳定边界并按 draft.body 一次成型）
+  const liveCtl = sessionTurnCtl.get(s.id);
+  if (liveCtl?.repaint) liveCtl.repaint();
   refreshFindHitsIfOpen(); // 切会话等整段重绘后，旧 Range 已失效，补一次重建
 }
 
@@ -1205,7 +1307,8 @@ function restoreDraft() {
 }
 
 function selectSession(id) {
-  if (state.busy) { toast('请先结束当前回合再切换会话'); return; }
+  /* 会话级并行：切换会话不再被 busy 锁死——A 会话跑任务时可以自由切到 B 会话。
+     流式节点失联由 renderChat 里的 reattach（ctl.repaint）恢复。 */
   if (!state.sessions.some((s) => s.id === id)) return;
   state.activeId = id;
   saveSessions();
@@ -1221,11 +1324,12 @@ function selectSession(id) {
   renderHeader();
   renderTodoPanel();
   renderChat();
+  syncQueueBanner(); // 排队横幅按当前会话重建（排队数据已按会话隔离）
   if (state.projectOpen) { archSessionState(); renderArchPage(); }
 }
 
 function newChat() {
-  if (state.busy) { toast('请先结束当前回合再新建会话'); return; }
+  /* 会话级并行：其他会话在跑也允许新建——新会话是独立回合空间 */
   const id = (sourceOf() === 'model' ? 'm-' : 'p-') + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
   state.sessions.unshift({
     id, title: '新对话', group: '今天', state: 'idle', filter: [], messages: [],
@@ -1242,6 +1346,7 @@ function newChat() {
   renderSessions();
   renderHeader();
   renderChat();
+  syncQueueBanner();
   $('#input').focus();
   toast('已新建会话');
   if (state.projectOpen) { archSessionState(); renderArchPage(); }
@@ -1249,7 +1354,8 @@ function newChat() {
 
 function switchSource(next) {
   if (next === sourceOf()) return;
-  if (state.busy) { toast('请先结束当前回合再切换来源'); return; }
+  /* 跨来源切换仍拒绝：来源切换整体替换会话列表（数据结构不同），任何会话在跑都不放行 */
+  if (state.sessions.some((x) => sessionBusy(x.id))) { toast('有会话正在生成，请先结束再切换来源'); return; }
   saveSessions();
   const cached = state.cache[next];
   const saved = loadSavedSessions(next);
@@ -1259,8 +1365,8 @@ function switchSource(next) {
     ? restored.activeId : state.sessions[0].id;
   state.cache[next] = { sessions: state.sessions, activeId: state.activeId };
   saveSessions();
-  state.pending = null;
-  state.pendingTurn = null;
+  state.pendingTurns.clear();
+  state.pendingQueue.clear();
   $('#queue').hidden = true;
   state.attachments = [];
   renderAttachments();
@@ -1461,20 +1567,25 @@ function scheduleStatusline() {
 
 /* ───────── 回合 ───────── */
 
-async function runTurn(rawText) {
-  if (state.busy) { toast('上一轮尚未结束'); return; }
+async function runTurn(rawText, target = null) {
+  /* 会话级并行：target 允许把回合投递给非活跃会话（后台插话/排队续跑）。
+     忙碌守卫按目标会话判定——该会话自己忙才拒绝；其他会话在跑不影响这里发起。 */
+  const s = target && state.sessions.includes(target) ? target : active();
+  if (!s) return;
   const text = String(rawText ?? '').trim();
   if (!text) return;
   if (text.length > LIMITS.maxInput) {
     toast(`输入过长（${text.length} 字符），上限 ${LIMITS.maxInput}`);
     return;
   }
+  if (sessionBusy(s.id)) { toast('该会话上一轮尚未结束'); return; }
 
-  const s = active();
-  state.busy = true;
-  state.stopRequested = false;
+  const isActive = s.id === state.activeId;
   s.state = 'running';
-  if (!s.messages.length) $('#chat').innerHTML = '<div class="chat-inner"></div>';
+  const ctl = { stopRequested: false, repaint: null };
+  sessionTurnCtl.set(s.id, ctl);
+  if (isActive) state.busy = true; // 派生值即刻可用；renderSessions 会再校准
+  if (isActive && !s.messages.length) $('#chat').innerHTML = '<div class="chat-inner"></div>';
   if (s.title === '新对话') s.title = text.replace(/\s+/g, ' ').slice(0, 18) || '新对话';
   saveSessions();
   // 发消息即置 dirty：本轮流式输出与工具结果由周期自动保存（30s）兜底，回合结束 finish 再统一保存
@@ -1490,8 +1601,9 @@ async function runTurn(rawText) {
     attachments: state.attachments.map(({ name, error }) => ({ name, error })),
     apiSuffix: suffix,
   };
-  const inner = $('.chat-inner');
-  inner.appendChild(userNode(userMsg));
+  // 后台回合（目标会话非当前活跃）不碰主区 DOM：数据照常入列，界面只在切回去时投影
+  const inner = isActive ? $('.chat-inner') : null;
+  if (inner) inner.appendChild(userNode(userMsg));
   s.messages.push(userMsg);
 
   const draft = {
@@ -1504,11 +1616,12 @@ async function runTurn(rawText) {
     attachmentsCount: userMsg.attachments.length,
     retries: 0,
     resumeFrom: text,
+    sessionId: s.id, // 会话级并行：收尾附言/审批「本次会话都允许」按归属会话记账
   };
   s.messages.push(draft);
 
   const node = assistantNode(draft);
-  inner.appendChild(node);
+  if (inner) inner.appendChild(node);
   const prose = $('.prose', node);
   const toolsBox = $('.tools', node);
   const summary = $('.summary', node);
@@ -1518,9 +1631,9 @@ async function runTurn(rawText) {
   renderHeader();
   renderSessions();
   updateSendState();
-  scrollToBottom(true);
+  if (isActive) scrollToBottom(true);
 
-  const ctx = { s, draft, node, prose, toolsBox, summary };
+  const ctx = { s, draft, node, prose, toolsBox, summary, ctl, isActive };
   if (sourceOf() === 'model') {
     /* 密钥主进程化：对话请求带 profileId，主进程优先用它注入真实 key；
        渲染层不再持有明文（key 可能为空或掩码），cfg.key 原值保留以兼容旧主进程。 */
@@ -2257,13 +2370,13 @@ function askToolApproval(ctx, tool, runtimeApproval) {
       'approval:' + (s?.id || '') + ':' + tool.target,
     );
     return new Promise((resolve) => {
-      approvalWaiters.set(draft, { resolve, node });
+      approvalWaiters.set(draft, { resolve, node, sessionId: s?.id || '' });
     });
   });
 }
 
 function runApiTurn(ctx, opts) {
-  const { draft, node, prose, s } = ctx;
+  const { draft, node, prose, s, ctl } = ctx;
   let body = '';
   let raf = 0;
   let retryTick = null;
@@ -2282,15 +2395,24 @@ function runApiTurn(ctx, opts) {
 
   const painter = createStreamPainter(prose);
   painter.think(); // 首个 chunk 前的思考指示，避免「发出去就没动静」的死寂感
+  /* 流式渲染经 data-msg-id 中转（会话级并行关键修复）：
+     - 节点在当前 DOM → 必要时把 painter 重挂到新 prose，正常画；
+     - 节点不在（会话切走了）→ 只更新 draft 数据，DOM 不碰；
+     - 切回会话时 renderChat 重建节点并调 ctl.repaint() → painter.mount 重建 + 已有正文一次成型。 */
   const paint = () => {
     draft.body = body;
-    painter.paint(body);
-    scrollToBottom();
+    const liveNode = liveDraftNode(draft);
+    if (liveNode) {
+      painter.mount($('.prose', liveNode));
+      painter.paint(body);
+      if (stickBottom) scrollToBottom();
+    }
   };
   const schedulePaint = () => {
     if (raf) return;
     raf = requestAnimationFrame(() => { raf = 0; paint(); });
   };
+  ctl.repaint = () => paint(); // renderChat 重建节点后恢复流式更新的入口
   const setSummaryLabel = (label) => {
     if (draft.summary.label === label) return;
     draft.summary.label = label;
@@ -2309,6 +2431,8 @@ function runApiTurn(ctx, opts) {
     toolsAutoCollapsed = true;
     tools.classList.add('hidden');
     head?.classList.add('collapsed');
+    // 记在消息数据上：切会话重建节点后折叠状态不丢（assistantNode 按 toolsCollapsed 投影）
+    draft.toolsCollapsed = true;
   };
 
   const clearRetry = () => {
@@ -2351,7 +2475,7 @@ function runApiTurn(ctx, opts) {
     finished = true;
     clearRetry();
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
-    const aborted = !!draft.aborted || state.stopRequested;
+    const aborted = !!draft.aborted || ctl.stopRequested;
 
     // 回合终结同步到 Runtime：取消走 cancelTask，正常/失败走 finishRun
     if (draft.runtime?.runId && window.dsh?.runtime?.runs?.finish) {
@@ -2359,7 +2483,7 @@ function runApiTurn(ctx, opts) {
       const { runId, taskId } = draft.runtime;
       try {
         if (aborted) {
-          rt.tasks.cancel({ taskId, reason: state.stopRequested ? 'user_interrupted' : 'aborted' });
+          rt.tasks.cancel({ taskId, reason: ctl.stopRequested ? 'user_interrupted' : 'aborted' });
         } else {
           const pending = rt.runs.finish({
             runId,
@@ -2447,7 +2571,8 @@ function runApiTurn(ctx, opts) {
         if (raf) { cancelAnimationFrame(raf); raf = 0; }
         state.turns.delete(id);
         if (state.activeTurnId === id) state.activeTurnId = null;
-        const aborted = !!endOpts.localAbort || !!draft.aborted || state.stopRequested;
+        if (sessionStepId.get(s.id) === id) sessionStepId.delete(s.id);
+        const aborted = !!endOpts.localAbort || !!draft.aborted || ctl.stopRequested;
         if (aborted) draft.aborted = true;
         resolve({ error: err || null, aborted, text: stepText, toolCalls: handler.toolCalls, usage: handler.usage });
       },
@@ -2455,6 +2580,7 @@ function runApiTurn(ctx, opts) {
 
     state.turns.set(id, handler);
     state.activeTurnId = id;
+    sessionStepId.set(s.id, id); // 会话级并行：主进程 abort 按「会话 → 当前请求」精确定位
     timer = setTimeout(() => {
       window.dsh?.model?.abort(id);
       handler.end(`请求超时：${Math.round(LIMITS.turnTimeoutMs / 1000)} 秒内未结束`);
@@ -2494,7 +2620,7 @@ function runApiTurn(ctx, opts) {
     }
     if (name === 'todo_write') {
       draft.tasks = Array.isArray(r.tasks) ? r.tasks : [];
-      active().todoTasks = draft.tasks;
+      s.todoTasks = draft.tasks; // 会话级并行：写给本回合的会话，不是当前活跃会话
       renderTasks(node, draft);
       renderTodoPanel();
     }
@@ -2541,7 +2667,7 @@ function runApiTurn(ctx, opts) {
 
       let approvalId = p.approval?.id || '';
       if (p.status === 'waiting_approval') {
-        const key = active().id + '::' + approvalKey(name, args);
+        const key = s.id + '::' + approvalKey(name, args); // 按回合会话记账，不用活跃会话
         let answer;
         if (state.autoApproved.has(key)) {
           answer = 'always';
@@ -2558,7 +2684,7 @@ function runApiTurn(ctx, opts) {
             reason: answer === 'deny' ? '用户拒绝' : '用户批准',
           });
           if (!decided?.ok || decided.data?.expired) answer = 'deny';
-          if (state.stopRequested) answer = 'deny';
+          if (ctl.stopRequested) answer = 'deny';
         }
         ctx.s.state = 'running';
         renderSessions();
@@ -2568,12 +2694,12 @@ function runApiTurn(ctx, opts) {
           tool.result = `用户拒绝执行该工具（${name}）。`;
           renderTools(node, draft);
           finishToolStep(stepId, 'canceled');
-          return state.stopRequested ? null : `${tool.result} 不要重复同样的调用，直接向用户说明。`;
+          return ctl.stopRequested ? null : `${tool.result} 不要重复同样的调用，直接向用户说明。`;
         }
         if (answer === 'always') state.autoApproved.add(key);
       }
 
-      if (state.stopRequested) return null;
+      if (ctl.stopRequested) return null;
       tool.status = 'running';
       tool.meta = '执行中';
       renderTools(node, draft);
@@ -2596,7 +2722,7 @@ function runApiTurn(ctx, opts) {
       }
 
       const r = executed.data;
-      if (state.stopRequested) {
+      if (ctl.stopRequested) {
         tool.status = 'error';
         tool.meta = '已中断';
         tool.result = '本轮已被用户中断，工具执行结果未采用。';
@@ -2676,14 +2802,14 @@ function runApiTurn(ctx, opts) {
       if (state.permission === 'readonly') {
         decision = 'readonly';
       } else if (state.permission === 'ask') {
-        const key = active().id + '::' + approvalKey(name, args);
+        const key = s.id + '::' + approvalKey(name, args); // 按回合会话记账，不用活跃会话
         if (state.autoApproved.has(key)) {
           decision = 'auto';
         } else {
           const answer = await askToolApproval(ctx, tool);
           ctx.s.state = 'running';
           renderSessions();
-          if (state.stopRequested) decision = 'abort';
+          if (ctl.stopRequested) decision = 'abort';
           else if (answer === 'always') { state.autoApproved.add(key); decision = 'allow'; }
           else if (answer === 'once') decision = 'allow';
           else decision = 'deny';
@@ -2701,7 +2827,7 @@ function runApiTurn(ctx, opts) {
       renderTools(node, draft);
       return `${tool.result} 不要重复同样的调用，直接向用户说明。`;
     }
-    if (state.stopRequested) return null;
+    if (ctl.stopRequested) return null;
 
     tool.status = 'running';
     tool.meta = '执行中';
@@ -2720,7 +2846,7 @@ function runApiTurn(ctx, opts) {
       r = { ok: false, error: err?.message || String(err) };
     }
 
-    if (state.stopRequested) {
+    if (ctl.stopRequested) {
       tool.status = 'error';
       tool.meta = '已中断';
       tool.result = '本轮已被用户中断，工具执行结果未采用。';
@@ -2739,7 +2865,7 @@ function runApiTurn(ctx, opts) {
       }
       if (name === 'todo_write') {
         draft.tasks = Array.isArray(r.tasks) ? r.tasks : [];
-        active().todoTasks = draft.tasks;
+        s.todoTasks = draft.tasks; // 会话级并行：写给本回合的会话，不是当前活跃会话
         renderTasks(node, draft);
         renderTodoPanel();
       }
@@ -2791,7 +2917,7 @@ function runApiTurn(ctx, opts) {
 
     // 参考 opencode：工具调用次数不设上限，循环到模型不再调用工具、用户中断或出错为止
     for (;;) {
-      if (state.stopRequested) { draft.aborted = true; break; }
+      if (ctl.stopRequested) { draft.aborted = true; break; }
       const useTools = state.toolSpecs.length > 0;
 
       let modelStepId = null;
@@ -2863,10 +2989,10 @@ function runApiTurn(ctx, opts) {
         const result = results.shift();
         if (result === null) { stopped = true; continue; }
         messages.push({ role: 'tool', tool_call_id: call.id, content: result });
-        if (state.stopRequested) { stopped = true; break; }
+        if (ctl.stopRequested) { stopped = true; break; }
       }
       if (stopped) {
-        if (state.stopRequested) draft.aborted = true;
+        if (ctl.stopRequested) draft.aborted = true;
         break;
       }
     }
@@ -2879,9 +3005,10 @@ function runApiTurn(ctx, opts) {
 
 /* ───────── 离线预览回合（内置示例数据回放，不是实现占位） ───────── */
 
-async function interruptibleSleep(ms) {
+/* 中断按会话控制块判定（ctl），不再读全局开关——并行会话互不波及 */
+async function interruptibleSleep(ms, ctl) {
   let left = ms;
-  while (left > 0 && !state.stopRequested) {
+  while (left > 0 && !(ctl?.stopRequested)) {
     const step = Math.min(40, left);
     await sleep(step);
     left -= step;
@@ -2889,10 +3016,10 @@ async function interruptibleSleep(ms) {
 }
 
 async function runPreviewTurn(text, ctx) {
-  const { s, draft, node, prose, toolsBox, summary } = ctx;
+  const { s, draft, node, prose, toolsBox, summary, ctl } = ctx;
   const script = pickScript(text);
   let stopped = false;
-  const check = () => state.stopRequested;
+  const check = () => !!ctl?.stopRequested;
 
   const bump = () => {
     draft.summary.tools = draft.tools.length;
@@ -2902,7 +3029,7 @@ async function runPreviewTurn(text, ctx) {
     toolsBox.classList.remove('hidden');
   };
 
-  await interruptibleSleep(420);
+  await interruptibleSleep(420, ctl);
   if (check()) { stopped = true; }
   if (!stopped) {
     for (const tool of script.tools || []) {
@@ -2915,7 +3042,7 @@ async function runPreviewTurn(text, ctx) {
       row.appendChild(spin);
       bump();
       scrollToBottom();
-      await interruptibleSleep(300 + Math.random() * 300);
+      await interruptibleSleep(300 + Math.random() * 300, ctl);
       spin.remove();
       if (check()) { stopped = true; break; }
     }
@@ -2943,14 +3070,14 @@ async function runPreviewTurn(text, ctx) {
       renderSessions();
       // 预览回合同样要等审批：后台时发系统通知（与 API 路径同一套去重规则）
       osNotify('等待你的确认', `${s.title}：${a.command || a.text || ''}`.slice(0, 200), 'approval:' + s.id + ':' + (a.command || ''));
-      await new Promise((resolve) => approvalWaiters.set(draft, { resolve, node }));
+      await new Promise((resolve) => approvalWaiters.set(draft, { resolve, node, sessionId: s.id }));
       s.state = 'running';
       renderSessions();
       if (check()) stopped = true;
     }
   }
 
-  if (!stopped) await streamText(script.body || '', prose, draft);
+  if (!stopped) await streamText(script.body || '', prose, draft, ctl);
   if (check()) stopped = true;
 
   if (!stopped) {
@@ -2960,21 +3087,27 @@ async function runPreviewTurn(text, ctx) {
   finish(draft, node, s, stopped);
 }
 
-async function streamText(text, prose, draft) {
+/* 预览流式：与 API 路径同一条「data-msg-id 中转」规则——节点不在当前 DOM 就只累积数据 */
+async function streamText(text, prose, draft, ctl) {
   draft.body = '';
   const painter = createStreamPainter(prose);
   let i = 0;
   while (i < text.length) {
-    if (state.stopRequested) break;
+    if (ctl?.stopRequested) break;
     const step = 2 + Math.floor(Math.random() * 3);
     i = Math.min(text.length, i + step);
     draft.body = text.slice(0, i);
-    painter.paint(draft.body);
-    scrollToBottom();
+    const liveNode = liveDraftNode(draft);
+    if (liveNode) {
+      painter.mount($('.prose', liveNode));
+      painter.paint(draft.body);
+      if (stickBottom) scrollToBottom();
+    }
     await sleep(16);
   }
   draft.body = text.slice(0, i);
-  prose.innerHTML = markdown(draft.body);
+  const finalNode = liveDraftNode(draft);
+  if (finalNode) $('.prose', finalNode).innerHTML = markdown(draft.body);
 }
 
 function buildMetrics(draft) {
@@ -3009,8 +3142,8 @@ function finish(draft, node, session, stopped, overrideLabel) {
   }
 
   session.state = 'idle';
-  state.busy = false;
-  state.stopRequested = false;
+  sessionTurnCtl.delete(session.id); // 回合控制块随会话收尾释放
+  sessionStepId.delete(session.id);
   markSessionsDirty(); // 回合收尾变更（summary/metrics/unread）置 dirty，下方保存成功即清
   saveSessions();
   // 应用在后台时结束的回合标为未读，切回来点一下会话即清除
@@ -3025,30 +3158,43 @@ function finish(draft, node, session, stopped, overrideLabel) {
     );
   }
   renderHeader();
-  renderSessions();
+  renderSessions(); // 内部 syncBusyFlag() 会把 state.busy 校准为「活跃会话忙」
   updateSendState();
-  scrollToBottom();
-  // 查找条开着时：活跃回合刚结束，正文已定稿，补一次命中重建（流式期间不重算）
-  refreshFindHitsIfOpen();
+  // 后台会话收尾不滚动主区（主区可能已经是另一个会话的聊天）
+  if (session.id === state.activeId) {
+    scrollToBottom();
+    // 查找条开着时：活跃回合刚结束，正文已定稿，补一次命中重建（流式期间不重算）
+    refreshFindHitsIfOpen();
+  }
 
-  // 插话 / 立即发送优先；队列只在正常结束（非中断、非失败）时自动继续
-  if (state.pendingTurn) {
-    const next = state.pendingTurn;
-    state.pendingTurn = null;
-    setTimeout(() => runTurn(next), 80);
+  // 插话 / 立即发送优先；队列只在正常结束（非中断、非失败）时自动继续。
+  // 两者都按「结束的会话」消费并在该会话里续跑（哪怕是后台会话），绝不串到当前活跃会话。
+  const pendTurn = state.pendingTurns.get(session.id);
+  if (pendTurn) {
+    state.pendingTurns.delete(session.id);
+    setTimeout(() => runTurn(pendTurn, session), 80);
     return;
   }
-  if (!stopped && !overrideLabel && state.pending) {
-    const next = state.pending;
-    state.pending = null;
-    $('#queue').hidden = true;
-    setTimeout(() => runTurn(next), 380);
+  if (!stopped && !overrideLabel) {
+    const next = state.pendingQueue.get(session.id);
+    if (next) {
+      state.pendingQueue.delete(session.id);
+      syncQueueBanner();
+      setTimeout(() => runTurn(next, session), 380);
+    }
   }
 }
 
-function abortActiveTurn() {
-  state.stopRequested = true;
+/* 中断指定会话的回合（默认活跃会话）。会话级并行关键点：
+   - ctl.stopRequested 只置到该会话的控制块上，B 会话的回合不受影响；
+   - 审批等待只否决本会话挂起的 waiter，其他会话的审批卡原样保留；
+   - 主进程 abort 按 sessionStepId 精确取消该会话当前的网络流。 */
+function abortActiveTurn(sessionId = state.activeId) {
+  const ctl = sessionTurnCtl.get(sessionId);
+  if (!ctl) return false;
+  ctl.stopRequested = true;
   for (const [msg, waiter] of [...approvalWaiters.entries()]) {
+    if (waiter.sessionId && waiter.sessionId !== sessionId) continue;
     approvalWaiters.delete(msg);
     if (msg.approval && !msg.approval.outcome) {
       msg.approval.outcome = 'deny';
@@ -3058,28 +3204,34 @@ function abortActiveTurn() {
     }
     waiter.resolve('deny');
   }
-  const id = state.activeTurnId;
-  const handler = id ? state.turns.get(id) : null;
+  const stepId = sessionStepId.get(sessionId);
+  const handler = stepId ? state.turns.get(stepId) : null;
   if (handler) {
     // 顺序很重要：先让主进程取消网络流，再立刻本地收尾。
     // 不等待 IPC 回执，否则 read() 阻塞时界面会一直停在 busy。
-    window.dsh?.model?.abort(id);
+    window.dsh?.model?.abort(stepId);
     handler.end('', { localAbort: true });
-  } else {
-    // 离线预览回合没有 IPC 句柄，靠 stopRequested 由可中断的 sleep 立即收尾
+  } else if (![...sessionStepId.keys()].some((id) => id !== sessionId)) {
+    // 离线预览回合没有 IPC 句柄，靠 ctl.stopRequested 由可中断的 sleep 立即收尾；
+    // 只有当没有其他会话占用网络流时才做全局兜底，绝不误杀并行会话的请求
     window.dsh?.model?.abortAll?.();
   }
+  return true;
 }
 
 function stopTurn() {
-  if (!state.busy) return;
-  abortActiveTurn();
+  const s = active();
+  if (!s || !sessionBusy(s.id)) return;
+  abortActiveTurn(s.id);
   toast('已中断本轮');
 }
 
 function requestInterrupt(text) {
-  state.pendingTurn = String(text).trim();
-  abortActiveTurn();
+  const s = active();
+  if (!s) return;
+  // 插话按会话记账：A 的插话在 A 的回合结束时消费（哪怕此刻活跃的是 B）
+  state.pendingTurns.set(s.id, String(text).trim());
+  abortActiveTurn(s.id);
   // 预览回合没有 IPC 事件，靠 stopRequested 自行收尾并消费 pendingTurn
 }
 
@@ -3125,10 +3277,14 @@ function autoGrow() {
 function updateSendState() {
   const btn = $('#sendBtn');
   const has = $('#input').value.trim().length > 0;
-  btn.disabled = !has && !state.busy;
-  btn.classList.toggle('streaming', state.busy);
-  btn.innerHTML = state.busy ? ico('i-stop') : ico('i-arrow-up');
-  btn.title = state.busy ? (has ? '中断并发送新消息' : '中断本轮') : '发送';
+  // 忙碌按「当前活跃会话」判定：A 会话后台运行时，B 会话的发送键仍是正常发送样式
+  const busyNow = sessionBusy(state.activeId);
+  btn.disabled = !has && !busyNow;
+  btn.classList.toggle('streaming', busyNow);
+  btn.innerHTML = busyNow ? ico('i-stop') : ico('i-arrow-up');
+  btn.title = busyNow ? (has ? '中断并发送新消息' : '中断本轮') : '发送';
+  const ta = $('#input');
+  if (ta) ta.placeholder = busyNow ? '当前会话生成中：发送即中断续发（可在发送方式里改排队）' : '给 DSH 发消息…';
   updateInputCount();
 }
 
@@ -3151,7 +3307,9 @@ function send() {
   const input = $('#input');
   const text = input.value.trim();
 
-  if (state.busy) {
+  // 忙碌按「当前活跃会话」判定：该会话忙才走停止/排队/插话；
+  // 其他会话在后台跑不影响这里直接发起新回合
+  if (sessionBusy(state.activeId)) {
     if (!text) { stopTurn(); return; }
     if (state.mode === 'queue') {
       queuePending(text);
@@ -3188,10 +3346,21 @@ function send() {
   runTurn(text);
 }
 
+/* 排队横幅按会话投影：显示当前活跃会话自己的排队消息 */
+function syncQueueBanner() {
+  const el = $('#queue');
+  if (!el) return;
+  const s = active();
+  const q = s ? state.pendingQueue.get(s.id) : null;
+  el.hidden = !q;
+  if (q) $('#queueText').textContent = q;
+}
+
 function queuePending(text) {
-  state.pending = text;
-  $('#queueText').textContent = text;
-  $('#queue').hidden = false;
+  const s = active();
+  if (!s) return;
+  state.pendingQueue.set(s.id, text);
+  syncQueueBanner();
   toast('已加入队列');
 }
 
@@ -3233,7 +3402,7 @@ function handleGoal(text) {
     真正发给上游的是 state.compacted 里的摘要（buildApiMessages 以 system 消息注入并跳过占位消息本身）。
     支持 id 精确匹配与唯一前缀匹配（头部徽标只显示 id 前 10 位）。 */
 function handleLoadSession(idArg) {
-  if (state.busy) { toast('生成中不能载入会话上下文'); return; }
+  if (sessionBusy(state.activeId)) { toast('生成中不能载入会话上下文'); return; }
   const cur = active();
   if (!cur) return;
   const q = String(idArg || '').trim();
@@ -3319,7 +3488,7 @@ function performCompact(s) {
 
 /** 真实上下文压缩：把历史消息折叠成摘要，后续请求以 system 消息注入 */
 function compactContext() {
-  if (state.busy) { toast('生成中不能压缩上下文'); return; }
+  if (sessionBusy(state.activeId)) { toast('生成中不能压缩上下文'); return; }
   const s = active();
   const done = performCompact(s);
   if (!done) { toast('当前会话没有可压缩的历史消息'); return; }
@@ -4365,7 +4534,7 @@ function renderSkillsDirs() {
 function useSkill(id) {
   const s = state.skills.items.find((x) => x.id === id);
   if (!s) return;
-  if (state.busy) { toast('生成中不能填入输入框'); return; }
+  if (sessionBusy(state.activeId)) { toast('生成中不能填入输入框'); return; }
   const ta = $('#input');
   ta.value = `#技能：${s.name}\n\n${s.body || ''}`;
   closeSettings();
@@ -5367,7 +5536,8 @@ function applyApproval(node, msg, kind) {
   if (!label) return;
   msg.approval.outcome = kind;
   msg.approval.label = label;
-  if (kind === 'always') state.autoApproved.add(active().id + '::' + (msg.approval.key || msg.approval.command));
+  // 「本次会话都允许」按消息归属会话记账（并行会话下消息不一定属于当前活跃会话）
+  if (kind === 'always') state.autoApproved.add((msg.sessionId || state.activeId || '') + '::' + (msg.approval.key || msg.approval.command));
   $('.slot-approval', node).innerHTML = approvalCard(msg.approval);
   toast(label);
   const waiter = approvalWaiters.get(msg);
@@ -6391,6 +6561,18 @@ function bind() {
   });
   // 交给 send() 统一判定：busy+空输入=停止，busy+有文字=插话/排队，空闲=发送
   $('#sendBtn').addEventListener('click', send);
+  /* 「N 个会话运行中」轻提示：展开运行中会话列表，点列表项切换过去 */
+  $('#runningPill').addEventListener('click', (e) => {
+    e.stopPropagation();
+    renderRunningMenu();
+    openMenu('runningMenu', $('#runningPill'));
+  });
+  $('#runningMenu').addEventListener('click', (e) => {
+    const item = e.target.closest('[data-goto-session]');
+    if (!item) return;
+    hideMenus();
+    selectSession(item.dataset.gotoSession);
+  });
   $('#modeBtn').addEventListener('click', (e) => { e.stopPropagation(); openMenu('modeMenu', $('#modeBtn')); });
   $('#permBtn').addEventListener('click', (e) => { e.stopPropagation(); openMenu('permMenu', $('#permBtn')); });
   $('#permMenu').addEventListener('click', (e) => {
@@ -6431,22 +6613,26 @@ function bind() {
   });
 
   $('#queueCancel').addEventListener('click', () => {
-    state.pending = null;
-    $('#queue').hidden = true;
+    const s = active();
+    if (!s) return;
+    state.pendingQueue.delete(s.id); // 排队按会话隔离：只撤销当前会话的排队消息
+    syncQueueBanner();
     toast('已撤销排队消息');
   });
   $('#queueNow').addEventListener('click', () => {
-    if (!state.pending) return;
-    const text = state.pending;
-    state.pending = null;
-    $('#queue').hidden = true;
+    const s = active();
+    const text = s ? state.pendingQueue.get(s.id) : null;
+    if (!s || !text) return;
+    state.pendingQueue.delete(s.id);
+    syncQueueBanner();
     requestInterrupt(text);
   });
   $('#queueSteer').addEventListener('click', () => {
-    if (!state.pending) return;
-    const text = state.pending;
-    state.pending = null;
-    $('#queue').hidden = true;
+    const s = active();
+    const text = s ? state.pendingQueue.get(s.id) : null;
+    if (!s || !text) return;
+    state.pendingQueue.delete(s.id);
+    syncQueueBanner();
     requestInterrupt(text);
   });
 
@@ -6796,7 +6982,7 @@ function bind() {
       const msg = node ? msgStore.get(node.dataset.msgId) : null;
       // 中断续跑看 resumeFrom；失败重试只要求该轮确实失败了
       if (!msg?.resumeFrom && !msg?.error) return;
-      if (state.busy) { toast('请先结束当前回合'); return; }
+      if (sessionBusy(state.activeId)) { toast('请先结束当前回合'); return; }
       runTurn('继续');
       return;
     }
