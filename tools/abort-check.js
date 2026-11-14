@@ -14,10 +14,16 @@
     await waitIdle();
     newChat();
     const ta = q('#input');
-    ta.value = '请写一篇 1500 字的长文章，分多段逐步输出，不要省略';
+    ta.value = '[[slow]] 请写一篇 1500 字的长文章，分多段逐步输出，不要省略';  // [[slow]] 触发 mock 慢流（60×130ms≈7.8s），否则秒回完成，中断/排队断言全踩竞态
     ta.dispatchEvent(new Event('input', { bubbles: true }));
     q('#sendBtn').click();
   };
+
+  /* 环境自备（适配 G5 后探针规范，仿 g5-probe）：隔离 userData 无连接配置，
+     不配 mock 连接所有请求都会 ERR_CONNECTION_REFUSED；probeBusy 挡住启动期静默探活。 */
+  state.probeBusy = true;
+  const MOCK = 'http://127.0.0.1:57321/v1';
+  state.connection = { source: 'model', api: { baseUrl: MOCK, key: 'test-key', model: 'mock-tool-model' }, verified: false };
 
   await sleep(900); // 等静默探活结束
 
@@ -39,15 +45,24 @@
   ta.dispatchEvent(new Event('input', { bubbles: true }));
   q('#sendBtn').click();
   await sleep(400);
-  add('插话不卡死：pendingTurn 已被消费', state.pendingTurn === null, `pendingTurn=${state.pendingTurn}`);
+  add('插话不卡死：pendingTurn 已被消费', !state.pendingTurns.get(state.activeId), `pendingTurn=${state.pendingTurns.get(state.activeId) || 'null'}`);
   add('插话后旧回合标记为已中断', summaries().some((s) => s.includes('已中断')), summaries().slice(-2).join(' | '));
-  add('插话后新回合已发起', state.busy === true && !!state.activeTurnId, `busy=${state.busy} turn=${state.activeTurnId}`);
+  // 新回合发起是异步链且 mock 快速回复完成极快；工具回合步骤间 activeTurnId 会被清空，
+  // 故用细步长捕捉 busy 出现过 + 等收尾后以 summaries 判定新回合已完成（本会话旧回合已标「已中断」，
+  // 唯一的「已完成」必然来自插话新回合）
+  const tNew = Date.now();
+  let sawBusy = false;
+  while (Date.now() - tNew < 4000) { if (state.busy) { sawBusy = true; break; } await sleep(40); }
+  const tEnd = Date.now();
+  while (state.busy && Date.now() - tEnd < 6000) await sleep(100);
+  const newDone = summaries().some((x) => x.includes('已完成'));
+  add('插话后新回合已发起', sawBusy && newDone, `sawBusy=${sawBusy} busy=${state.busy} newDone=${newDone}`);
 
   /* 3. 新回合可再次中断，不残留状态 */
   q('#sendBtn').click();
   await sleep(350);
-  add('新回合可二次中断', state.busy === false && state.activeTurnId === null && state.pendingTurn === null,
-    `busy=${state.busy} turn=${state.activeTurnId} pendingTurn=${state.pendingTurn}`);
+  add('新回合可二次中断', state.busy === false && state.activeTurnId === null && !state.pendingTurns.get(state.activeId),
+    `busy=${state.busy} turn=${state.activeTurnId} pendingTurn=${state.pendingTurns.get(state.activeId) || 'null'}`);
   await sleep(1800);
   add('迟到的旧流事件未污染状态', state.busy === false && !state.activeTurnId, `busy=${state.busy} turn=${state.activeTurnId}`);
 
@@ -60,8 +75,8 @@
   ta.dispatchEvent(new Event('input', { bubbles: true }));
   q('#sendBtn').click();
   await sleep(250);
-  add('排队模式只入队不打断当前回合', state.busy === true && state.pending !== null && !q('#queue').hidden,
-    `busy=${state.busy} pending=${state.pending}`);
+  add('排队模式只入队不打断当前回合', state.busy === true && !!state.pendingQueue.get(state.activeId) && !q('#queue').hidden,
+    `busy=${state.busy} queue=${state.pendingQueue.get(state.activeId) || 'null'}`);
   q('#queueCancel').click();
   q('#sendBtn').click();
   await sleep(350);
