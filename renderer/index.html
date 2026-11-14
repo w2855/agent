@@ -145,7 +145,11 @@
         </button>
 
         <div class="menu todo-panel" id="todoPanel" hidden>
-          <div class="menu-title">任务清单 <span id="todoPanelSummary"></span></div>
+          <div class="menu-title todo-panel-title">任务清单 <span id="todoPanelSummary"></span>
+            <label class="todo-sync" title="开启后，手工修改的任务清单变更会随下一轮对话请求同步给模型">
+              <input type="checkbox" id="todoSyncChk" /> 同步给模型
+            </label>
+          </div>
           <div class="todo-body" id="todoPanelBody"></div>
         </div>
 
@@ -732,6 +736,7 @@
       <p id="archSubtitle">读取项目与主控 Agent…</p>
     </div>
     <div class="arch-head-actions">
+      <span class="arch-live-badge" id="archLiveBadge" hidden><i class="arch-live-badge-dot"></i><b>实时</b><small>--:--:--</small></span>
       <button class="btn ghost" id="archRefresh">
         <svg class="ico tiny"><use href="#i-refresh"/></svg><span>刷新</span>
       </button>

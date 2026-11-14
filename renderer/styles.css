@@ -1798,6 +1798,22 @@ input.tint-range::-webkit-slider-thumb {
 }
 .arch-head-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .arch-head-actions .btn { display: inline-flex; align-items: center; gap: 5px; }
+/* 架构页「实时」徽标：事件驱动 = 绿点呼吸 + 实时；轮询兜底 = 3s。小字为最后更新时间 */
+.arch-live-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--ok, #157452) 38%, transparent);
+  background: color-mix(in srgb, var(--ok, #157452) 8%, transparent);
+  font-size: 11px; color: var(--text-2);
+}
+.arch-live-badge b { font-weight: 600; color: var(--ok, #157452); }
+.arch-live-badge small { font-size: 10px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.arch-live-badge-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok, #157452); flex: none; }
+.arch-live-badge.is-live .arch-live-badge-dot { animation: archBadgeBreathe 1.8s ease-in-out infinite; }
+@keyframes archBadgeBreathe {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok, #157452) 22%, transparent); }
+  50% { opacity: .5; box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok, #157452) 5%, transparent); }
+}
 .arch-body {
   flex: 1; min-height: 0;
   display: grid; grid-template-columns: minmax(0, 1fr) 322px;
@@ -1864,6 +1880,17 @@ input.tint-range::-webkit-slider-thumb {
 @keyframes archFlash {
   0%, 100% { filter: none; }
   30% { filter: drop-shadow(0 0 12px var(--accent)) brightness(1.08); }
+}
+/* 运行中节点外圈呼吸光环：走 scale+opacity 轴，与全局 dotPulse（box-shadow 轴）刻意区分 */
+.arch-live-aura {
+  animation: archAuraBreathe 2.6s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+  pointer-events: none;
+}
+@keyframes archAuraBreathe {
+  0%, 100% { opacity: .55; transform: scale(1); }
+  50% { opacity: .08; transform: scale(1.055); }
 }
 @keyframes archEdgeFade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes archEdgeDraw { from { stroke-dashoffset: 1; opacity: .2; } to { stroke-dashoffset: 0; opacity: 1; } }
@@ -2206,7 +2233,8 @@ input.tint-range::-webkit-slider-thumb {
     transition-duration: .001ms !important;
     scroll-behavior: auto !important;
   }
-  .agent-row, .arch-agent-row, .deleg-approval, .arch-agent-dot.is-live {
+  .agent-row, .arch-agent-row, .deleg-approval, .arch-agent-dot.is-live,
+  .arch-live-aura, .arch-live-badge.is-live .arch-live-badge-dot {
     animation: none !important;
   }
 }
@@ -2258,6 +2286,85 @@ input.tint-range::-webkit-slider-thumb {
   color: var(--text-3);
 }
 #todoPanelSummary { color: var(--text-3); letter-spacing: 0; }
+
+/* ───────── 任务清单面板可编辑（行内编辑 / 状态切换 / 两段删除 / 拖拽排序） ───────── */
+.todo-panel-title { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.todo-panel-title #todoPanelSummary { margin-right: auto; }
+.todo-sync {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; color: var(--text-3); cursor: pointer; user-select: none;
+}
+.todo-sync input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+.todo-sync:hover { color: var(--accent); }
+.todo-item { position: relative; transition: background 150ms ease; }
+.todo-item:hover .todo-acts, .todo-item.is-armed .todo-acts { opacity: 1; }
+.todo-text {
+  flex: 1; min-width: 0; cursor: text;
+  overflow-wrap: anywhere;
+}
+.todo-item.is-completed .todo-text {
+  color: var(--text-3);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-4) 70%, transparent);
+}
+/* 状态圆点点按热区：圆点本体样式沿用上方 .todo-dot */
+.todo-dot-btn {
+  flex: none; display: inline-flex; align-items: center;
+  padding: 4px 6px 4px 2px; margin: -4px 0 -4px -2px;
+  background: none; border: 0; cursor: pointer;
+}
+.todo-dot-btn .todo-dot { margin: 0; flex: none; display: inline-block; transition: transform 150ms var(--ease-lively); }
+.todo-dot-btn:hover .todo-dot { transform: scale(1.35); }
+.todo-dot.is-bounce { animation: todoPop 320ms var(--ease-lively); }
+@keyframes todoPop { 0% { transform: scale(.4); } 55% { transform: scale(1.5); } 100% { transform: scale(1); } }
+.todo-acts {
+  flex: none; display: inline-flex; gap: 3px;
+  opacity: 0; transition: opacity 150ms ease;
+}
+.todo-act {
+  width: 20px; height: 20px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--panel-border); border-radius: 6px;
+  background: var(--menu-bg); color: var(--text-3);
+  cursor: pointer; font-size: 11px; line-height: 1;
+}
+.todo-act:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.todo-act.todo-del.is-armed {
+  width: auto; padding: 0 6px; font-weight: 600;
+  color: var(--bad); border-color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+/* 行内编辑输入框（span 原地替换） */
+.todo-edit-input {
+  flex: 1; min-width: 0;
+  font: inherit; font-size: 12.8px; color: var(--text);
+  background: var(--menu-bg);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 7px; padding: 3px 7px; outline: none;
+}
+.todo-item.is-editing { animation: todoEditGlow 150ms ease; }
+@keyframes todoEditGlow {
+  from { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  to { background: transparent; }
+}
+.todo-item.is-flash { animation: todoEditGlow 320ms ease; }
+/* 底部「＋ 新任务」行 */
+.todo-add { margin-top: 4px; padding: 2px; border-top: 1px solid var(--rule); }
+.todo-add-input {
+  width: 100%; box-sizing: border-box;
+  font: inherit; font-size: 12.4px; color: var(--text);
+  background: transparent; border: 0; outline: none;
+  padding: 7px 7px; border-radius: 8px;
+}
+.todo-add-input::placeholder { color: var(--text-4); }
+.todo-add-input:focus { background: var(--fill); }
+/* 新增行一次性 rise 入场（复用全局 rowIn）；拖拽插入线与拖动源淡化 */
+.todo-item.is-new { animation: rowIn 200ms var(--ease-lively) both; }
+.todo-item.is-drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+.todo-item.is-dragging { opacity: .45; }
+@media (prefers-reduced-motion: reduce) {
+  .todo-item.is-new, .todo-item.is-editing, .todo-item.is-flash, .todo-dot.is-bounce { animation: none !important; }
+}
 
 /* ───────── R2 UX：消息复制 / 回到底部 / 输入计数 ───────── */
 .msg-actions {

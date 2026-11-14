@@ -1091,7 +1091,8 @@ async function runTurn(rawText) {
   if (s.title === '新对话') s.title = text.replace(/\s+/g, ' ').slice(0, 18) || '新对话';
   saveSessions();
 
-  const suffix = formatAttachments();
+  /* 任务面板「同步给模型」开启时，把手工变更摘要追加进本轮 user 消息的 apiSuffix */
+  const suffix = formatAttachments() + todoSyncSuffix();
   const userMsg = {
     role: 'user', text,
     attachments: state.attachments.map(({ name, error }) => ({ name, error })),
@@ -2937,7 +2938,48 @@ function animateOut(el, ms = 200) {
 
 function hideMenus() { $$('.menu').forEach((m) => animateOut(m, 130)); }
 
-/* ───────── 任务清单面板（右上角） ───────── */
+/* ───────── 任务清单面板（右上角，可直接编辑） ───────── */
+
+/* 面板编辑态：editing=正在行内编辑的下标（-1 无）；armed=两段删除已武装的下标（3 秒超时）；
+   armedRef 记武装时的任务对象，列表被模型更新重排后靠对象身份防止误删；dragFrom=拖拽源下标 */
+const todoUi = { editing: -1, armed: -1, armedRef: null, armedTimer: null, dragFrom: -1 };
+/* 「同步给模型」开关（localStorage 持久化）+ 手工变更摘要缓冲：
+   开启时每次手工修改压一行摘要，下一轮对话请求的 user 消息 apiSuffix 追加后清空 */
+let todoSyncToModel = readStorage('dsh.todoSync', '') === '1';
+const todoSyncLines = [];
+const TODO_STATUS_ORDER = ['pending', 'in_progress', 'completed'];
+const TODO_STATUS_LABEL = { pending: '待办', in_progress: '进行中', completed: '已完成' };
+
+const todoCut = (t) => String(t == null ? '' : t).replace(/\s+/g, ' ').trim().slice(0, 24);
+
+/* 记录一条手工变更摘要（仅当同步开关开启时缓冲，封顶 20 条防请求膨胀） */
+function noteTodoChange(line) {
+  if (!todoSyncToModel) return;
+  todoSyncLines.push(line);
+  if (todoSyncLines.length > 20) todoSyncLines.splice(0, todoSyncLines.length - 20);
+}
+
+/* 下一轮发送时追加到 apiSuffix 的任务清单变更摘要；取完即清空 */
+function todoSyncSuffix() {
+  if (!todoSyncToModel || !todoSyncLines.length) return '';
+  const lines = todoSyncLines.splice(0).map((l) => `- ${l}`).join('\n');
+  return `\n\n[任务清单变更（用户在任务面板手工修改）]\n${lines}`;
+}
+
+function todoRowHtml(t, i) {
+  const st = TODO_STATUS_ORDER.includes(t.status) ? t.status : 'pending';
+  const armed = todoUi.armed === i;
+  return `<div class="todo-item is-${st}${armed ? ' is-armed' : ''}" data-idx="${i}" draggable="true">
+    <button class="todo-dot-btn" data-todo-status="${i}" title="点击切换状态（待办 → 进行中 → 已完成）"><i class="todo-dot ${esc(st)}"></i></button>
+    <span class="todo-text" data-todo-edit="${i}" title="点击编辑">${esc(String(t.content || ''))}</span>
+    <span class="todo-acts">
+      <button class="todo-act" data-todo-edit="${i}" title="编辑">✎</button>
+      <button class="todo-act todo-del${armed ? ' is-armed' : ''}" data-todo-del="${i}" title="删除">${armed ? '确认?' : '✕'}</button>
+    </span>
+  </div>`;
+}
+
+const todoAddRowHtml = () => `<div class="todo-add"><input class="todo-add-input" type="text" placeholder="＋ 新任务，回车添加" maxlength="200" spellcheck="false"></div>`;
 
 function renderTodoPanel() {
   const panel = $('#todoPanel');
@@ -2946,30 +2988,203 @@ function renderTodoPanel() {
   const tasks = Array.isArray(s?.todoTasks) ? s.todoTasks : [];
   const body = $('#todoPanelBody');
   const summary = $('#todoPanelSummary');
+  const syncChk = $('#todoSyncChk');
+  if (syncChk) syncChk.checked = todoSyncToModel;
+  /* 正在行内编辑时跳过重渲染：模型 todo_write 的刷新链不打断用户输入，
+     下一次渲染自然呈现最新数据（s.todoTasks 始终是唯一事实源）。
+     只看 editing 状态而非焦点：Enter 提交后输入框可能仍持有焦点，按焦点判断会把
+     后续正常重渲染全部拦下（DOM 停在过期内容） */
+  if (todoUi.editing >= 0) return;
   if (!tasks.length) {
     if (summary) summary.textContent = '';
-    if (body) body.innerHTML = '<div class="todo-empty">本会话还没有任务清单</div>';
+    if (body) body.innerHTML = '<div class="todo-empty">本会话还没有任务清单</div>' + todoAddRowHtml();
     return;
   }
   const done = tasks.filter((t) => t.status === 'completed').length;
   if (summary) summary.textContent = `${done}/${tasks.length} 完成`;
-  if (body) {
-    body.innerHTML = tasks.map((t) => `
-      <div class="todo-item">
-        <i class="todo-dot ${esc(t.status || 'pending')}"></i>
-        <span>${esc(String(t.content || ''))}</span>
-      </div>`).join('');
-  }
+  if (body) body.innerHTML = tasks.map((t, i) => todoRowHtml(t, i)).join('') + todoAddRowHtml();
 }
 
 function toggleTodoPanel() {
   const panel = $('#todoPanel');
   if (!panel) return;
   if (!panel.hidden) { animateOut(panel, 150); return; }
-  hideMenus();
+  // 重置编辑态：编辑下标 / 两段删除武装 / 拖拽源都不跨开关保留
+  todoUi.editing = -1;
+  todoUi.armed = -1;
+  todoUi.armedRef = null;
+  clearTimeout(todoUi.armedTimer);
+  todoUi.dragFrom = -1;
   renderTodoPanel();
-  panel.classList.remove('is-closing');
-  panel.hidden = false;
+  /* 统一走 openMenu 的锚点定位：面板是 position:fixed 且未设 top 的顶栏子元素，
+     静态位置会被 .top-right 的垂直居中算到窗口上沿之外（面板越高裁得越多） */
+  openMenu('todoPanel', $('#todoBtn'));
+  const addInput = $('.todo-add-input', $('#todoPanelBody') || panel);
+  if (addInput) addInput.focus();
+}
+
+/* 行内编辑：点击文字或 ✎，span 原地换成 input；Enter / 失焦保存，Esc 取消，清空视作取消 */
+function beginTodoEdit(i) {
+  if (todoUi.editing >= 0) return; // 同一时刻只允许一行编辑
+  const body = $('#todoPanelBody');
+  const row = body?.querySelector(`.todo-item[data-idx="${i}"]`);
+  const tasks = active()?.todoTasks;
+  if (!row || !Array.isArray(tasks) || !tasks[i]) return;
+  const span = $('.todo-text', row);
+  if (!span) return;
+  todoUi.editing = i;
+  row.classList.add('is-editing');
+  row.draggable = false; // 编辑态不参与拖拽
+  const input = document.createElement('input');
+  input.className = 'todo-edit-input';
+  input.type = 'text';
+  input.maxLength = 200;
+  input.spellcheck = false;
+  input.value = String(tasks[i].content || '');
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+  const commit = () => {
+    if (todoUi.editing !== i) return; // Enter 已提交后失焦的二次触发直接跳过
+    todoUi.editing = -1;
+    const value = input.value.trim();
+    const list = active()?.todoTasks;
+    if (value && Array.isArray(list) && list[i]) {
+      if (value !== list[i].content) {
+        noteTodoChange(`「${todoCut(list[i].content)}」改名 → 「${todoCut(value)}」`);
+        list[i] = { ...list[i], content: value };
+        saveSessions();
+      }
+    }
+    renderTodoPanel();
+    // 150ms 一次性高亮：行编辑保存落定
+    const row2 = $(`#todoPanelBody .todo-item[data-idx="${i}"]`);
+    if (row2 && value) { row2.classList.add('is-flash'); setTimeout(() => row2.classList.remove('is-flash'), 320); }
+  };
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commit(); } // 直接提交，不依赖 blur 是否派发
+    else if (ev.key === 'Escape') { todoUi.editing = -1; renderTodoPanel(); }
+  });
+  input.addEventListener('blur', commit);
+}
+
+/* 状态圆点点按循环：pending → in_progress → completed → pending，带一次性弹跳 */
+function cycleTodoStatus(i) {
+  const tasks = active()?.todoTasks;
+  if (!Array.isArray(tasks) || !tasks[i]) return;
+  const cur = TODO_STATUS_ORDER.indexOf(tasks[i].status || 'pending');
+  const next = TODO_STATUS_ORDER[(cur + 1) % TODO_STATUS_ORDER.length];
+  tasks[i] = { ...tasks[i], status: next };
+  noteTodoChange(`「${todoCut(tasks[i].content)}」状态 → ${TODO_STATUS_LABEL[next]}`);
+  saveSessions();
+  renderTodoPanel();
+  const dot = $(`#todoPanelBody .todo-item[data-idx="${i}"] .todo-dot`);
+  if (dot) { dot.classList.add('is-bounce'); setTimeout(() => dot.classList.remove('is-bounce'), 340); }
+}
+
+/* 删除：两段确认（3 秒内再点一次），与 session 删除同款交互 */
+function todoDelete(i) {
+  const tasks = active()?.todoTasks;
+  if (!Array.isArray(tasks) || !tasks[i]) return;
+  if (todoUi.armed !== i || todoUi.armedRef !== tasks[i]) {
+    todoUi.armed = i;
+    todoUi.armedRef = tasks[i];
+    clearTimeout(todoUi.armedTimer);
+    todoUi.armedTimer = setTimeout(() => { todoUi.armed = -1; todoUi.armedRef = null; renderTodoPanel(); }, 3000);
+    renderTodoPanel();
+    return;
+  }
+  clearTimeout(todoUi.armedTimer);
+  todoUi.armed = -1;
+  todoUi.armedRef = null;
+  const removed = tasks.splice(i, 1)[0];
+  noteTodoChange(`删除任务「${todoCut(removed?.content)}」`);
+  saveSessions();
+  renderTodoPanel();
+}
+
+/* 面板事件全部走 #todoPanelBody 委托（列表 innerHTML 重建不重复注册） */
+function bindTodoPanel() {
+  const body = $('#todoPanelBody');
+  if (!body) return;
+  body.addEventListener('click', (e) => {
+    // 面板内点击不参与 document 的「外部点击关闭」判定：行内操作会同步重建列表，
+    // 冒泡到 document 时点击目标已脱离 DOM，closest('.menu') 失配会误关面板
+    e.stopPropagation();
+    const stBtn = e.target.closest('[data-todo-status]');
+    if (stBtn) { cycleTodoStatus(Number(stBtn.dataset.todoStatus)); return; }
+    const delBtn = e.target.closest('[data-todo-del]');
+    if (delBtn) { todoDelete(Number(delBtn.dataset.todoDel)); return; }
+    const editBtn = e.target.closest('[data-todo-edit]');
+    if (editBtn) beginTodoEdit(Number(editBtn.dataset.todoEdit));
+  });
+  /* 底部「＋ 新任务」：Enter 新增（状态 pending），连续录入保持焦点 */
+  body.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const input = e.target.closest('.todo-add-input');
+    if (!input) return;
+    e.preventDefault();
+    const value = input.value.trim();
+    if (!value) return;
+    const s = active();
+    if (!s) return;
+    if (!Array.isArray(s.todoTasks)) s.todoTasks = [];
+    s.todoTasks.push({ content: value, status: 'pending' });
+    noteTodoChange(`新增任务「${todoCut(value)}」`);
+    saveSessions();
+    renderTodoPanel();
+    const rows = $$('#todoPanelBody .todo-item');
+    const last = rows[rows.length - 1];
+    if (last) { last.classList.add('is-new'); setTimeout(() => last.classList.remove('is-new'), 360); }
+    const nextInput = $('.todo-add-input', body);
+    if (nextInput) nextInput.focus();
+  });
+  /* HTML5 拖拽排序：dragstart 记源行 → dragover 高亮目标插入线 → drop 重排写回 */
+  body.addEventListener('dragstart', (e) => {
+    const row = e.target.closest('.todo-item');
+    if (!row || row.classList.contains('is-editing')) { e.preventDefault(); return; }
+    todoUi.dragFrom = Number(row.dataset.idx);
+    row.classList.add('is-dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', row.dataset.idx); } catch { /* 合成事件可能无 dataTransfer */ }
+  });
+  body.addEventListener('dragover', (e) => {
+    if (todoUi.dragFrom < 0) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    $$('#todoPanelBody .todo-item').forEach((r) => r.classList.remove('is-drop-before'));
+    const row = e.target.closest('.todo-item');
+    if (row && Number(row.dataset.idx) !== todoUi.dragFrom) row.classList.add('is-drop-before');
+  });
+  body.addEventListener('drop', (e) => {
+    if (todoUi.dragFrom < 0) return;
+    e.preventDefault();
+    const row = e.target.closest('.todo-item');
+    const from = todoUi.dragFrom;
+    todoUi.dragFrom = -1;
+    $$('#todoPanelBody .todo-item').forEach((r) => r.classList.remove('is-drop-before', 'is-dragging'));
+    const tasks = active()?.todoTasks;
+    if (!row || !Array.isArray(tasks)) { renderTodoPanel(); return; }
+    const to = Number(row.dataset.idx);
+    if (to === from) { renderTodoPanel(); return; }
+    const [moved] = tasks.splice(from, 1);
+    // 先摘除源行再插入：目标在源之后时下标左移一位（插入线 = 目标行之前）
+    tasks.splice(to > from ? to - 1 : to, 0, moved);
+    noteTodoChange(`任务「${todoCut(moved?.content)}」移动到第 ${Math.min(to, tasks.length)} 位`);
+    saveSessions();
+    renderTodoPanel();
+  });
+  body.addEventListener('dragend', () => {
+    todoUi.dragFrom = -1;
+    $$('#todoPanelBody .todo-item').forEach((r) => r.classList.remove('is-drop-before', 'is-dragging'));
+  });
+  /* 「同步给模型」小开关：关闭即清空未发送的变更缓冲 */
+  $('#todoSyncChk')?.addEventListener('change', (e) => {
+    todoSyncToModel = !!e.target.checked;
+    writeStorage('dsh.todoSync', todoSyncToModel ? '1' : '0');
+    if (!todoSyncToModel) todoSyncLines.length = 0;
+    else toast('下一轮对话会把任务清单变更同步给模型');
+  });
 }
 
 function openMenu(id, anchor) {
@@ -3658,6 +3873,8 @@ async function decideDelegationApproval(approvalId, decision) {
 
 const archState = {
   nodeId: '', goalDirty: false, refreshTimer: null, pollTimer: null,
+  /* 实时状态：'live'=事件驱动即时刷新（徽标显示「实时」），'poll'=轮询兜底（徽标显示「3s」） */
+  liveMode: 'live', lastLiveAt: 0, lastRenderAt: 0,
   animProjectId: '', animReady: false, seenNodes: new Set(), seenStatus: new Map(), seenEdges: new Set(),
   detailFor: '', canvasSig: '', lastNodeId: '',
   htmlCache: new Map(),
@@ -3899,6 +4116,7 @@ function archSvg(live, project) {
         aria-label="${esc(node.label)} · ${esc(ARCH_LAYER_LABEL[node.layer] || node.layer)} · ${esc(status)}">
       <title>${esc(node.label)}${node.description ? ' · ' + esc(node.description) : ''}</title>
       <g class="arch-node-body ${isNew ? 'is-enter' : ''}" ${isNew ? `style="animation-delay:${delay}ms"` : ''}>
+        ${node.effectiveStatus === 'in_progress' ? `<rect class="arch-live-aura" x="${x - 5}" y="${y - 5}" width="${CARD_W + 10}" height="${CARD_H + 10}" rx="13" fill="none" stroke="${c.accent}" stroke-width="1.1"/>` : ''}
         ${selected ? `<rect class="arch-node-ring" x="${x - 4}" y="${y - 4}" width="${CARD_W + 8}" height="${CARD_H + 8}" rx="13" fill="none" stroke="${c.accent}" stroke-opacity="0.45"/>` : ''}
         <rect class="arch-node-card" x="${x}" y="${y}" width="${CARD_W}" height="${CARD_H}" rx="9"
           fill="${c.card}" stroke="${node.effectiveStatus === 'planned' ? c.rule : color}" stroke-width="${node.effectiveStatus === 'planned' ? 1 : 1.6}"/>
@@ -4164,13 +4382,20 @@ function renderArchPage() {
   renderArchMilestones(live);
   renderArchDiscovery();
   renderArchTasks(live, sessionTaskId);
-  scheduleArchPoll((live.stats?.activeTasks || 0) > 0);
+  archState.lastRenderAt = Date.now();
+  renderArchLiveBadge();
+  scheduleArchPoll();
 }
 
-function scheduleArchPoll(active) {
+function scheduleArchPoll() {
   clearTimeout(archState.pollTimer);
-  if (!state.projectOpen || !active) return;
-  archState.pollTimer = setTimeout(() => { refreshArchitecture(true).catch(() => {}); }, 3000);
+  if (!state.projectOpen) return;
+  /* 轮询降级为 3s 兜底：事件订阅断线、页面静默等丢事件场景下仍能追平 Runtime 状态 */
+  archState.pollTimer = setTimeout(() => {
+    archState.liveMode = 'poll';
+    renderArchLiveBadge();
+    refreshArchitecture(true).catch(() => {});
+  }, 3000);
 }
 
 async function refreshArchitecture(force = true) {
@@ -4179,21 +4404,38 @@ async function refreshArchitecture(force = true) {
   renderArchPage();
 }
 
-function handleArchitectureEvent(event) {
-  if (!state.projectOpen || !event?.type) return;
-  const p = event.payload || {};
-  if (event.type === 'project.updated' && state.project?.project?.id && p.projectId && p.projectId !== state.project.project.id) return;
-  if (
-    event.type === 'project.updated'
-    || event.type.startsWith('task.')
-    || event.type.startsWith('run.')
-    || event.type.startsWith('delegation.')
-    || event.type === 'approval.requested'
-    || event.type === 'approval.decided'
-  ) {
-    clearTimeout(archState.refreshTimer);
-    archState.refreshTimer = setTimeout(() => { refreshArchitecture(true).catch(() => {}); }, 320);
-  }
+/* 顶部「实时」徽标：事件驱动刷新显示「实时」（绿点呼吸），轮询兜底显示「3s」，
+   右侧小字为最后一次重绘时间。页面关闭时一并隐藏。 */
+function renderArchLiveBadge() {
+  const badge = $('#archLiveBadge');
+  if (!badge) return;
+  if (!state.projectOpen) { badge.hidden = true; return; }
+  const live = archState.liveMode === 'live';
+  const time = archState.lastRenderAt
+    ? new Date(archState.lastRenderAt).toLocaleTimeString('zh-CN', { hour12: false })
+    : '--:--:--';
+  badge.hidden = false;
+  badge.classList.toggle('is-live', live);
+  badge.innerHTML = `<i class="arch-live-badge-dot"></i><b>${live ? '实时' : '3s'}</b><small>${esc(time)}</small>`;
+}
+
+/* 事件驱动即时刷新：runtime 事件（tool.* / step.* / delegation.* / run.* / task.* /
+   approval.* / project.updated）→ 150ms 去抖合并事件风暴 → refreshArchitecture。
+   事件路径与轮询共用同一刷新函数，重绘走 renderArchPage 内的画布签名 diff 守卫，
+   高频事件不会造成全量重建闪烁。 */
+function scheduleArchLiveRefresh(event) {
+  if (!state.projectOpen) return;
+  const type = String(event?.type || '');
+  const RUNTIME_EVT = /^(tool\.|step\.|run\.|task\.|delegation\.|approval\.)/;
+  if (type !== 'project.updated' && !RUNTIME_EVT.test(type)) return;
+  // 别的项目的 project.updated 不刷新本页（原架构事件处理函数的守卫保留）
+  if (type === 'project.updated' && state.project?.project?.id && event?.payload?.projectId
+    && event.payload.projectId !== state.project.project.id) return;
+  archState.liveMode = 'live';
+  archState.lastLiveAt = Date.now();
+  renderArchLiveBadge(); // 先把徽标点成「实时」，数据随后 150ms 内跟上
+  clearTimeout(archState.refreshTimer);
+  archState.refreshTimer = setTimeout(() => { refreshArchitecture(true).catch(() => {}); }, 150);
 }
 
 async function openArchPage() {
@@ -4218,6 +4460,7 @@ function closeArchPage() {
   resetArchAnimation();
   clearTimeout(archState.refreshTimer);
   clearTimeout(archState.pollTimer);
+  renderArchLiveBadge(); // 页面已关，隐藏实时徽标
   animateOut($('#archPage'), 220);
 }
 
@@ -5326,6 +5569,7 @@ function bind() {
     else openInspector();
   });
   $('#todoBtn').addEventListener('click', toggleTodoPanel);
+  bindTodoPanel();
   $('#inspClose').addEventListener('click', closeInspector);
   $('#inspRefresh').addEventListener('click', () => refreshInspector());
   $('#inspBody').addEventListener('click', (e) => {
@@ -5859,7 +6103,9 @@ function boot() {
   // 运行检查器实时跟随当前 Run 的事件
   window.dsh?.runtime?.events?.onEvent?.((event) => {
     handleDelegationApprovalEvent(event);
-    handleArchitectureEvent(event);
+    // 架构页实时化：runtime 事件（tool.* / step.* / delegation.* / run.* 等）
+    // 触发 150ms 去抖即时刷新（scheduleArchLiveRefresh），轮询降为 3s 兜底
+    scheduleArchLiveRefresh(event);
     // 主 Agent 委派时可能自动创建子 Agent（agent.updated 事件）：刷新 Agent 列表与架构页
     if (event?.type === 'agent.updated' && window.dsh?.runtime?.agents?.list) {
       loadAgents().then(() => {
