@@ -20,6 +20,7 @@ const DEFAULT_API = {
   baseUrl: 'https://jinitai.zh.kg/v1',
   key: '',
   model: MODEL_ID,
+  effort: 'off',
 };
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/+~-]{0,127}$/;
 const ACCENTS = ['mist', 'daiqing', 'dusk', 'turquoise', 'amber', 'graphite'];
@@ -182,9 +183,12 @@ function normalizeConnection(raw) {
   const baseUrl = typeof apiRaw.baseUrl === 'string' && apiRaw.baseUrl.trim() ? apiRaw.baseUrl.trim() : DEFAULT_API.baseUrl;
   const key = typeof apiRaw.key === 'string' && apiRaw.key.trim() ? apiRaw.key.trim() : DEFAULT_API.key;
   const model = validModel(apiRaw.model) ? apiRaw.model.trim() : DEFAULT_API.model;
+  // effort 必须随连接一起恢复：以前 normalizeConnection 把它丢了，重启后输入区
+  // 显示「关闭」而请求里却按旧值发，用户调了思考强度却看不到效果。
+  const effort = ['off', 'low', 'medium', 'high'].includes(apiRaw.effort) ? apiRaw.effort : 'off';
   return {
     source: raw.source === 'preview' ? 'preview' : 'model',
-    api: { baseUrl, key, model },
+    api: { baseUrl, key, model, effort },
     verified: raw.verified === true,
   };
 }
@@ -351,6 +355,8 @@ function serializeSessionsAtLevel(level) {
         if (Array.isArray(copy.tools)) {
           copy.tools = copy.tools.map((t) => ({ ...t, result: String(t.result || '').slice(0, maxResult) }));
         }
+        // 思考内容只用于回看，落盘截断：一份几千字的推理没有还原价值，却会撑大存储
+        if (copy.reasoning) copy.reasoning = String(copy.reasoning).slice(0, 4000);
         return copy;
       }),
     };
@@ -486,9 +492,71 @@ const apiCfg = () => ({
 const cfgSig = (cfg) => [cfg?.baseUrl, cfg?.key, cfg?.model].map((v) => String(v ?? '').trim()).join('|');
 /* 思考强度（reasoning_effort）：跟随接入点存储；'off' 表示不发参数，兼容普通模型 */
 const EFFORTS = ['off', 'low', 'medium', 'high'];
+const EFFORT_LABEL = { off: '关闭', low: '低', medium: '中', high: '高' };
 const normEffort = (v) => (EFFORTS.includes(v) ? v : 'off');
 const readEffortSelect = () => normEffort($('#apiEffort')?.value);
 const active = () => state.sessions.find((s) => s.id === state.activeId) || state.sessions[0];
+
+/* ───────── 输入区常驻控制：思考强度 / 模型 ───────── */
+function syncComposerControls() {
+  const effort = normEffort(state.connection?.api?.effort);
+  const sel = $('#composerEffort');
+  if (sel) sel.value = effort;
+  const name = $('#composerModelName');
+  if (name) name.textContent = sourceOf() === 'model' ? currentModel() : '离线预览';
+  // 可见状态反馈：胶囊常显当前档位，非 off 时高亮表示「推理强度已开启」
+  const effortName = $('#composerEffortName');
+  if (effortName) effortName.textContent = EFFORT_LABEL[effort];
+  $('#composerEffortWrap')?.classList.toggle('is-on', effort !== 'off');
+}
+
+/** 输入区改思考强度：立刻写进当前连接并持久化，下一条消息的 cfg 就会带上新值。 */
+function setEffortFromComposer(value) {
+  const next = normEffort(value);
+  const api = { ...(state.connection.api || {}), effort: next };
+  const profile = state.profiles.find((p) => p.id === state.activeProfileId);
+  if (profile) { profile.effort = next; saveProfiles(); }
+  // 设置页里的同源控件保持同步，避免两处显示不一致
+  if ($('#apiEffort')) $('#apiEffort').value = next;
+  persistConn({ ...state.connection, api });
+  syncComposerControls();
+  toast(`思考强度：${EFFORT_LABEL[next]}（下一条消息生效）`);
+}
+
+/* 设置页 / 架构页是全屏覆盖层。打开时把同一个 .composer-area 移到 body 下做底部 dock，
+   关闭时放回 .main（它本来就是 .main 的最后一个子元素）。
+   appendChild 是「移动」不是克隆，textarea 上已绑定的事件与草稿全部保留。 */
+let composerHome = null;
+function syncComposerDock(forceClosed = false) {
+  const area = $('.composer-area');
+  if (!area) return;
+  const settingsOpen = $('#settingsPage') && !$('#settingsPage').hidden;
+  const archOpen = $('#archPage') && !$('#archPage').hidden;
+  const pageOpen = !forceClosed && !!(settingsOpen || archOpen);
+  document.body.classList.toggle('page-open', pageOpen);
+  if (pageOpen) {
+    if (area.parentNode !== document.body) {
+      composerHome = area.parentNode;
+      document.body.appendChild(area);
+    }
+  } else if (area.parentNode !== document.body && composerHome) {
+    composerHome.appendChild(area);
+  } else if (area.parentNode === document.body && composerHome) {
+    composerHome.appendChild(area);
+  }
+  // 任何状态都不允许把输入框藏起来（含旧代码/插件误设 hidden）
+  area.hidden = false;
+  area.style.removeProperty('display');
+  syncComposerControls();
+}
+
+/** 在覆盖页上按回车/发送时先回到对话，保证新回复立刻看得见。 */
+function leavePagesForChat() {
+  if (!document.body.classList.contains('page-open')) return;
+  if ($('#settingsPage') && !$('#settingsPage').hidden) closeSettings();
+  if ($('#archPage') && !$('#archPage').hidden) closeArchPage();
+  setTimeout(() => syncComposerDock(), 260);
+}
 
 function validateBaseAndKey(cfg, opts = {}) {
   const raw = String(cfg?.baseUrl ?? '').trim();
@@ -790,10 +858,13 @@ function renderHeader() {
   const live = sessionBusy(s.id);
   $('#subtitle').textContent = `${label} · ${live ? '生成中' : '就绪'}`;
   $('#titleDot').className = 'dot' + (live ? ' live' : ' ok');
+  syncComposerControls(); // 输入区模型名 / 思考强度跟随连接即时刷新
   const goalEl = $('#goalLine');
   if (goalEl) {
     if (s.goal?.trim()) {
-      goalEl.textContent = `目标：${s.goal.trim()}`;
+      goalEl.textContent = s.goalStatus === 'paused'
+        ? `目标（已暂停）：${s.goal.trim()}`
+        : `目标：${s.goal.trim()}`;
       goalEl.hidden = false;
     } else {
       goalEl.hidden = true;
@@ -1332,6 +1403,36 @@ function renderTools(node, msg) {
   for (const [id, el] of existing) if (!seen.has(id)) el.remove();
 }
 
+/* 思考区块：推理模型的 reasoning_content 不是正文，但也不能凭空消失——
+   没有它，「思考 40 秒、正文一个字没出」在界面上就是纯黑箱。
+   折叠展示：标题永远显示字数（证明请求确实在动），展开才看内容。 */
+function renderThink(node, msg) {
+  const slot = $('.slot-think', node);
+  if (!slot) return;
+  const text = String(msg.reasoning || '');
+  const thinkTruncated = msg.reasoningTruncated === true;
+  if (!text) {
+    if (slot.childElementCount) slot.innerHTML = '';
+    return;
+  }
+  let box = $('.think-block', slot);
+  if (!box) {
+    slot.innerHTML = '<details class="think-block"><summary>思考过程 <span class="think-len"></span></summary><div class="think-body"></div></details>';
+    box = $('.think-block', slot);
+    /* 用户意图只认「点击」：程序里设 box.open 也会触发 toggle，
+       用它当用户操作会让「正文开始后自动收起」永远失效。 */
+    $('summary', box).addEventListener('click', () => {
+      setTimeout(() => { msg.thinkOpen = box.open; msg.thinkTouched = true; }, 0);
+    });
+  }
+  const lenEl = $('.think-len', box);
+  const bodyEl = $('.think-body', box);
+  const label = `${text.length} 字${thinkTruncated ? '（已截断）' : ''}`;
+  if (lenEl.textContent !== label) lenEl.textContent = label;
+  if (bodyEl.textContent !== text) bodyEl.textContent = text;
+  if (!msg.thinkTouched) box.open = msg.thinkOpen === true;
+}
+
 function fileIconFor(name) {
   const ext = String(name || '').split('.').pop().toLowerCase();
   if (/^(xlsx?|csv|tsv|ods)$/.test(ext)) return 'i-sheet';
@@ -1415,14 +1516,19 @@ function assistantNode(msg) {
   // toolsCollapsed：流式回合里自动/手动收起的状态记在消息数据上，切会话重建节点后不丢
   const collapsed = hasTools && msg.toolsCollapsed === true;
   const summaryCls = hasTools && !collapsed ? 'summary' : 'summary collapsed';
-  const toolsCls = hasTools && !collapsed ? 'tools' : 'tools hidden';
+  /* 正文也放在 .tools.seg-box 里（分段渲染：每段 = .prose + 工具卡片）。
+     旧逻辑在「没有工具调用」时给容器加 hidden —— 结果整条纯文字答复被
+     max-height:0 / opacity:0 藏掉，而思考区在容器外照常显示，用户看到的
+     就是「一直在思考、聊天框一个字都不出」。只有用户主动折叠工具列表才允许收起。 */
+  const toolsCls = collapsed ? 'tools seg-box hidden' : 'tools seg-box';
   node.innerHTML = `
     <button class="${summaryCls}" ${hasTools ? '' : 'data-empty="1"'}>
       ${summaryText(msg.summary)}
       ${ico('i-chevron', 'ico tiny chev')}
     </button>
+    <div class="slot-think"></div>
     <div class="slot-tasks"></div>
-    <div class="${toolsCls} seg-box"></div>
+    <div class="${toolsCls}"></div>
     <div class="slot-narrate"></div>
     <div class="slot-retry"></div>
     <div class="slot-approval">${approvalCard(msg.approval)}</div>
@@ -1432,6 +1538,7 @@ function assistantNode(msg) {
   `;
 
   renderTasks(node, msg);
+  renderThink(node, msg);
   renderTools(node, msg);
 
   const summary = $('.summary', node);
@@ -1655,6 +1762,66 @@ function switchSource(next) {
   if (state.projectOpen) { archSessionState(); renderArchPage(); }
 }
 
+/* ───────── 省 token：重复工具调用 / 重复上下文读取 / 冗余输出抑制 ─────────
+   模型常在同一回合反复 read_file 同一文件、重复 list_dir，或把同一份结果二次回灌上下文。
+   每次重复都意味着多一次执行，并且后续每一轮请求都把整份结果重新算进 prompt。
+   按「工具 + 稳定化参数 + 写操作版本」记住首次结果：命中时不再执行，只回一行引用
+   （完整结果仍在上文，上下文完整性不丢）。写操作推进 epoch，保证「改完再读」不被误判。
+   纯函数与 createToolCallSaver 可直接被探针断言，不依赖网络。 */
+const TOKEN_SAVING_READ_TOOLS = Object.freeze(['read_file', 'list_dir', 'find_files', 'search_files', 'fetch_url']);
+const isReadOnlyTool = (name) => TOKEN_SAVING_READ_TOOLS.includes(String(name || ''));
+
+function stableArgsText(value) {
+  if (Array.isArray(value)) return '[' + value.map(stableArgsText).join(',') + ']';
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value).sort()
+      .map((k) => JSON.stringify(k) + ':' + stableArgsText(value[k])).join(',') + '}';
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function toolReuseKey(name, args, writeEpoch) {
+  if (!isReadOnlyTool(name)) return '';
+  const a = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  return `${name}|${writeEpoch}|${stableArgsText(a)}`;
+}
+
+function toolReuseResult(name, args, firstIndex) {
+  const target = typeof describeToolTarget === 'function' ? describeToolTarget(name, args) : '';
+  return `（与第 ${firstIndex} 个工具调用「${name}${target ? ' · ' + target : ''}」完全相同，`
+    + '结果已在上文，本次未重复执行或展开；如需重新读取，请改变参数（例如加 offset/limit）。）';
+}
+
+function createToolCallSaver(execute) {
+  const seen = new Map();
+  let writeEpoch = 0;
+  let seq = 0;
+  return {
+    run: async (call) => {
+      const index = ++seq;
+      const name = String(call?.function?.name || '');
+      let args = {};
+      try {
+        args = call?.function?.arguments ? JSON.parse(call.function.arguments) : {};
+      } catch { /* 参数错误交给原执行器如实报错 */ }
+      const key = toolReuseKey(name, args, writeEpoch);
+      if (!key) return execute(call);
+      const first = seen.get(key);
+      if (first) return toolReuseResult(name, args, first);
+      seen.set(key, index); // 同批并行的重复调用也只真正执行一次
+      const result = await execute(call);
+      // 失败/取消的结果不缓存：下一次相同调用要真的重试，不能把错误当结果复用
+      if (result == null || /^(工具执行失败|工具参数解析失败|已取消|权限被拒绝)/.test(String(result).slice(0, 24))) {
+        seen.delete(key);
+      }
+      return result;
+    },
+    markWrite() { writeEpoch += 1; },
+    get epoch() { return writeEpoch; },
+    get size() { return seen.size; },
+  };
+}
+
 /* ───────── 上下文构造 ───────── */
 
 function pickScript(text) {
@@ -1793,9 +1960,11 @@ function buildApiMessages(session, currentText, draft, skipUser) {
       + '同步模式最长 180 秒，超时会被杀掉且输出丢失。'
       + '任务清单（todo_write）由你自行判断是否使用：任务复杂、步骤较多时可以建立清单并更新进度。'
       + '不要虚构工具调用、工具结果或文件产出。'
+      + '工具调用只能通过 tool_calls 字段发起，禁止在正文里写 functions.xxx、工具调用 JSON 或调用草稿；不确定如何调用时直接给文字答复，不要反复重写调用计划。'
       + '【硬性要求】每次调用工具前先用一句短句说明这一步要做什么（不超过 15 字，例如：先看一下目录结构。）；'
       + '多步工具循环中每一步都先说明再调用，不要逐句复述同样的措辞；工具全部结束后只报告一次最终结果，'
-      + '不要每完成一个工具就单独汇报一遍结果。',
+      + '不要每完成一个工具就单独汇报一遍结果。'
+      + '同一文件/命令的结果已在上文时直接引用，不要重复调用相同参数的只读工具；需要新结果时才改参数重读。',
   }, {
     role: 'system',
     content: '【工作协议与执行约束（用户指定，全程遵守，与其他指令冲突时以本协议为准）】\n' + AGENT_PROTOCOLS,
@@ -1816,8 +1985,9 @@ function buildApiMessages(session, currentText, draft, skipUser) {
   if (pairMode !== 'none' && PAIR_PROMPTS[pairMode]) {
     out.push({ role: 'system', content: PAIR_PROMPTS[pairMode] });
   }
-  // 会话目标：/goal 设置，每轮注入
-  if (session.goal?.trim()) {
+  // 会话目标：/goal（别名 /target）设置，active 时每轮注入；/goal pause 暂停后不注入，
+  // 对齐 ZCode「paused 目标不继续」的语义，同时省下这一轮的 token。
+  if (session.goal?.trim() && session.goalStatus !== 'paused') {
     out.push({ role: 'system', content: `本会话目标：${session.goal.trim()}` });
   }
   const delegateTargets = state.agents.filter((a) => a.status === 'active' && a.id !== state.defaultAgentId);
@@ -1904,12 +2074,33 @@ function formatStatusline() {
   const tok = u.total_tokens ?? u.totalTokens
     ?? ((u.prompt_tokens ?? u.inputTokens ?? 0) + (u.completion_tokens ?? u.outputTokens ?? 0));
   const durMs = msg?.startedAt && msg?.finishedAt ? Math.max(0, msg.finishedAt - msg.startedAt) : 0;
-  return `模型 ${currentModel()} · 智能体 ${agents} 活动 · 上下文 ${ctxPct}% · 本轮 ${Number(tok || 0).toLocaleString('en-US')} tok / ${(durMs / 1000).toFixed(1)}s`;
+  const usedChars = s ? sessionContextChars(s) : 0;
+  const ctxText = `上下文 ${ctxPct}%（${Math.round(usedChars / 1000)}k/${Math.round(LIMITS.maxContextChars / 1000)}k）`;
+  const turnCache = msg ? cacheHitText(u).replace(' · 缓存 ', '') : '';
+  const avg = sessionCacheStats(s);
+  /* 两个百分比口径不同，必须各带标签，不能挤在同一个「缓存」括号里：
+     本轮 = 本回合各次上游请求合计 cached/prompt；平均 = 会话级 Σcached/Σprompt 累计加权。
+     与 ZCode 一致：分母是 total input，不叠加缓存分项；未上报缓存的回合不进平均。 */
+  const cacheText = turnCache || avg
+    ? ` · 本轮缓存 ${turnCache || '—'}`
+      + (avg ? ` · 平均缓存命中率：均值 ${avg.rate}%（会话 ${avg.turns} 轮）` : '')
+    : '';
+  return `模型 ${currentModel()} · 智能体 ${agents} 活动 · ${ctxText} · 本轮 ${Number(tok || 0).toLocaleString('en-US')} tok / ${(durMs / 1000).toFixed(1)}s${cacheText}`;
 }
+
+/* 口径说明常驻在状态条的 title：交互不变（点击/刷新都不受影响），
+   但两类指标的统计范围、数据来源与展示位置可以直接查到，不会混读。 */
+const STATUSLINE_TOOLTIP = [
+  '上下文：当前会话历史字符数 / 上下文预算（设置页 dsh.ctxLimit）；此处与下方输入区同屏常驻。',
+  '本轮缓存命中率：本回合各次上游请求合计 cached_tokens / prompt_tokens（主进程 normalizeUsage 归一 OpenAi/DeepSeek 各种字段）；未上报显示 —。同一数据在助手消息耗时行以「本轮缓存」显示。',
+  '平均缓存命中率（均值）：当前会话内「上游确实上报了缓存」的已完成回合，Σcached_tokens / Σprompt_tokens 累计加权，非各轮百分比的算术平均；未上报的回合不计入。展示位置：顶部状态条本行。',
+].join('\n');
 
 function updateStatusline() {
   const el = $('#statusline');
-  if (el) el.textContent = formatStatusline();
+  if (!el) return;
+  el.textContent = formatStatusline();
+  el.title = STATUSLINE_TOOLTIP;
 }
 
 function scheduleStatusline() {
@@ -2743,9 +2934,53 @@ function askToolApproval(ctx, tool, runtimeApproval) {
   });
 }
 
+/* 收尾保底：上游一个正文字符都没给时，不能只留一句「（模型未返回内容）」——
+   用户要的是答复。把思考过程里靠近结论的部分整理成一屏可见的最终答复，
+   并说清原因与下一步（调低思考强度 / 重试）。 */
+function distillReasoning(text) {
+  const lines = [...new Set(String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean))];
+  if (!lines.length) return '';
+  // 过滤「让我先…」「接下来…」这类纯过程描述，优先留结论性句子
+  const noise = /^(让|我|首先|接下来|然后|嗯|好的|需要|现在|再|接着|先|考虑|检查|等待|尝试|所以先)/;
+  const useful = lines.filter((l) => !noise.test(l) && l.length >= 8);
+  return (useful.length ? useful : lines).slice(-6).join('\n').slice(-1200);
+}
+
+function finalTurnAnswer(draft, finishReason, err) {
+  const reasoned = String(draft?.reasoning || '').length;
+  const distilled = distillReasoning(draft?.reasoning);
+  const why = err
+    ? `请求未完成：${String(err).slice(0, 160)}`
+    : finishReason === 'length'
+      ? (reasoned ? `输出额度耗尽（finish_reason=length，思考 ${reasoned} 字 · 正文 0 字）` : '输出额度耗尽（finish_reason=length，正文 0 字）')
+      : reasoned
+        ? `上游本轮只返回了思考过程（${reasoned} 字），正文为空`
+        : '上游本轮没有返回正文';
+  if (distilled) {
+    return `**根据思考过程整理的答复**\n\n${distilled}\n\n> ${why}。以上是从本轮思考中整理出的结论，完整推理见「思考过程」；如不够完整，把输入区的「思考强度」调低后重试。`;
+  }
+  /* 无思考链可用：中性说明 + 通用建议，不虚构思考内容，也不假定接入点支持思考强度。 */
+  return `**本轮没有取得模型正文**\n\n${why}；本轮没有思考内容可整理。请点下方「重试」重新发送、换一个更具体的问法，或检查接入点与模型配置。`;
+}
+
+/* 最后一帧保险：把定稿正文真正写进用户正在看的那个节点。
+   历史 bug：正文写在 .tools 里、而该容器带 hidden（opacity:0 / max-height:0），
+   数据齐全但肉眼全白。收尾时校验一次，宁可重写也不要留空气泡。 */
+function ensureFinalProse(node, draft) {
+  if (!node || !node.isConnected) return;  // 后台会话：数据已写好，切回时 renderChat 会投影
+  const box = $('.tools', node);
+  if (box && !(draft.tools || []).length) box.classList.remove('hidden');
+  const visible = $$('.prose', node).map((p) => p.textContent || '').join('').trim();
+  if (visible || !String(draft.body || '').trim()) return;
+  const proses = $$('.prose', node);
+  const target = proses[proses.length - 1] || $('.prose', node);
+  if (target) target.innerHTML = markdown(draft.body);
+}
+
 function runApiTurn(ctx, opts) {
   const { draft, node, prose, s, ctl } = ctx;
   let body = '';
+  let lastFinishReason = '';   // 末步的 finish_reason：length 表示被输出上限截断
   let raf = 0;
   let retryTick = null;
   let finished = false;
@@ -2788,8 +3023,9 @@ function runApiTurn(ctx, opts) {
     const liveNode = liveDraftNode(draft);
     if (liveNode) {
       // 打断处理：重挂时若入场动画还在播，立即取消 —— 流式正文不该边写边飞
-      node.classList.remove('is-enter');
-      renderTools(node, draft); // 段组对齐 + 定稿段渲染 + 卡片分发（签名跳过，便宜）
+      liveNode.classList.remove('is-enter');
+      renderThink(liveNode, draft);   // 思考区随流增量更新（节点可能是 renderChat 重建的，必须用 liveNode）
+      renderTools(liveNode, draft); // 段组对齐 + 定稿段渲染 + 卡片分发（签名跳过，便宜）
       const proses = $$('.prose', liveNode);
       painter.mount(proses[proses.length - 1]); // 挂到最后一段：当前步骤的流式说明区
       const segs = bodySegments(draft);
@@ -2797,9 +3033,20 @@ function runApiTurn(ctx, opts) {
       if (stickBottom) scrollToBottom();
     }
   };
+  /* rAF 在窗口被遮挡、最小化或系统忙时会被 Chromium 节流甚至暂停：
+     那时 chunk 照收（token 照花），画面却一动不动——用户看到的就是「聊天框不出字」。
+     兜底定时器保证最后一个 chunk 一定会被画出来；paint 是幂等的，重复调用无副作用。 */
+  let paintFallback = 0;
   const schedulePaint = () => {
     if (raf) return;
     raf = requestAnimationFrame(() => { raf = 0; paint(); });
+    clearTimeout(paintFallback);
+    paintFallback = setTimeout(() => {
+      if (!raf) return;                 // rAF 正常执行过：无需补画
+      cancelAnimationFrame(raf);
+      raf = 0;
+      paint();
+    }, 250);
   };
   ctl.repaint = () => paint(); // renderChat 重建节点后恢复流式更新的入口
   const setSummaryLabel = (label) => {
@@ -2864,6 +3111,7 @@ function runApiTurn(ctx, opts) {
     finished = true;
     clearRetry();
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    clearTimeout(paintFallback);
     const aborted = !!draft.aborted || ctl.stopRequested;
 
     // 回合终结同步到 Runtime：取消走 cancelTask，正常/失败走 finishRun
@@ -2901,19 +3149,42 @@ function runApiTurn(ctx, opts) {
       } catch { /* Runtime 不可用时不影响 UI 收尾 */ }
     }
 
+    /* 收尾统一走「当前 DOM 里的那个节点」：切会话/重建后外层的 node 可能已经脱离文档，
+       往里写等于没写（用户看到的就是停在半截或干脆空白的气泡）。 */
+    const finalNode = liveDraftNode(draft) || node;
+
+    /* 无论成功、失败还是空正文：本轮都必须留下一屏肉眼可见的最终文字。
+       失败路径不再整段覆盖已有正文（补答/兜底文字会被冲掉），只追加错误说明。 */
     if (err) {
       draft.error = err;
-      draft.body = `**API 调用失败**\n\n\`\`\`\n${err}\n\`\`\``;
-      // prose 直写移除：走 finish 后的 renderTools 分段渲染
+      const errBlock = `**本轮请求未完成**\n\n\`\`\`\n${err}\n\`\`\``;
+      /* 失败时把原因放在最前面：兜底文案里的「请求未完成：xxx」会与 errBlock 重复一遍状态码，
+         只有在它确实带来「思考整理内容」时才追加，否则只留一句下一步指引。 */
+      const distilledOnError = draft.reasoning ? distillReasoning(draft.reasoning) : '';
+      const tail = distilledOnError
+        ? `\n\n${finalTurnAnswer(draft, lastFinishReason, err)}`
+        : '\n\n> 本轮没有正文可显示。按上面的提示处理后，点「重试」重新发送。';
+      draft.body = body
+        ? `${body}\n\n---\n\n${errBlock}`
+        : `${errBlock}${tail}`;
       toast('API 调用失败');
       // 发送失败同步一条系统通知；tag 与 finish() 相同，两条路径只会发一条 toast
       osNotify('回合失败', `${s.title}：API 调用失败，回来看看原因`, 'turn:' + s.id);
-      finish(draft, node, s, false, '调用失败');      renderTools(node, draft); // 分段渲染收尾：finish 已置 finishedAt，最后段也可定稿渲染
+    } else if (!body) {
+      // 上游只思考不说话 / 输出被截断：整理出可见的「最终答复」而不是空气泡
+      draft.body = finalTurnAnswer(draft, lastFinishReason, null);
+    } else if (lastFinishReason === 'length') {
+      draft.body = body + '\n\n> （输出达到模型上限，以上内容可能不完整）';
     } else {
-      draft.body = body || '（模型未返回内容）';
-      prose.innerHTML = markdown(draft.body);
-      finish(draft, node, s, aborted);      renderTools(node, draft);
+      draft.body = body;
     }
+
+    const finalProse = $('.prose', finalNode) || prose;
+    if (finalProse) finalProse.innerHTML = markdown(draft.body);
+    finish(draft, finalNode, s, err ? false : aborted, err ? '调用失败' : undefined);
+    renderThink(finalNode, draft);   // 失败时思考内容照样可查：它往往就是失败原因
+    renderTools(finalNode, draft);   // 分段定稿：写完再按 draft.body 投影一次
+    ensureFinalProse(finalNode, draft); // 最后一帧保险：正文真的落在可见节点里
   };
 
   /** 发一次模型请求；返回该步正文与工具调用，不负责收尾。 */
@@ -2932,9 +3203,19 @@ function runApiTurn(ctx, opts) {
       onEvent(e) {
         if (settled) return;
         if (e.type === 'retry') { showRetry(e); }
-        else if (e.type === 'chunk') {
+        else if (e.type === 'think') {
+          // 思考流单独累积：正文口径（body）不受影响，但它必须可见、且能证明请求在动
+          if (retryTick) clearRetry();
+          draft.reasoning = (draft.reasoning || '') + String(e.text || '');
+          if (e.truncated) draft.reasoningTruncated = true;
+          if (draft.thinkOpen === undefined) draft.thinkOpen = true;  // 首个思考片：默认展开
+          setSummaryLabel('思考中');
+          schedulePaint();
+        } else if (e.type === 'chunk') {
           if (retryTick) clearRetry();
           setSummaryLabel('进行中');
+          // 正文开始输出：思考区自动收起（用户手动开合过就不动）
+          if (draft.reasoning && !draft.thinkTouched) draft.thinkOpen = false;
           // 本轮已有工具调用、且是本步首个非空正文 chunk → 自动收起一次（仅 runApiTurn，预览路径不动）
           if (firstChunk && e.text && draft.tools.length) autoCollapseTools();
           stepText += e.text;
@@ -2945,10 +3226,38 @@ function runApiTurn(ctx, opts) {
             body += e.text;
           }
           schedulePaint();
-        } else if (e.type === 'usage') { draft.usage = e.usage; handler.usage = e.usage; }
+        }         else if (e.type === 'usage') { draft.usage = e.usage; handler.usage = e.usage; }
+        else if (e.type === 'output-guard') { handler.outputGuard = e; }
         else if (e.type === 'error') { handler.errorEvt = e; }
         else if (e.type === 'done') {
           handler.toolCalls = Array.isArray(e.toolCalls) ? e.toolCalls : [];
+          /* 上游把工具调用写成正文 / 反复刷同一段文字：不再让它以纯文本直出，
+             改成一张「已拦截」工具卡片 + 一句可见说明，并清空本步调用让循环立即终止。 */
+          const guard = e.outputGuard || handler.outputGuard;
+          if (guard) {
+            handler.toolCalls = [];
+            const kept = String(body || '').split(/\r?\n/)
+              .filter((l) => !/\b(?:to=)?functions\.[A-Za-z_]\w*\b|<tool_call\b|"tool_calls"\s*:/i.test(l))
+              .join('\n').trim();
+            const why = guard.kind === 'repeat' ? '模型开始反复输出同一段内容' : '模型把工具调用写成了正文文本';
+            body = `**已自动停止本轮**（${why}）\n\n已截断重复/草稿内容并结束本轮，不会继续重复输出。${kept ? `\n\n${kept}` : ''}`;
+            if (!draft.tools.some((t) => String(t.id || '').startsWith('textcall-'))) {
+              draft.tools.push({
+                id: 'textcall-' + Date.now(),
+                name: guard.name || '工具调用（文本形式）',
+                verb: guard.kind === 'repeat' ? '重复输出' : '文本形式调用',
+                icon: 'i-alert', tone: 'warn',
+                target: guard.kind === 'repeat' ? '重复输出已截断' : '未执行：未通过 tool_calls 下发',
+                status: 'error', meta: '已拦截', args: {},
+                result: '该调用以纯文本输出，未执行；请通过工具调用通道重新发起。',
+                expanded: false, bodyAtStart: String(draft.body || '').length,
+              });
+              revealTools(node, draft);
+            }
+            schedulePaint();
+          }
+          handler.finishReason = String(e.finishReason || '');
+          handler.reasonChars = Number(e.reasonChars) || 0;
           if (typeof e.retries === 'number') draft.retries = e.retries;
           if (typeof e.attempts === 'number') draft.attempts = e.attempts;
           if (e.aborted) draft.aborted = true;
@@ -2960,13 +3269,21 @@ function runApiTurn(ctx, opts) {
         settled = true;
         clearRetry();
         clearTimeout(timer);
-        if (raf) { cancelAnimationFrame(raf); raf = 0; }
+        /* done 常和最后一个 chunk 落在同一帧：直接 cancel 会把最后一屏正文永久丢掉
+           （数据有、画面没有 = 用户眼里的「聊天框不显示字」）。先补画一帧再收尾。 */
+        if (raf) { cancelAnimationFrame(raf); raf = 0; try { paint(); } catch { /* 收尾优先 */ } }
+        clearTimeout(paintFallback);
         state.turns.delete(id);
         if (state.activeTurnId === id) state.activeTurnId = null;
         if (sessionStepId.get(s.id) === id) sessionStepId.delete(s.id);
         const aborted = !!endOpts.localAbort || !!draft.aborted || ctl.stopRequested;
         if (aborted) draft.aborted = true;
-        resolve({ error: err || null, aborted, text: stepText, toolCalls: handler.toolCalls, usage: handler.usage, streamed: !firstChunk });
+        resolve({
+          error: err || null, aborted, text: stepText, toolCalls: handler.toolCalls,
+          usage: handler.usage, streamed: !firstChunk,
+          finishReason: handler.finishReason || '',
+          reasonChars: handler.reasonChars || 0,
+        });
       },
     };
 
@@ -3318,8 +3635,15 @@ function runApiTurn(ctx, opts) {
     }
 
     const messages = opts.messages.slice();
+    const toolSaver = createToolCallSaver(runToolCall); // 本回合内抑制重复只读调用与重复结果回灌
+    /* 循环熔断：模型偶尔会每轮返回同一批 tool_calls（工具结果没被消费时尤其常见），
+       原先只靠「模型不再调用工具」退出，没有上限就会无限打转、持续烧 token。 */
+    const MAX_TOOL_STEPS = 24;
+    let toolSteps = 0;
+    let lastCallSig = '';
+    let sameCallRuns = 0;
 
-    // 参考 opencode：工具调用次数不设上限，循环到模型不再调用工具、用户中断或出错为止
+    // 参考 opencode：循环到模型不再调用工具、用户中断、出错或触发熔断为止
     for (;;) {
       if (ctl.stopRequested) { draft.aborted = true; break; }
       const useTools = state.toolSpecs.length > 0;
@@ -3369,6 +3693,7 @@ function runApiTurn(ctx, opts) {
 
       if (r.error) { finishApi(r.error); return; }
       if (r.aborted) { draft.aborted = true; break; }
+      if (r.finishReason) lastFinishReason = r.finishReason;
       // 工具回合里模型的文字已随 chunk 流入 body（此前的重复追加是「说明出现两遍」的根因）；
       // 仅当本步没有收到任何 chunk（异常的非流式路径）时才兜底并入，避免同一句话出现两次
       if (r.text && r.toolCalls.length && !r.streamed) {
@@ -3376,6 +3701,16 @@ function runApiTurn(ctx, opts) {
         schedulePaint();
       }
       if (!r.toolCalls.length) break;
+
+      const sig = r.toolCalls.map((c) => `${c?.function?.name || ''}:${c?.function?.arguments || ''}`).join('|');
+      sameCallRuns = sig && sig === lastCallSig ? sameCallRuns + 1 : 0;
+      lastCallSig = sig;
+      if (++toolSteps > MAX_TOOL_STEPS || sameCallRuns >= 2) {
+        const why = sameCallRuns >= 2 ? '同一批工具调用连续重复' : '达到单轮工具步数上限';
+        body = `${body ? body + '\n\n' : ''}**工具循环已自动终止**（${why}）\n\n已停止继续调用，避免重复输出与死循环。`;
+        schedulePaint();
+        break;
+      }
 
       if (!useTools) {
         // 工具定义不可用时收到 tool_calls：不执行，结束本轮
@@ -3389,13 +3724,15 @@ function runApiTurn(ctx, opts) {
       messages.push({ role: 'assistant', content: r.text || '', tool_calls: r.toolCalls });
       let stopped = false;
       // 并行执行工具调用：delegate_task 等子任务不再互相阻塞，一轮内的多个委派同时排队运行
-      const results = await Promise.all(r.toolCalls.map((call) => runToolCall(call)));
+      const results = await Promise.all(r.toolCalls.map((call) => toolSaver.run(call)));
       for (const call of r.toolCalls) {
         const result = results.shift();
         if (result === null) { stopped = true; continue; }
         messages.push({ role: 'tool', tool_call_id: call.id, content: result });
         if (ctl.stopRequested) { stopped = true; break; }
       }
+      // 本批出现过写操作：推进版本，之后重读同一文件不会被误判成重复
+      if (r.toolCalls.some((c) => !isReadOnlyTool(c?.function?.name))) toolSaver.markWrite();
       if (stopped) {
         if (ctl.stopRequested) draft.aborted = true;
         break;
@@ -3536,11 +3873,35 @@ function buildMetrics(draft) {
   const seconds = ((draft.finishedAt - draft.startedAt) / 1000).toFixed(1);
   const chars = (draft.body || '').length;
   const tokens = draft.usage?.total_tokens ?? draft.usage?.totalTokens;
+  const cache = cacheHitText(draft.usage).replace(' · 缓存 ', ' · 本轮缓存 ');
   const retried = draft.retries > 0 ? ` · 重试 ${draft.retries} 次` : '';
-  return `${seconds} 秒 · ${chars} 字 · ${draft.tools.length} 次工具${tokens ? ` · ${tokens} tokens` : ''}${retried}`;
+  return `${seconds} 秒 · ${chars} 字 · ${draft.tools.length} 次工具${tokens ? ` · ${Number(tokens).toLocaleString('en-US')} tokens` : ''}${cache}${retried}`;
+}
+
+/* 单次请求的缓存命中率（提示缓存）。上游不报就是「未提供」，不能显示成 0%。 */
+function cacheHitText(usage) {
+  const u = usage || {};
+  const rate = Number.isFinite(u.cache_rate) ? u.cache_rate
+    : (Number.isFinite(u.prompt_tokens) && Number.isFinite(u.cached_tokens) && u.prompt_tokens > 0
+      ? Math.round((u.cached_tokens / u.prompt_tokens) * 1000) / 10 : null);
+  if (rate == null) return '';
+  const hit = Number.isFinite(u.cached_tokens) ? Number(u.cached_tokens).toLocaleString('en-US') : '';
+  const all = Number.isFinite(u.prompt_tokens) ? Number(u.prompt_tokens).toLocaleString('en-US') : '';
+  return hit && all ? ` · 缓存 ${rate}%（${hit}/${all}）` : ` · 缓存 ${rate}%`;
+}
+
+/* 会话平均命中率：只统计「上游确实报了缓存」的回合，避免不报的接入点把均值拖成 0。 */
+function sessionCacheStats(s) {
+  const st = s?.cacheStats;
+  if (!st || !st.prompt || !st.turns) return null;
+  return { rate: Math.round((st.cached / st.prompt) * 1000) / 10, turns: st.turns };
 }
 
 function finish(draft, node, session, stopped, overrideLabel) {
+  /* 节点可能是 renderChat 重建前的旧引用（切会话/分页/压缩后都会重建）。
+     用 live 兜底：否则「已完成」的标签和耗时永远写不到用户正在看的那条消息上，
+     看起来就像一个卡住的空气泡。 */
+  const live = liveDraftNode(draft) || node;
   draft.finishedAt = Date.now();
   draft.summary.label = overrideLabel
     || (draft.validationFailed ? '校验失败' : stopped ? '已中断' : '已完成');
@@ -3548,9 +3909,19 @@ function finish(draft, node, session, stopped, overrideLabel) {
   draft.summary.messages = draft.body ? 1 : 0;
   draft.metrics = buildMetrics(draft);
 
-  const summary = $('.summary', node);
+  /* 会话级缓存命中累计：只在「上游报了缓存」时累加，
+     否则不支持缓存的接入点会把自己的 0 混进均值，看起来像缓存全失效。 */
+  const u = draft.usage;
+  if (u && Number.isFinite(u.cached_tokens) && Number.isFinite(u.prompt_tokens) && u.prompt_tokens > 0) {
+    const st = session.cacheStats || (session.cacheStats = { cached: 0, prompt: 0, turns: 0 });
+    st.cached += u.cached_tokens;
+    st.prompt += u.prompt_tokens;
+    st.turns += 1;
+  }
+
+  const summary = $('.summary', live);
   if (summary) summary.innerHTML = summaryText(draft.summary) + ico('i-chevron', 'ico tiny chev');
-  const slot = $('.slot-metrics', node);
+  const slot = $('.slot-metrics', live);
   if (slot) {
     slot.innerHTML = `<div class="metrics">${esc(draft.metrics)} ${ico('i-chevron-right', 'ico tiny')}</div>`;
     if (stopped && draft.resumeFrom) {
@@ -3697,6 +4068,10 @@ function autoGrow() {
 }
 
 function updateSendState() {
+  /* 输入框常驻：生成中、切会话、开设置页都不允许被 hidden / display:none 抹掉。
+     旧逻辑只在按钮上换 stop 图标，这里把「区域永远可见」变成显式约束。 */
+  const area = $('.composer-area');
+  if (area) { area.hidden = false; area.style.removeProperty('display'); }
   const btn = $('#sendBtn');
   const has = $('#input').value.trim().length > 0;
   // 忙碌按「当前活跃会话」判定：A 会话后台运行时，B 会话的发送键仍是正常发送样式
@@ -3809,28 +4184,98 @@ function handleCommand(text) {
     case '/stop': stopTurn(); break;
     case '/compact': compactContext(); break;
     case '/arch': openArchPage(); break;
-    case '/goal': handleGoal(parts.slice(1).join(' ').trim()); break;
+    // /target 是 /goal 的别名（对齐 ZCode）；用原文切片而非 split/join，保留目标内部空格与换行
+    case '/goal':
+    case '/target': handleGoal(text.replace(/^\s*\/(?:goal|target)\s*/i, '').trim()); break;
     case '/skills': openSettings('skills'); break;
     case '/load': handleLoadSession(parts.slice(1).join(' ').trim()); break;
     default:
-      toast(`未识别的命令「${cmd}」，可用：/new、/model、/compact、/arch、/stop、/goal、/skills、/load`);
+      toast(`未识别的命令「${cmd}」，可用：/new、/model、/compact、/arch、/stop、/goal、/target、/skills、/load`);
   }
 }
 
-/** /goal：设置或查看本会话目标，目标会以 system 消息注入每轮请求 */
-function handleGoal(text) {
-  const s = active();
-  if (!s) return;
-  if (!text) {
-    if (s.goal) toast(`当前目标：${s.goal}`);
-    else toast('还没有设置目标。用法：/goal <目标描述>');
-    return;
-  }
-  s.goal = text.slice(0, 500);
+/* /goal（别名 /target）：参考 ZCode 的 slashCommands.ts 与 handlers/goal.ts。
+   支持无参/show 查看、replace 强制替换、clear 清除、pause/resume 状态；
+   已有目标不静默覆盖（两段确认）；active 目标每轮以 system 消息注入。 */
+const GOAL_STATUS_LABEL = { active: '进行中', paused: '已暂停' };
+const GOAL_MAX = 500;
+let goalReplaceArmed = null;   // 两段确认：{ sessionId, objective, timer }
+
+function clearGoalReplaceArm() {
+  if (goalReplaceArmed?.timer) clearTimeout(goalReplaceArmed.timer);
+  goalReplaceArmed = null;
+}
+function armGoalReplace(s, objective) {
+  clearGoalReplaceArm();
+  const timer = setTimeout(() => { goalReplaceArmed = null; }, 5000);
+  goalReplaceArmed = { sessionId: s.id, objective, timer };
+}
+function applyGoal(s, objective, status, message) {
+  const clipped = objective.slice(0, GOAL_MAX);
+  s.goal = clipped;
+  s.goalStatus = status;
+  clearGoalReplaceArm();
   saveSessions();
   renderHeader();
   renderTodoPanel();
-  toast('会话目标已设置');
+  toast(`${message}：${clipped}${objective.length > GOAL_MAX ? `（已截断至 ${GOAL_MAX} 字）` : ''}`);
+}
+
+function handleGoal(text) {
+  const s = active();
+  if (!s) return;
+  const raw = String(text || '').trim();
+  const status = s.goalStatus === 'paused' ? 'paused' : 'active';
+  const hasGoal = !!s.goal?.trim();
+
+  // 无参数 / show：查看当前目标与状态；无目标时给用法（ZCode: Use /goal <objective> to set one）
+  if (!raw || /^show$/i.test(raw)) {
+    toast(hasGoal
+      ? `当前目标（${GOAL_STATUS_LABEL[status]}）：${s.goal.trim()}`
+      : '还没有设置目标。用法：/goal <目标描述>');
+    return;
+  }
+
+  const sub = raw.split(/\s+/, 1)[0].toLowerCase();
+
+  if (sub === 'clear') {
+    if (!hasGoal) { toast('还没有设置目标，无需清除。'); return; }
+    const old = s.goal.trim();
+    s.goal = ''; s.goalStatus = 'active';
+    clearGoalReplaceArm();
+    saveSessions(); renderHeader(); renderTodoPanel();
+    toast(`目标已清除（原：${old.slice(0, 40)}${old.length > 40 ? '…' : ''}）`);
+    return;
+  }
+  if (sub === 'pause' || sub === 'resume') {
+    if (!hasGoal) { toast('还没有设置目标，无法暂停/恢复。'); return; }
+    const next = sub === 'pause' ? 'paused' : 'active';
+    if (status === next) { toast(`目标已经是${GOAL_STATUS_LABEL[next]}`); return; }
+    s.goalStatus = next;
+    saveSessions(); renderHeader();
+    toast(`目标已${sub === 'pause' ? '暂停' : '恢复'}（${GOAL_STATUS_LABEL[next]}）`);
+    return;
+  }
+  if (sub === 'replace') {
+    const objective = raw.replace(/^replace\s*/i, '').trim();
+    if (!objective) { toast('用法：/goal replace <目标描述>'); return; }
+    applyGoal(s, objective, 'active', '目标已替换');
+    return;
+  }
+
+  // 设置：已有目标不静默覆盖，5 秒内再次输入同一条 /goal 即确认替换；
+  // 也可用 /goal replace 直接替换。objective 用原文，不做 split/join 改写。
+  if (hasGoal) {
+    const armed = goalReplaceArmed;
+    if (!armed || armed.sessionId !== s.id || armed.objective !== raw) {
+      armGoalReplace(s, raw);
+      toast(`已有目标：${s.goal.trim().slice(0, 40)}… 再次输入同一条 /goal 确认替换，或用 /goal replace <目标描述>`);
+      return;
+    }
+    applyGoal(s, raw, 'active', '目标已替换');
+    return;
+  }
+  applyGoal(s, raw, 'active', '目标已设置');
 }
 
 /** /load <会话id>：把另一会话的上下文摘要注入当前会话（跨会话读取）。
@@ -4541,6 +4986,7 @@ function openSettings(category = settingsCategory || 'appearance') {
   if (!page) return;
   page.classList.remove('is-closing'); // 可能正播出场动画，取消它
   page.hidden = false;
+  syncComposerDock();               // 输入区提升为底部 dock，覆盖页也不丢输入框
 }
 
 function closeSettings() {
@@ -4548,6 +4994,7 @@ function closeSettings() {
   if (!page || page.hidden) return;
   stopMcpPoll();
   animateOut(page, 200);
+  setTimeout(() => syncComposerDock(), 230);
 }
 
 /** 关于 pane 的运行环境行：preload 暴露的 platform / versions，静态渲染一次。 */
@@ -5981,6 +6428,7 @@ async function openArchPage() {
   if (page) {
     page.classList.remove('is-closing'); // 可能正播出场动画，取消它
     page.hidden = false;
+    syncComposerDock();                 // 架构页同样保留输入区
   }
   const canvas = $('#archCanvas');
   if (canvas) canvas.innerHTML = `<div class="arch-empty-state"><span class="arch-empty-icon">${ico('i-package')}</span><h3>正在读取项目架构…</h3><p>同步 Runtime 中的项目、任务与 Agent 状态。</p></div>`;
@@ -5997,6 +6445,7 @@ function closeArchPage() {
   clearTimeout(archState.pollTimer);
   renderArchLiveBadge(); // 页面已关，隐藏实时徽标
   animateOut($('#archPage'), 220);
+  setTimeout(() => syncComposerDock(), 250);
 }
 
 async function saveArchGoal(silent = false) {
@@ -7136,6 +7585,9 @@ function bind() {
   });
 
   $('#modelBtn').addEventListener('click', (e) => { e.stopPropagation(); openModelSheet(); });
+  // 输入区的模型入口：与顶栏共用同一个模型列表浮层，选择后立即生效
+  $('#composerModelBtn').addEventListener('click', (e) => { e.stopPropagation(); openModelSheet(); });
+  $('#composerEffort').addEventListener('change', (e) => setEffortFromComposer(e.target.value));
 
   $('#renameBtn').addEventListener('click', startRename);
   $('#panelBtn').addEventListener('click', () => {
@@ -7197,13 +7649,13 @@ function bind() {
   const ta = $('#input');
   ta.addEventListener('input', () => { autoGrow(); updateSendState(); updateSlash(); saveDraftSoon(); });
   ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); leavePagesForChat(); send(); }
     if (e.key === 'Escape') hideMenus();
     if (e.key === 'ArrowUp' && !e.shiftKey && tryHistory(-1)) e.preventDefault();
     if (e.key === 'ArrowDown' && !e.shiftKey && tryHistory(1)) e.preventDefault();
   });
   // 交给 send() 统一判定：busy+空输入=停止，busy+有文字=插话/排队，空闲=发送
-  $('#sendBtn').addEventListener('click', send);
+  $('#sendBtn').addEventListener('click', () => { leavePagesForChat(); send(); });
   /* 「N 个会话运行中」轻提示：展开运行中会话列表，点列表项切换过去 */
   $('#runningPill').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -7768,6 +8220,7 @@ function bind() {
 
 function boot() {
   applyTheme(state.theme);
+  syncComposerDock(true); // 首帧就保证输入框在、且控件显示当前连接
   // 跟随系统：系统深浅切换时实时重解析（只在「跟随系统」档位生效；参考 ZCode settings-appearance 的系统档位行为）
   try {
     systemSchemeMql = window.matchMedia('(prefers-color-scheme: dark)');
@@ -7811,9 +8264,17 @@ function boot() {
   window.dsh?.model?.onEvent((e) => {
     // 严格按 id 路由：旧回合迟到的 done 绝不能落到刚发起的新回合上
     if (!e || !e.id) return;
-    scheduleStatusline(); // 模型事件（usage/done 等）驱动状态条 150ms 去抖刷新
+    try { scheduleStatusline(); } catch { /* 状态条刷新不能挡住模型事件 */ }
     const handler = state.turns.get(e.id);
-    if (handler) handler.onEvent(e);
+    if (!handler) return;
+    try {
+      handler.onEvent(e);
+    } catch (ex) {
+      /* 单个事件抛错曾让后续 chunk/done 全被吞掉：界面永远停在「思考中」、
+         token 却在继续烧。这里立刻按失败收尾，保证输入框与最终文字都能回来。 */
+      console.error('[model:event]', ex);
+      try { handler.end(`界面处理模型事件失败：${ex?.message || ex}`); } catch { /* 已收尾 */ }
+    }
   });
 
   // 运行检查器实时跟随当前 Run 的事件

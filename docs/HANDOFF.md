@@ -149,12 +149,13 @@
 
 ## 十、验收命令速查
 ```bash
-node tools/run-all.js                    # 全量门禁（26 项：25✓ + runtime-ipc 跳过）
+node tools/run-all.js                    # 全量门禁（31 项：30✓ + runtime-ipc 跳过；含 tool-call-guard / no-reason / upstream-error 探针）
+env -u ELECTRON_RUN_AS_NODE ./node_modules/electron/dist/electron.exe tools/key-diag.js   # 凭据诊断：解密 profiles.bin + 逐档案打真实网关（401 排查第一步）
 node tools/runtime-governance-check.js   # 只跑治理/一致性 36 断言
 node tools/r15-check.js                  # 只跑 R15 整改 50 断言
 node tools/tools-check.js                # 只跑工具集 36 断言（含真实后台进程）
 node tools/release.js                    # 打包+字节校验（先关应用）
 env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron . --user-data-dir=.s-x --shot --script=tools/xxx-probe.js
-node tools/mock-gateway.js               # mock 网关 127.0.0.1:57321（[[slow]] [[narrslow]] [[narr]] [[many]] [[write]] [[read]] [[arch]] [[force]] [[tamper]]）
+node tools/mock-gateway.js               # mock 网关 127.0.0.1:57321（[[slow]] [[narrslow]] [[narr]] [[many]] [[write]] [[read]] [[arch]] [[force]] [[tamper]] [[noaccounts]] [[badkey]] [[http403]]）
 git -c http.proxy= -c https.proxy= push origin main   # 推送（直连；7877 代理已不可用）
 ```

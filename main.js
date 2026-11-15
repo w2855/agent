@@ -121,6 +121,9 @@ const CONNECT_TIMEOUT_MS = 15000;
 const HARD_TIMEOUT_MS = 180000;   // 单次回合总时长上限（重试共享这一份预算）
 const IDLE_TIMEOUT_MS = 45000;    // 两次 chunk 之间的最长静默
 const MAX_OUTPUT_CHARS = 200000;  // 防止异常网关把内存打满
+/* 思考内容上限：推理模型的 reasoning_content 可能比正文长一个数量级，
+   全量转发只会把渲染层拖慢（而且没人会逐字回看）。超出部分丢弃并标记 truncated。 */
+const MAX_REASON_CHARS = 40000;
 /* SSE 行缓冲上限（R15/A8）：MAX_OUTPUT_CHARS 只保护「已解析的正文」，
    保护不到尚未出现空行分隔的 buf——异常网关持续发送不含 \n\n 的数据会让它无限增长。 */
 const SSE_BUFFER_LIMIT = 4 * 1024 * 1024;
@@ -1155,6 +1158,22 @@ function extractServerMessage(text) {
   }
 }
 
+/* 上游网关「自己」没配好时，只照抄 HTTP 状态码会让人反复去查 key。
+   这里把已知的网关级故障翻译成下一步该做的事；原始报文仍原样保留在前半句。 */
+function upstreamHint(status, detail) {
+  const d = String(detail || '');
+  if (/no[_ ]accounts?|no accounts configured/i.test(d)) {
+    return '这不是 API Key 的问题：接入点网关自身没有可用账号，请先到该网关（例如 DeepAI-Panel）登录账号，或切换到其他接入点。';
+  }
+  if (status === 401) {
+    return '请确认地址与 key 属于同一个网关：不同本地端口（如 4399 / 6780）各有独立 key，换地址后需同步换 key。';
+  }
+  if (/model[ _]?not[ _]?found|unknown model|invalid model|no such model/i.test(d)) {
+    return '模型名不在该网关的可用列表里，请点输入框上方的模型入口重新拉取后选择。';
+  }
+  return '';
+}
+
 function classifyHttp(status, text) {
   const labels = {
     400: '请求参数有误（400）', 401: 'API Key 无效或已过期（401）',
@@ -1167,9 +1186,11 @@ function classifyHttp(status, text) {
     522: '源站连接超时（522）', 524: '源站响应超时（524）', 529: '服务过载（529）',
   };
   const detail = extractServerMessage(text).slice(0, 180);
+  const hint = upstreamHint(status, detail);
+  const head = `${labels[status] || `HTTP ${status}`}${detail ? '：' + detail : ''}`;
   return {
     code: String(status),
-    message: `${labels[status] || `HTTP ${status}`}${detail ? '：' + detail : ''}`,
+    message: hint ? `${head}\n${hint}` : head,
     retryable: retry.isRetryableStatus(status),
   };
 }
@@ -1191,20 +1212,29 @@ async function delegationModelRequest({ cfg, messages, tools, timeoutMs, signal 
       messages: sanitizeMessages(Array.isArray(messages) ? messages : []),
       stream: false,
     };
-    if (cfg.effort && cfg.effort !== 'off') body.reasoning_effort = cfg.effort;
+    const eff = wantEffort(cfg);
+    if (eff) body.reasoning_effort = eff;
     const specs = sanitizeTools(tools);
     if (specs?.length) {
       body.tools = specs;
       body.tool_choice = 'auto';
     }
-    const res = await net.fetch(base + '/chat/completions', {
-      method: 'POST',
-      headers: { ...apiHeaders(cfg), 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
+    const headers = { ...apiHeaders(cfg), 'content-type': 'application/json' };
+    const post = () => net.fetch(base + '/chat/completions', {
+      method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal,
     });
+    let res = await post();
+    let errText = res.ok ? '' : await res.text().catch(() => '');
+    /* 不认 reasoning_effort 的网关：只给这个接入点去掉参数并重来一次，
+       不让「思考强度」变成委派链路的硬阻塞，也不影响其它接入点。 */
+    if (!res.ok && eff && res.status === 400 && effortRejected(errText)) {
+      effortUnsupported.add(effortKeyOf(cfg));
+      delete body.reasoning_effort;
+      res = await post();
+      errText = res.ok ? '' : await res.text().catch(() => '');
+    }
     if (!res.ok) {
-      const c = classifyHttp(res.status, await res.text().catch(() => ''));
+      const c = classifyHttp(res.status, errText);
       const err = new Error(scrubSecret(c.message, cfg.key));
       err.code = c.code;
       err.retryable = c.retryable;
@@ -1513,7 +1543,95 @@ function sanitizeTools(list) {
 
 
 /** SSE 事件块解析：按空行分块，块内多行 data 拼接，兼容 CRLF / 心跳 / [DONE] / tool_calls */
-function parseSseBlock(block, onDelta, onUsage, onToolDelta) {
+/* 用量归一化：各家对「提示缓存命中」的字段叫法不同——
+   OpenAI 用 prompt_tokens_details.cached_tokens，DeepSeek 直接给 prompt_cache_hit_tokens/miss，
+   有些网关只给 cached_tokens。统一成一个口径，界面才能算出命中率。 */
+/* 有的兼容网关不认 reasoning_effort，回 400 unknown parameter。
+   按「接入点 + 模型」分别记住：某个网关不支持就只给它去掉参数，
+   不能把其它支持思考链的接入点一起关掉。
+   validEffort 同时兜住「未开启 / 配置缺失 / 脏值」：这些情况一律不发该参数。 */
+const EFFORT_VALUES = Object.freeze(['low', 'medium', 'high']);
+const effortUnsupported = new Set();
+function effortKeyOf(cfg) {
+  try { return `${normalizeBase(cfg.baseUrl)}|${String(cfg?.model || '').trim()}`; }
+  catch { return `${String(cfg?.baseUrl || '')}|${String(cfg?.model || '')}`; }
+}
+function wantEffort(cfg) {
+  const v = String(cfg?.effort || '').toLowerCase();
+  if (!EFFORT_VALUES.includes(v)) return null;      // off / 缺失 / 非法值：不发
+  return effortUnsupported.has(effortKeyOf(cfg)) ? null : v;
+}
+const effortRejected = (text) => /reasoning_effort|unknown (parameter|argument)|unsupported parameter|invalid.*parameter/i.test(String(text || ''));
+
+function normalizeUsage(u) {
+  if (!u || typeof u !== 'object') return null;
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+  const prompt = num(u.prompt_tokens ?? u.input_tokens);
+  const completion = num(u.completion_tokens ?? u.output_tokens);
+  const total = num(u.total_tokens) ?? (prompt != null && completion != null ? prompt + completion : null);
+  const details = u.prompt_tokens_details || u.prompt_tokens_detail || {};
+  let cached = num(details.cached_tokens ?? u.cached_tokens ?? u.prompt_cache_hit_tokens);
+  const miss = num(u.prompt_cache_miss_tokens);
+  if (cached == null && miss != null && prompt != null) cached = Math.max(0, prompt - miss);
+  const out = { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total };
+  if (cached != null) {
+    out.cached_tokens = Math.max(0, Math.min(cached, prompt ?? cached));
+    out.cache_rate = prompt ? Math.round((out.cached_tokens / prompt) * 1000) / 10 : null;  // 百分比，1 位小数
+  }
+  const reasoning = num(u.completion_tokens_details?.reasoning_tokens);
+  if (reasoning != null) out.reasoning_tokens = reasoning;
+  return out;
+}
+
+/* 一个用户回合可能包含多次上游请求（补答 / 网络重试 / 工具多步）。
+   只取最后一次 usage 会把前面的 token 漏掉，平均命中率的分母也跟着变小。
+   与 ZCode usage-stats-builder 的口径一致：按总量聚合，命中率 = Σcached / Σprompt，
+   分母就是 total input，不再额外叠加缓存分项。 */
+function mergeUsage(parts) {
+  const merged = {};
+  let count = 0;
+  for (const raw of parts || []) {
+    const u = normalizeUsage(raw);
+    if (!u) continue;
+    count += 1;
+    for (const key of ['prompt_tokens', 'completion_tokens', 'total_tokens', 'cached_tokens', 'reasoning_tokens']) {
+      if (Number.isFinite(u[key])) merged[key] = (merged[key] || 0) + u[key];
+    }
+  }
+  return count ? merged : null;
+}
+
+/** 兼容各家把思考内容塞在不同形状里：字符串 / 对象 / content part 数组。 */
+function reasonPartText(part) {
+  if (typeof part === 'string') return part;
+  if (!part || typeof part !== 'object') return '';
+  const v = part.thinking ?? part.reasoning ?? part.reasoning_content ?? part.text ?? part.content ?? '';
+  /* 只认真实文本：对象/数组等异常形态一律忽略，绝不把 [object Object] 当成思考链。 */
+  return typeof v === 'string' ? v : '';
+}
+
+/* 「上游一个正文字符都没给」时的本机兜底答复：从思考内容尾部整理出结论，
+   宁可给出一段带说明的整理结果，也绝不留一个空气泡让用户以为程序死了。 */
+function fallbackAnswerText(reasoning, code, finishReason) {
+  const lines = [...new Set(String(reasoning || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean))];
+  const noise = /^(让|我|首先|接下来|然后|嗯|好的|需要|现在|再|接着|先|考虑|检查|等待|尝试|所以先)/;
+  const useful = lines.filter((l) => !noise.test(l) && l.length >= 8);
+  const pick = (useful.length ? useful : lines).slice(-6).join('\n').slice(-1200);
+  const hasReason = pick.length > 0;
+  const why = code && code !== 'REASON_ONLY' && code !== 'EMPTY_OUTPUT'
+    ? `本轮请求未完成（${code}）`
+    : finishReason === 'length'
+      ? '输出额度耗尽（finish_reason=length）'
+      : hasReason ? '上游本轮只返回了思考过程' : '上游本轮没有返回正文';
+  if (hasReason) {
+    return `**根据思考过程整理的答复**\n\n${pick}\n\n> ${why}；以上由本机从思考内容整理，完整推理见「思考过程」。把输入区「思考强度」调低后重试可获得更完整的正文。`;
+  }
+  /* 没有思考链可用：只陈述事实 + 中性建议，不谎称「只返回了思考过程」、
+     不引导用户调思考强度（很多网关根本没有该能力），更不编造思考内容。 */
+  return `**本轮没有取得模型正文**\n\n${why}；本轮也没有思考内容可整理。请重试、换一个更具体的问法，或检查接入点与模型配置。`;
+}
+
+function parseSseBlock(block, onDelta, onUsage, onToolDelta, onReason, onFinish) {
   const lines = block.split(/\r?\n/);
   const data = [];
   for (const line of lines) {
@@ -1529,11 +1647,38 @@ function parseSseBlock(block, onDelta, onUsage, onToolDelta) {
   try { j = JSON.parse(payload); } catch { return false; }  // 畸形帧跳过
   if (j?.usage && typeof j.usage === 'object') onUsage(j.usage);
   const choice = j?.choices?.[0];
-  const delta = choice?.delta?.content ?? choice?.message?.content ?? choice?.text ?? '';
-  if (typeof delta === 'string' && delta) onDelta(delta);
-  else if (Array.isArray(delta)) {
-    for (const part of delta) if (part && typeof part.text === 'string') onDelta(part.text);
-  }
+  const d = choice?.delta || {};
+  const m = choice?.message || {};
+  /* 推理模型（deepseek-reasoner / GLM 思考版 / Anthropic 兼容网关等）把「想」和
+     「说」分成两个通道。以前只认字符串 reasoning_content、content 数组也只取 text：
+     {type:'thinking', thinking:'…'} 这类分片会被整个丢掉，token 在涨、界面全白。
+     这里把字符串 / 对象 / part 数组统一分流，正文口径（produced）不受影响。 */
+  const emitReasonText = (value) => {
+    if (typeof value === 'string') { if (value) onReason?.(value); return; }
+    if (Array.isArray(value)) { for (const p of value) emitReasonText(p); return; }
+    if (value && typeof value === 'object') {
+      const t = reasonPartText(value);
+      if (t) onReason?.(t);
+    }
+  };
+  const reasonRaw = d.reasoning_content ?? d.reasoning ?? d.thinking ?? d.thought
+    ?? m.reasoning_content ?? m.reasoning ?? m.thinking
+    ?? j?.reasoning_content ?? j?.reasoning ?? '';
+  if (reasonRaw) emitReasonText(reasonRaw);
+  if (choice?.finish_reason && onFinish) onFinish(String(choice.finish_reason));
+
+  const emitContent = (value) => {
+    if (typeof value === 'string') { if (value) onDelta?.(value); return; }
+    if (Array.isArray(value)) { for (const p of value) emitContent(p); return; }
+    if (value && typeof value === 'object') {
+      const type = String(value.type || '').toLowerCase();
+      const txt = value.text ?? value.content ?? value.thinking ?? value.reasoning ?? '';
+      if (['thinking', 'reasoning', 'reasoning_content', 'thought'].includes(type)) {
+        emitReasonText(txt);
+      } else if (txt) onDelta?.(String(txt));
+    }
+  };
+  emitContent(d.content ?? m.content ?? choice?.text ?? j?.content ?? '');
 
   // 流式工具调用：每个 chunk 只带片段，index 标识同一次调用；部分网关一次性放在 message 里。
   const calls = choice?.delta?.tool_calls ?? choice?.message?.tool_calls;
@@ -1620,12 +1765,26 @@ ipcMain.on('model:chat', (event, rawPayload) => {
     hard: false,
     connectTimeout: false,
     toolCalls: null,
+    finishReason: '',
   };
   activeChats.set(id, session);
 
   let produced = 0;
   let totalChars = 0;
+  let reasonChars = 0;   // 本回合思考字段的字符数：只用于「有没有产生内容」的判断，不进正文
+  let reasonText = '';    // 有界保留思考文本尾部：上游彻底不给正文时，据此生成可见的最终答复
+  /* 只想了不说的补救：推理模型把额度耗在思考上时正文为空。
+     换一套「直接作答」的 user 指令重问（比 system 更容易被遵守），压低思考强度、
+     关掉工具调用；最多两轮，仍不给正文就由本机兜底出一段答复。 */
+  let nudgeLevel = 0;
+  const ANSWER_NUDGES = [
+    '请立刻停止思考，直接用中文给出最终答复。只输出正文：不要输出思考过程、不要调用任何工具、不要复述上面的问题。若刚才的思考里已经有结论，把它写成完整答案。',
+    '不要思考、不要解释、不要调用工具，现在直接输出最终答案的正文。哪怕只写一句话也可以，但必须输出正文。',
+  ];
   let usage = null;
+  /* 每次上游请求只记最后一条 usage（同一流末尾多次上报不重复累加），
+     不同请求（补答/重试）各占一项，收尾时统一聚合。 */
+  const usageByAttempt = new Map();
   let finished = false;
   let attempts = 0;
   let retries = 0;
@@ -1635,13 +1794,33 @@ ipcMain.on('model:chat', (event, rawPayload) => {
     finished = true;
     try { session.cancelBody?.(); } catch { /* 已关闭 */ }
     activeChats.delete(id);
-    if (usage) send('usage', { usage });
+    /* 最后一道保险：只要不是用户主动中断，且整轮一个正文字符都没产出，
+       主进程自己发一段 chunk。渲染层的 body 因此必然非空，气泡不会是空的，
+       也不会停在「思考中」——用户花了 token 就必须看到字。 */
+    if (!session.aborted && produced === 0 && !session.outputGuard) {
+      const fallback = scrubSecret(
+        fallbackAnswerText(reasonText, extra.code, session.finishReason), cfg?.key);
+      /* 出错的回合里，这段兜底只会跟渲染层的错误块抢位置、把状态码重复一遍。
+         只有当它确实能整理出思考内容时才发；否则正文交给错误块本身。 */
+      const redundantOnError = !!extra.code && !String(reasonText || '').trim();
+      if (!redundantOnError) {
+        produced += fallback.length;
+        send('chunk', { text: fallback });
+      }
+    }
+    const normUsage = normalizeUsage(mergeUsage([...usageByAttempt.values()]) || usage);
+    if (normUsage) send('usage', { usage: normUsage });
     const done = {
       aborted: session.aborted,
       reason: session.reason,
       attempts,
       retries: Math.max(retries, Math.max(0, attempts - 1)),
       toolCalls: session.toolCalls || [],
+      finishReason: session.finishReason || '',
+      reasonChars,
+      emptyContent: session.emptyContent === true,
+      outputGuard: session.outputGuard || null,
+      usage: normUsage,
       ...extra,
     };
     send('done', done);
@@ -1656,6 +1835,8 @@ ipcMain.on('model:chat', (event, rawPayload) => {
     session.hard = false;
     session.connectTimeout = false;
     session.toolCalls = null;
+    reasonChars = 0;   // 每次尝试重新计：重试后上一轮的思考不该冒充本轮产出
+    reasonText = '';    // 兜底答复只取最后一轮思考，避免补答多轮时结论重复出现
 
     // 工具调用是分片到达的：按 index 合并 id / name / arguments。
     const toolSlots = new Map();
@@ -1707,8 +1888,36 @@ ipcMain.on('model:chat', (event, rawPayload) => {
     const clearConnect = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } };
     const stopTimers = () => { clearTimeout(idleTimer); clearTimeout(hardTimer); clearConnect(); };
 
+    /* 输出守卫：部分网关/推理模型不把调用放进 tool_calls，而把
+       「functions.read_file(path=…)」「<tool_call>{…}」当正文吐出来。这样既不会生成
+       工具卡片，模型又会按「持续自主执行」协议在正文里反复重写调用草稿——用户看到
+       的就是工具调用被纯文本直出、然后越滚越长停不下来。
+       只在带工具定义的正常轮启用，且匹配到的名字必须是本次下发的工具，
+       避免误伤讨论代码的普通对话。 */
+    const toolNames = new Set((tools || []).map((t) => String(t?.function?.name || '')));
+    const TEXT_CALL_RE = /\b(?:to=)?functions\.([A-Za-z_][\w]*)\b|<tool_call\b|"tool_calls"\s*:/i;
+    const repeatedLine = (tail) => {
+      const seen = new Map();
+      for (const line of tail.split(/[\r\n。！？!?；;]/).map((x) => x.trim())) {
+        if (line.length < 8) continue;
+        const n = (seen.get(line) || 0) + 1;
+        if (n >= 4) return true;
+        seen.set(line, n);
+      }
+      return false;
+    };
+    let textTail = '';
+    let guardStopped = false;
+    const stopStream = (kind, name) => {
+      if (guardStopped) return;
+      guardStopped = true;
+      session.outputGuard = { kind, name: name || '' };
+      send('output-guard', session.outputGuard);
+      try { session.cancelBody?.(); } catch { /* 已关闭 */ }
+    };
+
     const emitDelta = (text) => {
-      if (session.aborted) return;
+      if (session.aborted || guardStopped) return;
       totalChars += text.length;
       if (totalChars > MAX_OUTPUT_CHARS) {
         session.reason = 'OUTPUT_LIMIT';
@@ -1717,9 +1926,28 @@ ipcMain.on('model:chat', (event, rawPayload) => {
         ctrl.abort();
         return;
       }
+      if (toolNames.size && !nudgeLevel) {
+        textTail = (textTail + text).slice(-1200);
+        const m = TEXT_CALL_RE.exec(textTail);
+        if (m && (!m[1] || toolNames.has(m[1]))) { stopStream('text-tool-call', m[1] || ''); return; }
+        if (repeatedLine(textTail)) { stopStream('repeat'); return; }
+      }
       produced += text.length;
       armIdle();
       send('chunk', { text });
+    };
+
+    /* 思考流：单独上报，界面折叠展示；不计入正文、不进上下文。
+       有界（MAX_REASON_CHARS）——推理模型可能吐几万字，全量传渲染层没有意义。 */
+    const emitReason = (text) => {
+      if (session.aborted) return;
+      armIdle();   // 思考期间必须有数据在动，否则会被空闲超时误杀
+      if (reasonChars >= MAX_REASON_CHARS) return;
+      const room = MAX_REASON_CHARS - reasonChars;
+      const piece = text.length > room ? text.slice(0, room) : text;
+      reasonChars += piece.length;
+      reasonText = (reasonText + piece).slice(-4000);  // 只留尾部结论，兜底答复要用
+      send('think', { text: piece, truncated: reasonChars >= MAX_REASON_CHARS && piece.length < text.length });
     };
 
     const signal = anySignal([session.lifeCtrl.signal, ctrl.signal]);
@@ -1731,13 +1959,25 @@ ipcMain.on('model:chat', (event, rawPayload) => {
         try { session.cancelBody?.(); } catch { /* 已关闭 */ }
         ctrl.abort();
       }, Math.min(CONNECT_TIMEOUT_MS, budget));
-      const requestBody = { model, messages, stream: true, temperature: 0.7 };
-      if (tools && tools.length) {
+      /* 补答轮用 user 角色而不是 system：兼容网关 / 推理模型对末尾 system 常常忽略，
+         换成用户指令后「直接给正文」的遵守率明显更高。 */
+      const attemptMessages = nudgeLevel
+        ? [...messages, { role: 'user', content: ANSWER_NUDGES[nudgeLevel - 1] }]
+        : messages;
+      const requestBody = { model, messages: attemptMessages, stream: true, temperature: 0.7 };
+      // 补答轮关掉工具：模型再跑去调工具就永远没有正文了
+      if (!nudgeLevel && tools && tools.length) {
         requestBody.tools = tools;
         requestBody.tool_choice = 'auto';
       }
-      // 思考强度：接入点配置了且非 off 才发，兼容不支持 reasoning_effort 的普通模型
-      if (cfg.effort && cfg.effort !== 'off') requestBody.reasoning_effort = cfg.effort;
+      /* 思考强度：普通轮按接入点配置（off / 缺失 / 非法值都不发）；
+         补答轮强制 low——把额度留给正文，否则第二次还是只思考不说话。
+         被上游以 400 拒绝过的「接入点 + 模型」整套不再发，其它接入点照常。 */
+      const effort = wantEffort(cfg);
+      if (!effortUnsupported.has(effortKeyOf(cfg))) {
+        if (nudgeLevel) requestBody.reasoning_effort = 'low';
+        else if (effort) requestBody.reasoning_effort = effort;
+      }
       const res = await net.fetch(base + '/chat/completions', {
         method: 'POST',
         headers: { ...apiHeaders(cfg), 'content-type': 'application/json' },
@@ -1748,6 +1988,12 @@ ipcMain.on('model:chat', (event, rawPayload) => {
 
       if (!res.ok) {
         const text = await res.text().catch(() => '');
+        /* 只有确实下发了该参数、且 400 明确指向它时才降级：
+           无关的 400 不能顺手把思考强度关掉。 */
+        if (requestBody.reasoning_effort && effortRejected(text)) {
+          effortUnsupported.add(effortKeyOf(cfg));
+          throw new ChatError('EFFORT_UNSUPPORTED', '该接入点不支持 reasoning_effort，已去掉该参数重试', true);
+        }
         const c = classifyHttp(res.status, text);
         const err = new ChatError(c.code, c.message, c.retryable);
         err.retryAfterMs = retry.parseRetryAfter(res.headers);
@@ -1763,13 +2009,17 @@ ipcMain.on('model:chat', (event, rawPayload) => {
         try { body = JSON.parse(raw); } catch { /* 落到下方统一报错 */ }
         const message = body?.choices?.[0]?.message;
         const content = message?.content ?? body?.choices?.[0]?.text;
-        if (body?.usage) usage = body.usage;
+        if (body?.usage) { usage = body.usage; usageByAttempt.set(attemptNo, body.usage); }
+        session.finishReason = String(body?.choices?.[0]?.finish_reason || '');
+        const reasonOnlyText = message?.reasoning_content ?? message?.reasoning ?? '';
+        if (typeof reasonOnlyText === 'string' && reasonOnlyText) emitReason(reasonOnlyText);
         if (Array.isArray(message?.tool_calls)) {
           for (let i = 0; i < message.tool_calls.length; i++) mergeToolCall(message.tool_calls[i], i);
         }
         const calls = collectToolCalls();
         if (typeof content === 'string' && content) emitDelta(content);
-        if ((typeof content === 'string' && content) || calls.length) {
+        if (guardStopped) { session.toolCalls = []; return; }
+        if ((typeof content === 'string' && content) || calls.length || reasonChars > 0) {
           session.toolCalls = calls;
           return;
         }
@@ -1793,7 +2043,8 @@ ipcMain.on('model:chat', (event, rawPayload) => {
 
       const handleBlock = (block) => {
         try {
-          if (parseSseBlock(block, emitDelta, (u) => { usage = u; }, mergeToolCall)) sawDone = true;
+          if (parseSseBlock(block, emitDelta, (u) => { usage = u; usageByAttempt.set(attemptNo, u); }, mergeToolCall, emitReason,
+            (r) => { session.finishReason = r; })) sawDone = true;
         } catch (err) {
           streamError = err;
           sawDone = true;
@@ -1850,7 +2101,26 @@ ipcMain.on('model:chat', (event, rawPayload) => {
         throw new ChatError('STREAM_ERROR', streamError.message || String(streamError), produced === 0);
       }
       const calls = collectToolCalls();
+      /* 守卫生效：文本形式的调用一律不执行、不补答、不重试，
+         本步 toolCalls 为空 → 渲染层工具循环立刻 break，绝不会滚成死循环。 */
+      if (guardStopped) {
+        session.toolCalls = [];
+        return;
+      }
       session.toolCalls = calls;
+      /* 只有思考、没有正文：用户看到的是「花了 token 却没人说话」。
+         最多换两套「直接作答」指令重问（压低思考强度、关掉工具）；补答仍为空
+         就正常收尾，由 finish() 发出本机兜底答复，绝不留空气泡。 */
+      if (produced === 0 && !calls.length && reasonChars > 0 && nudgeLevel < ANSWER_NUDGES.length) {
+        const needAnswer = new ChatError('REASON_ONLY', '模型只输出了思考过程，正在要求它直接作答', true);
+        needAnswer.reasonOnly = true;
+        throw needAnswer;
+      }
+      if (produced === 0 && !calls.length && (reasonChars > 0 || nudgeLevel)) {
+        session.emptyContent = true;   // 补答后依然没正文：不再重问，交给兜底答复
+        session.toolCalls = [];
+        return;
+      }
       if (produced === 0 && !calls.length) {
         throw new ChatError('EMPTY_OUTPUT', '模型未返回任何正文（可能触发了内容过滤或模型不可用）', attemptNo < 2);
       }
@@ -1880,6 +2150,8 @@ ipcMain.on('model:chat', (event, rawPayload) => {
         else failure = new ChatError('NETWORK', err?.message || String(err), false);
       }
 
+      // 只思考不出正文：逐级升级「直接作答」指令重问（不是原样重试，否则多半还是空）
+      if (failure.reasonOnly && nudgeLevel < ANSWER_NUDGES.length) nudgeLevel += 1;
       const canRetry = failure.retryable && attemptNo < retryOpts.maxAttempts && produced === 0 && !session.aborted;
       if (!canRetry) {
         send('error', {
@@ -1893,9 +2165,11 @@ ipcMain.on('model:chat', (event, rawPayload) => {
         return;
       }
 
-      const delayMs = failure.retryAfterMs != null
-        ? Math.min(failure.retryAfterMs, Math.max(retryOpts.maxDelayMs, 60000))
-        : retry.backoffDelay(attemptNo, retryOpts);
+      const delayMs = failure.reasonOnly
+        ? 150   // 补答是「换个问法」而不是等上游恢复，没必要退避
+        : failure.retryAfterMs != null
+          ? Math.min(failure.retryAfterMs, Math.max(retryOpts.maxDelayMs, 60000))
+          : retry.backoffDelay(attemptNo, retryOpts);
 
       retries = attemptNo;
       send('retry', {

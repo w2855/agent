@@ -705,6 +705,44 @@ input.tint-range::-webkit-slider-thumb {
 }
 
 .msg { display: flex; flex-direction: column; margin-bottom: 20px; }
+/* 思考过程（推理模型的 reasoning_content）：折叠行常驻，展开看细节。
+   它的意义是「证明请求在动」——思考 40 秒期间界面不能是一片空白。 */
+.think-block {
+  margin: 4px 0 8px;
+  border-left: 2px solid color-mix(in srgb, var(--text-2) 30%, transparent);
+  padding-left: 10px;
+  font-size: 12.6px;
+  color: var(--text-2);
+}
+.think-block > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  opacity: .9;
+  display: flex; align-items: center; gap: 6px;
+}
+.think-block > summary::-webkit-details-marker { display: none; }
+.think-block > summary::before {
+  content: '▸';
+  font-size: 10px;
+  transition: transform .15s ease;
+  display: inline-block;
+}
+.think-block[open] > summary::before { transform: rotate(90deg); }
+.think-block > summary:hover { color: var(--text); opacity: 1; }
+.think-len { opacity: .7; font-variant-numeric: tabular-nums; }
+.think-body {
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-2) 8%, transparent);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  max-height: 260px;
+  overflow: auto;
+  opacity: .92;
+}
 /* 已被压缩归档的历史：留在时间线可回看，视觉上弱化并提示「不再发给模型」 */
 .msg.is-compacted { opacity: .58; }
 .msg.is-compacted:hover { opacity: .9; }
@@ -758,7 +796,14 @@ input.tint-range::-webkit-slider-thumb {
 .tools.hidden { max-height: 0; opacity: 0; margin-bottom: 0; }
 /* 分段回合：.tools.seg-box = 每步「模型说明段 + 该步工具卡片」交替（卡片上面说话） */
 .tools.seg-box { max-height: none; overflow: visible; }
-.tools.seg-box.hidden { max-height: 0; opacity: 0; margin-bottom: 0; overflow: hidden; }
+/* 折叠只针对工具卡片，绝不能把同一容器里的 .prose 正文一起藏掉：
+   无工具调用 / autoCollapseTools 收起时都必须保证「最终答复」肉眼可见。
+   旧规则整块 max-height:0 + opacity:0，是「只思考不说话」的直接原因。 */
+.tools.seg-box.hidden {
+  max-height: none; opacity: 1; overflow: visible; margin-bottom: 12px;
+}
+.tools.seg-box.hidden .tools-seg { display: none; }
+.tools.seg-box.hidden .seg { margin-bottom: 2px; }
 .seg { margin: 0 0 10px; }
 .seg .prose { margin: 0 0 7px; }
 .seg .prose:empty { margin: 0; min-height: 0; }
@@ -1015,7 +1060,62 @@ input.tint-range::-webkit-slider-thumb {
 
 /* ───────── 输入区 ───────── */
 
-.composer-area { flex: none; padding: 0 40px 16px; }
+.composer-area { flex: none; padding: 0 40px 16px; position: relative; z-index: 46; }
+
+/* 输入区常驻控制：思考强度 / 模型，发起对话时直接改，下一条消息立即生效 */
+.composer-controls {
+  max-width: 830px; margin: 0 auto 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.ctl-caption { font-size: 11px; color: var(--text-4); margin-right: 2px; }
+.ctl-field {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 26px; padding: 0 8px;
+  border: 1px solid var(--panel-border); border-radius: 8px;
+  background: var(--fill); color: var(--text-2);
+  font-size: 11.5px; cursor: pointer; white-space: nowrap;
+  transition: background 140ms, color 140ms;
+}
+.ctl-field .ico { width: 13px; height: 13px; flex: none; }
+.ctl-field .ico.tiny { width: 11px; height: 11px; opacity: .72; }
+.ctl-field:hover { background: var(--fill-hover); color: var(--text); }
+.ctl-field select {
+  border: 0; outline: 0; background: transparent; color: var(--text);
+  font-size: 11.5px; cursor: pointer; padding: 0; max-width: 76px;
+}
+.ctl-field select option { background: var(--panel); color: var(--text); }
+/* 思考强度：整个胶囊都是可点区。透明 select 铺满，规避 <label for> 的点击二次转发；
+   常显档位文字 b 与 .is-on 高亮是「点了有没有生效」的可见状态反馈。 */
+.ctl-effort { position: relative; }
+.ctl-effort b { font-weight: 600; color: var(--text); min-width: 24px; text-align: center; }
+.ctl-effort.is-on { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.ctl-effort select {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  max-width: none; margin: 0; padding: 0;
+  opacity: 0; appearance: none; border: 0; cursor: pointer;
+}
+.ctl-model b {
+  font-weight: 600; color: var(--text);
+  max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 设置页 / 架构页是全屏覆盖层（z-index 44/45），会把 .app 里的输入区盖掉。
+   页面打开时把「同一个」composer-area 移到 body 下变成底部 dock：
+   不复制输入框、不换 DOM 节点、事件监听原样保留，因此聊天输入始终可用。 */
+body.page-open .composer-area {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 46;
+  padding: 9px 40px 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--rule);
+  box-shadow: 0 -10px 28px rgba(0, 0, 0, .22);
+}
+body.page-open .composer-area .hint,
+body.page-open .composer-area .perm-row,
+body.page-open .composer-area .attach-bar,
+body.page-open .composer-area .queue { display: none; }
+body.page-open .composer-area .composer-controls { margin-bottom: 6px; }
+body.page-open .settings-body,
+body.page-open .arch-body { padding-bottom: 112px; }
 
 /* 权限级别胶囊：完全权限是琥珀色，和原版一致 */
 .perm-row { max-width: 830px; margin: 0 auto 8px; display: flex; }

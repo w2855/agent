@@ -38,6 +38,8 @@ Context Engine 的三处问题（A4/A5/A6）会导致**长会话在真实模型�
 | A16 | P3 | 工具描述无长度上限（MCP 外部来源） | 异常 MCP server |
 | A17 | P1 | 门禁隔离目录清不干净，`dsh.perm` 跨轮泄漏（收尾验证时发现） | 任意一次上一轮失败
 | A18 | P0 | 自动压缩把聊天记录整表删掉（token 花了、界面空了）；摘要重启后截断到 2000 字符 | 历史 > 预算 75%
+| A19 | P0 | 推理模型的 `reasoning_content` 完全没解析：思考期间界面空白、只思考不出正文时误判为调用失败 | 任意推理模型 |
+| A20 | P1 | 用量只显示总 token，没有缓存命中率；上下文占用只有百分比，看不出实际用量 | 所有会话 |
 
 ---
 
@@ -389,6 +391,21 @@ A1/A2 建议与 R14 的 `docs/security/policy-model.md` 合并成一份「治理
 | A13 | 取消跟踪 `tools/patches/__pycache__` 与 `tools/patches/backup/`；`.gitignore` 去重并补规则 | `.gitignore`、git index | git status 干净 |
 | A17 | **门禁隔离失效（收尾验证时发现）**：`.runall-probe` 依赖 `fs.rmSync` 静默清空，但网关日志句柄与 Chromium 缓存锁让删除失败，上一轮的 `dsh-storage.json`（尤其 `dsh.perm`）跨轮泄漏。修法：网关日志移出隔离目录（`os.tmpdir()`）；清理改为「清完回读校验 → 清不掉则整目录改名让开」，并把可清空性作为一条门禁行暴露出来 | `tools/run-all.js`（resetProbeDir / 隔离行）、`.gitignore` | run-all 新增「隔离 userData 已清空」行；tool-e2e 75/75、g3-probe 44/44 |
 | A18 | **压缩即删库（用户报障后定位）**：`performCompact` 用 `s.messages = [摘要]` 整表替换，40 条历史的会话压缩一次只剩 4 条节点——聊天框看起来「没字了」，而 token 已全额花掉。R15 把预算降到 120000、阈值降到 75%（A5）后，这条路径从「几乎不触发」变成「9 万字符必触发」，所以是 R15 之后才暴露的既有缺陷。修法：只给历史消息打 `compacted` 标记（`buildApiMessages` 本就跳过它们并把摘要当 system 注入），界面保留可回看并加「已折叠」弱化标记；摘要改用 `s.compactSummary` 随会话持久化（旧格式存在占位消息 body 里只留前 2000 字符，重启即截断） | `renderer/app.js`（performCompact / setCompacted / maybeAutoCompact / 恢复逻辑）、`renderer/styles.css` | r15-check 新增 2 条（只标记不重置、摘要随会话持久化）；探针：40 条历史 → 压缩后 43 条节点仍在、上下文用量 100340→61 字符 |
+| A19 | **推理通道整段丢弃（用户报障后定位）**：`parseSseBlock` 只读 `content`，`reasoning_content` 直接丢掉。后果有两层：① 思考期间界面只有「思考中…」，几十秒里看不到任何内容，token 却在涨；② 模型把额度花在思考上、正文为空时，主进程抛 `EMPTY_OUTPUT` 并原样重试一次——用户多付一次钱，最后只看到「模型未返回任何正文」。修法：解析 `reasoning_content`/`reasoning`/`thinking` 走独立 `think` 事件（上限 40000 字符），界面折叠展示并实时显示字数；正文为空但有过思考时，**自动追加一条「直接作答」指令并压低思考强度再要一次**，补答仍空才按截断收尾并说明原因 | `main.js`（parseSseBlock / emitReason / REASON_ONLY 补答）、`renderer/app.js`（renderThink / think 事件 / emptyTurnNotice）、`renderer/styles.css` | reason-probe 13 断言（思考可见、补答出正文、空正文可解释） |
+| A20 | **用量不透明**：只显示总 token，看不出提示缓存命中（它直接决定成本与首字延迟），上下文占用只有一个百分比。修法：`normalizeUsage` 统一各家缓存字段（`prompt_tokens_details.cached_tokens` / `prompt_cache_hit_tokens` / `cached_tokens`），单条消息显示「本轮缓存 75%（3,000/4,000）」，状态条分别显示「上下文 12%（14k/120k）」「本轮缓存 75%」与「平均缓存命中率：均值 68%（会话 5 轮）」；均值只统计上游确实报了缓存的回合，避免不支持的接入点把均值拖成 0 | `main.js`（normalizeUsage）、`renderer/app.js`（buildMetrics / formatStatusline / finish） | reason-probe 3 断言 + cache-token-probe 21 断言（加权口径 / 去重 / 多请求用量聚合） |
+
+| A21 | **报错指向错误方向（用户报障「url 和 key 都正确却 401」后定位）**：两层问题。① `classifyHttp` 只把状态码翻译成一句「API Key 无效或已过期（401）」，而真实故障是「接入点换了端口/换了 token」与「网关自身没登录账号（HTTP 400 + `no_accounts`）」，用户按提示反复改 key 永远改不对；② `finish()` 在整轮零正文时无条件补发兜底 chunk（连报错回合也发），导致气泡顶部先出现「本轮没有取得模型正文 / 本轮请求未完成（400）」，真正的错误块被挤到下面且状态码重复两遍。修法：`upstreamHint()` 按报文识别网关级故障（账号缺失 → 指明与 key 无关、给出登录/换接入点；401 → 提示「地址与 key 必须来自同一网关，不同本地端口各有独立 key」；模型名不存在 → 指向模型入口），原始报文一律原样保留；`finish()` 在「有错误码且无可整理思考」时不再下发兜底，正文交给错误块，渲染层错误分支同理由「原因在前 + 一句下一步」组成 | `main.js`（upstreamHint / classifyHttp / finish）、`renderer/app.js`（err 分支）、`tools/key-diag.js` | upstream-error-probe 14 断言（no_accounts 不误诊、401 提示同源、403 不张冠李戴、正常回合无错误块）；`key-diag` 在真实 userData 上实测：active 档案 6780 → 200 有正文 |
+
+#### A20 口径补充：本轮缓存 vs 平均缓存命中率（对齐 ZCode 3.17.2）
+
+ZCode 参考：`apps/zcode-cli/packages/bootstrap/src/zcode-protocol/usage-stats-builder.ts`（`cacheHitRate = ΣcacheReadTokens / ΣinputTokens`，分母是 total input，不叠加缓存分项）与 `packages/ui/src/chat-input-toolbar/contextUsage.tsx`（上下文 used/total 与「平均缓存命中率」同面板展示）。
+
+| 指标 | 统计范围 | 数据来源 | 桌面端展示位置 |
+| --- | --- | --- | --- |
+| 本轮缓存命中率 | 本回合所有上游请求（含补答 / 重试 / 工具多步）合计 | 主进程 `normalizeUsage` 归一 `cached_tokens / prompt_tokens`，`mergeUsage` 按请求聚合；未上报显示 — | 助手消息耗时行「本轮缓存」+ 顶部状态条「本轮缓存」 |
+| 平均缓存命中率（均值） | 当前会话内「上游确实上报缓存」的已完成回合，累计加权；不含未上报回合，也不是各轮百分比的算术平均 | `session.cacheStats`（`finish()` 累计 `Σcached / Σprompt`，随会话持久化） | 顶部状态条「平均缓存命中率：均值 x%（会话 N 轮）」，与上下文占用同一行同屏可见；悬停 title 给出完整口径 |
+
+上下文占用 = 会话历史字符数 / `dsh.ctxLimit`，同在顶部状态条。`cache-token-probe.js` 断言加权口径（75% + 0% 两轮 → 60%，而非 37.5%）、两类标签分离、同屏可见、多请求用量聚合与重复工具调用去重。
 
 > A17 的成因值得记一笔：它先伪装成业务回归——`tool-e2e` 因档位被降级而拿不到任务卡，
 > 又在 `.tasks-head span` 上空指针崩溃，把前面那条「请求没带上 tools」的解释性断言一起吞掉。

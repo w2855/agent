@@ -20,9 +20,14 @@ assets/pet/**/*.frames/
 .s-*/
 .runall-probe/
 .runall-probe.stale-*/
+.verify-*/
+.answer-probe/
+.final-verify/
+.reason-verify/
 .e2e-g5/
 shots-output/
 .shot-run/
+.shortcut-backup/
 
 # 开发脚本残留（R15/A13）：补丁工具的字节码缓存与逐次备份副本不入库
 __pycache__/

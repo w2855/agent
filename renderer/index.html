@@ -237,6 +237,32 @@
         </button>
       </div>
 
+      <!-- 发起对话时直接可调：思考强度 + 模型选择。与输入框同一个常驻区域，不用进设置页 -->
+      <div class="composer-controls" id="composerControls">
+        <span class="ctl-caption">本轮设置</span>
+        <div class="ctl-field ctl-effort" id="composerEffortWrap" title="思考强度：推理模型有效，普通模型选「关闭」">
+          <svg class="ico"><use href="#i-sparkle"/></svg>
+          <span>思考强度</span>
+          <b id="composerEffortName">关闭</b>
+          <svg class="ico tiny"><use href="#i-chevron"/></svg>
+          <!-- 原生 select 透明铺满整个胶囊：点文字/图标/档位任意位置都能展开档位列表。
+               不用 <label for> 包它——label 内嵌关联控件只 focus 不展开，还会把点击
+               二次转发，导致下拉刚打开就被关掉，看起来就是「点击无响应」。 -->
+          <select id="composerEffort" aria-label="思考强度">
+            <option value="off">关闭</option>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+          </select>
+        </div>
+        <button class="ctl-field ctl-model" id="composerModelBtn" type="button" title="选择模型（来自上游 /models，可手动填写）">
+          <svg class="ico"><use href="#i-laptop"/></svg>
+          <span>模型</span>
+          <b id="composerModelName">—</b>
+          <svg class="ico tiny"><use href="#i-chevron"/></svg>
+        </button>
+      </div>
+
       <div class="composer" id="composer">
         <button class="plus" id="plusBtn" title="附件"><svg class="ico"><use href="#i-plus"/></svg></button>
         <textarea id="input" rows="1" placeholder="给 DSH 发消息…" spellcheck="false"></textarea>
@@ -282,7 +308,8 @@
   <button class="menu-item" data-cmd="/compact"><span>/compact</span><small>压缩上下文</small></button>
   <button class="menu-item" data-cmd="/arch"><span>/arch</span><small>打开项目架构</small></button>
   <button class="menu-item" data-cmd="/stop"><span>/stop</span><small>中断当前回合</small></button>
-  <button class="menu-item" data-cmd="/goal"><span>/goal</span><small>设置/查看会话目标</small></button>
+  <button class="menu-item" data-cmd="/goal"><span>/goal</span><small>目标：查看 / 设置 / 替换 / 清除 / 暂停</small></button>
+  <button class="menu-item" data-cmd="/target"><span>/target</span><small>/goal 的别名</small></button>
   <button class="menu-item" data-cmd="/skills"><span>/skills</span><small>打开技能面板</small></button>
   <button class="menu-item" data-cmd="/load"><span>/load</span><small>载入其他会话的上下文（/load &lt;会话id&gt;）</small></button>
 </div>

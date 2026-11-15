@@ -118,7 +118,7 @@ npx electron . --user-data-dir="E:/dsh-desktop/.e2e-userdata" --script=tools/too
 基线数字（2026-11-15 实测，全绿）：
 foundation 62 / orchestrator 58 / delegation 83 / project 43 / queue 29 / graph 24 / audit 17 / validation 23 / **governance 36** = **375/375**
 lessons-check = **109/109**
-最终门禁 = **26 项 25✓ 0✗ 1 跳**（2026-11-15 实测；runtime-ipc-check.js 需 Electron 上下文（`--script` 通道），node 直跑报 `window is not defined` 属预期，计为跳过）
+最终门禁 = **31 项 30✓ 0✗ 1 跳**（2026-11-15；新增 upstream-error-probe.js 覆盖「上游报错指向正确」14/14：网关自身没账号时不得让用户反复改 key、401 要提示「地址与 key 同源」、403 不得张冠李戴、正常回合不出现错误块；tool-call-guard-probe.js 覆盖「工具调用文本直出 / 死循环」15/15、no-reason-probe.js 覆盖「不支持/未开启/未返回思考链」18/18；goal-effort-probe.js 覆盖思考强度点击链路与 /goal 子命令 32/32；cache-token-probe.js 覆盖缓存口径/省 token 21/21；runtime-ipc-check.js 需 Electron `--script` 通道，node 直跑报 `window is not defined` 属预期，计为跳过。本轮 `run-all --quick` 实测 31 项 19✓ 0✗ 12 跳全绿，12 跳均为 Electron 探针；另手工全跑 8 个 Electron 探针 133/133）
 （并发代理扩容会改变各脚本计数，以聚合器当场实测为准；lib 自检另含 mcp 26 / skills 14 / ipc-mcp 18 / secret-mask 37 / h3 31 / lessons 109）
 
 > 聚合器环境注意：宿主 IDE/agent 可能设置 `ELECTRON_RUN_AS_NODE=1`，会让 electron.exe
