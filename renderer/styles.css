@@ -3328,13 +3328,16 @@ body.page-open .arch-body { padding-bottom: 112px; }
    只要有 pending/running 工具就在工具列表上方播报「🛠 正在 <动词> <目标>…」，
    小字 --text-3 + 左侧细竖线 accent；全部落定后 300ms 淡出移除（--ease-exit） ── */
 .slot-narrate:empty { display: none; }
+/* 界面状态占位（非模型发言）：弱化为次要色 + 更细的边界，不与正文抢视觉层级。
+   真正的进展同步来自模型正文；模型开口后本行立即淡出让位。 */
 .tool-narrate {
   margin: 2px 0 6px;
   padding: 1px 0 1px 9px;
-  border-left: 2px solid var(--accent);
-  font-size: 12px;
+  border-left: 2px solid var(--border, rgba(128, 128, 128, .35));
+  font-size: 11px;
   line-height: 1.5;
   color: var(--text-3);
+  opacity: .8;
   animation: rowIn var(--dur-fast) var(--ease-out-strong) both;
 }
 .tool-narrate.is-leaving { opacity: 0; transition: opacity 300ms var(--ease-exit); }

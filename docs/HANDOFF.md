@@ -112,7 +112,9 @@
 2. TDZ 重大修复（`msgStore/msgSeq/registerMsg` 前移到 `loadSavedSessions` 之前）
 3. 架构会话隔离（ensure 带 sessionId + 缓存键加会话维度）
 4. 工具卡片分段渲染（说明段→卡片→说明段，bodySegments 快照）
-5. 叙述行三段规则（工具执行中「正在 …」/ 间隙「模型正在思考下一步…」/ 出声即让位），是否开口由模型自主判断，不再逐步注入 nudge
+5. 叙述行三段规则（工具执行中「正在 …」/ 间隙「模型正在思考下一步…」/ 出声即让位），已降级为 `data-role="ui-status"` 的防空白占位，不算模型发言
+   R16-b：【边做边同步】规范进主聊天提示 + 子代理 `buildMessages`（自定义 systemPrompt 也不能绕过）；
+   连续 3 步零正文才注入一条一次性提醒（请求读完即撤、不落历史/正文），模型开口即清零。
 6. 模型思考强度（reasoning_effort，主聊天 + 子代理双注入，off 不发）
 7. README.md
 
@@ -123,6 +125,7 @@
 - arch-iso 7/7、narrate-live 11/11、narrate-gap 5/5、persist-write/read、storage-check 8/8、storage-probe 20/20、abort-check 11/11
 - R16 新增：autonomy 12/12（说话自主判断 / 无 nudge / 多步自动连跑）、ctx-budget 8/8（100 万上限 / 96 条消息不再报「82 > 80」/ 预算裁历史）、tool-args 16/16（工具参数带 fences/dup/对象、缺参可重试、Windows 无 head 时改用 find_files 提示）、upstream-error 14/14
 - R16 新增 `tools/with-mock.js`：自动起停 mock 网关跑单个探针，跑完即退，不留后台进程
+- R16-b 新增：sync-narration-probe 23/23（连续静默轨迹 `0,0,0,1,0,0,1`、开口后 `0,0,0,1,0,0,0`、提醒不落历史/正文）、sync-child-check 16/16（主聊天/子代理提示一致、提醒不进检查点、占位降级）
 
 ## 七、当前待办（按优先级）
 1. **用户实测复验**：①架构会话隔离 ②工具卡片上面说话 ③思考强度 ④聊天记录保留（R14 已重新打包后复验）⑤**新增：ask 档工具现在弹主进程原生确认框**（降级通道），主路径仍在应用内卡片
@@ -161,6 +164,6 @@ node tools/r15-check.js                  # 只跑 R15 整改 52 断言
 node tools/tools-check.js                # 只跑工具集 36 断言（含真实后台进程）
 node tools/release.js                    # 打包+字节校验（先关应用）
 env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron . --user-data-dir=.s-x --shot --script=tools/xxx-probe.js
-node tools/mock-gateway.js               # mock 网关 127.0.0.1:57321（[[slow]] [[narrslow]] [[narr]] [[many]] [[write]] [[read]] [[arch]] [[force]] [[tamper]] [[noaccounts]] [[badkey]] [[http403]] [[nudgecount]] [[argsfence]] [[argsdup]] [[argsobj]] [[argsnone]] [[argsjunk]] [[winbash]]）
+node tools/mock-gateway.js               # mock 网关 127.0.0.1:57321（[[slow]] [[narrslow]] [[narr]] [[many]] [[write]] [[read]] [[arch]] [[force]] [[tamper]] [[noaccounts]] [[badkey]] [[http403]] [[nudgecount]] [[argsfence]] [[argsdup]] [[argsobj]] [[argsnone]] [[argsjunk]] [[winbash]] [[silentN]] [[speakN]]）
 git -c http.proxy= -c https.proxy= push origin main   # 推送（直连；7877 代理已不可用）
 ```

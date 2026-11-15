@@ -34,9 +34,10 @@ const LIB_CHECKS = [
   'lessons-check.js', 'mcp-selfcheck.js', 'skills-selfcheck.js',
   'ipc-mcp-check.js', 'secret-mask-check.js', 'h3-check.js',
   'r15-check.js', // R15 审计整改自检（52 断言：档位权威/委派回滚/上下文预算/备份/加固 + 上限配套）
+  'sync-child-check.js', // 边做边同步静态自检（16 断言：主聊天/子代理提示一致性、提醒不落检查点、占位降级）
   'tools-check.js', // 工具集自检（36 断言：清单/元信息/edit_file/find_files/后台任务）
 ];
-const PROBES = ['settings-probe.js', 'dyn-probe.js', 'g3-probe.js', 'mcp-ui-probe.js', 'reason-probe.js', 'cache-token-probe.js', 'goal-effort-probe.js', 'tool-call-guard-probe.js', 'no-reason-probe.js', 'upstream-error-probe.js', 'narrate-gap-probe.js', 'narrate-live-probe.js', 'autonomy-probe.js', 'ctx-budget-probe.js', 'tool-args-probe.js'];
+const PROBES = ['settings-probe.js', 'dyn-probe.js', 'g3-probe.js', 'mcp-ui-probe.js', 'reason-probe.js', 'cache-token-probe.js', 'goal-effort-probe.js', 'tool-call-guard-probe.js', 'no-reason-probe.js', 'upstream-error-probe.js', 'narrate-gap-probe.js', 'narrate-live-probe.js', 'autonomy-probe.js', 'ctx-budget-probe.js', 'tool-args-probe.js', 'sync-narration-probe.js'];
 const SYNTAX_CORE = [
   'main.js', 'preload.js', 'renderer/app.js',
   ...fs.readdirSync(path.join(ROOT, 'lib')).filter((f) => f.endsWith('.js')).sort()

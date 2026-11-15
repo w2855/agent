@@ -9,6 +9,8 @@ const http = require('node:http');
 
 const PORT = Number(process.env.MOCK_PORT || 57321);
 const HOST = '127.0.0.1';
+/* 按触发词记录「每一步请求带了几条进展同步提醒」，供 sync-narration-probe 断言轨迹。 */
+const syncTrace = new Map();
 
 function sendJson(res, code, body) {
   const raw = JSON.stringify(body);
@@ -160,6 +162,16 @@ function handleChat(body, res) {
   const toolMsgs = msgs.filter((m) => m.role === 'tool');
   const toolDefs = Array.isArray(body.tools) ? body.tools : [];
   const nudges = msgs.filter((m) => m.role === 'system' && String(m.content || '').includes('流程提醒')).length;
+  /* 「进展同步提醒」条数：验证连续静默才提醒、不机械绑定每次工具调用、不累积。
+     按触发词分桶记录每一步请求看到的条数，回合结束回显整条轨迹。 */
+  const syncNudges = msgs.filter((m) => m.role === 'system' && /进展同步提醒/.test(String(m.content || ''))).length;
+  const syncKey = String(userText).match(/\[\[(silent\d+|speak\d+)\]\]/)?.[1] || '';
+  if (syncKey) {
+    if (!toolMsgs.length) syncTrace.set(syncKey, []);
+    const trace = syncTrace.get(syncKey) || [];
+    trace.push(syncNudges);
+    syncTrace.set(syncKey, trace);
+  }
   // 主进程「只思考不出正文」的补答指令：命中说明它按预期换了一套问法
   const answerNudge = msgs.some((m) => (m.role === 'system' || m.role === 'user') && isNudgeMsg(m));
   console.log('[mock] chat msgs=%d tools=%d toolMsgs=%d nudges=%d effort=%s trigger=%s', msgs.length, toolDefs.length, toolMsgs.length, nudges, body.reasoning_effort || '-', String(userText).slice(0, 40));
@@ -258,6 +270,34 @@ function handleChat(body, res) {
     if (!toolMsgs.length) return streamToolCall(res, 'list_dir', { path: '.' });
     if (toolMsgs.length === 1) return streamToolCall(res, 'read_file', { path: 'dsh-tool-e2e.txt' });
     finishStream(`nudge=${nudges}; toolmsgs=${toolMsgs.length}`);
+    return;
+  }
+
+  /* [[silentN]] 连续 N 步只回 tool_calls、一个正文字都不给（模拟模型全程沉默）。
+     每步换一个只读目标，避免被工具去重逻辑合并；最后一步回显提醒轨迹，
+     期望形如 0,0,0,1,0,0,1 —— 前 3 步不催、第 4 步补 1 条、之后重新计数、绝不累积。 */
+  const silentMatch = String(userText).match(/\[\[silent(\d+)\]\]/);
+  if (silentMatch) {
+    const steps = Number(silentMatch[1]);
+    if (toolMsgs.length < steps) {
+      return streamToolCall(res, 'read_file', { path: `silent-${toolMsgs.length}.txt` });
+    }
+    finishStream(`trace=${(syncTrace.get('silent' + steps) || []).join(',')}; toolmsgs=${toolMsgs.length}`);
+    return;
+  }
+
+  /* [[speakN]] 第 N 步模型开口说一句（正文非空）后继续调工具，
+     用来验证「模型一开口就清零、提醒立即撤回」，不会在开口之后继续催。 */
+  const speakMatch = String(userText).match(/\[\[speak(\d+)\]\]/);
+  if (speakMatch) {
+    const at = Number(speakMatch[1]);
+    if (toolMsgs.length < 6) {
+      if (toolMsgs.length === at) {
+        sse(res, { choices: [{ index: 0, delta: { content: '已看到关键结果，接着核对下一步。' } }] });
+      }
+      return streamToolCall(res, 'read_file', { path: `speak-${toolMsgs.length}.txt` });
+    }
+    finishStream(`trace=${(syncTrace.get('speak' + at) || []).join(',')}; toolmsgs=${toolMsgs.length}`);
     return;
   }
 

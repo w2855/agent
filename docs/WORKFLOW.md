@@ -118,7 +118,7 @@ npx electron . --user-data-dir="E:/dsh-desktop/.e2e-userdata" --script=tools/too
 基线数字（2026-11-15 实测，全绿）：
 foundation 62 / orchestrator 58 / delegation 83 / project 43 / queue 29 / graph 24 / audit 17 / validation 23 / **governance 36** = **375/375**
 lessons-check = **109/109**
-最终门禁 = **36 项 35✓ 0✗ 1 跳**（2026-11-15；清单新增 ctx-budget-probe.js 8/8、tool-args-probe.js 16/16、autonomy-probe.js 12/12；upstream-error-probe.js 覆盖「上游报错指向正确」14/14：网关自身没账号时不得让用户反复改 key、401 要提示「地址与 key 同源」、403 不得张冠李戴、正常回合不出现错误块；tool-call-guard-probe.js 覆盖「工具调用文本直出 / 死循环」15/15、no-reason-probe.js 覆盖「不支持/未开启/未返回思考链」18/18；goal-effort-probe.js 覆盖思考强度点击链路与 /goal 子命令 32/32；cache-token-probe.js 覆盖缓存口径/省 token 21/21；narrate-live-probe.js 11/11 含「分段不串话」精确断言；runtime-ipc-check.js 需 Electron `--script` 通道，node 直跑报 `window is not defined` 属预期，计为跳过）。本轮 `run-all --quick` 实测 **36 项 19✓ 0✗ 17 跳全绿**（17 跳均为 Electron 探针）；另手工全跑 4 组 Electron 探针：ctx-budget 8/8、tool-args 16/16、autonomy 12/12、narrate-live 11/11。r15-check 因上限放宽同步改为 52/52。
+最终门禁 = **38 项 37✓ 0✗ 1 跳**（2026-11-15；清单新增 sync-child-check.js 16/16、sync-narration-probe.js 23/23、ctx-budget-probe.js 8/8、tool-args-probe.js 16/16、autonomy-probe.js 12/12；upstream-error-probe.js 覆盖「上游报错指向正确」14/14：网关自身没账号时不得让用户反复改 key、401 要提示「地址与 key 同源」、403 不得张冠李戴、正常回合不出现错误块；tool-call-guard-probe.js 覆盖「工具调用文本直出 / 死循环」15/15、no-reason-probe.js 覆盖「不支持/未开启/未返回思考链」18/18；goal-effort-probe.js 覆盖思考强度点击链路与 /goal 子命令 32/32；cache-token-probe.js 覆盖缓存口径/省 token 21/21；narrate-live-probe.js 11/11 含「分段不串话」精确断言；runtime-ipc-check.js 需 Electron `--script` 通道，node 直跑报 `window is not defined` 属预期，计为跳过）。本轮 `run-all --quick` 实测 **38 项 20✓ 0✗ 18 跳全绿**（18 跳均为 Electron 探针）；另手工全跑 7 组 Electron 探针：sync-narration 23/23、ctx-budget 8/8、tool-args 16/16、autonomy 12/12、narrate-gap 5/5、narrate-live 11/11、tool-call-guard 15/15。r15-check 因上限放宽同步改为 52/52。
 （并发代理扩容会改变各脚本计数，以聚合器当场实测为准；lib 自检另含 mcp 26 / skills 14 / ipc-mcp 18 / secret-mask 37 / h3 31 / lessons 109）
 
 > 聚合器环境注意：宿主 IDE/agent 可能设置 `ELECTRON_RUN_AS_NODE=1`，会让 electron.exe
@@ -253,3 +253,11 @@ lessons-check = **109/109**
 - [x] **说话由模型自主判断**：删除每步注入的 system「流程提醒」（省 token），系统提示改给判断标准；只返回 `tool_calls` 的中间步骤不再被当成「整轮零正文」补发兜底文案
 - [x] 新增 `tools/with-mock.js`：自动起停 mock 网关跑单探针，跑完即退，不留后台进程
 - [x] 探针：ctx-budget 8/8、tool-args 16/16、autonomy 12/12；`run-all --quick` 36 项 19✓ 0✗ 17 跳全绿
+
+### R16-b · 2026-11-15 · 边做边同步（用户澄清后重做）
+> 用户澄清目标：「执行任务时边做边同步，关键步骤开始/完成/状态变化时说明在做什么、刚完成什么、下一步做什么、有无阻塞；不机械绑定每次工具调用，说不说与详略由 agent 自行判断；精炼不重复不闲聊」。经确认：**只改 DSH 应用**、主聊天+子代理都覆盖、内容必须出自模型正文、连续静默才提醒、占位保留但降级。
+- [x] **规范工程化改写**：主聊天【说话节奏】→【边做边同步】（关键节点/自主判断/不机械绑定/精炼不重复/不要长时间连续沉默/自动连跑不等确认）；子代理 `SYNC_RULE` 放进每次委派必带的第二条 system，自定义 `systemPrompt` 也绕不过
+- [x] **防沉默兜底不越界**：`SILENT_NUDGE_AT=3`，连续 3 步零正文才补一条一次性提醒；请求读完即 `dropSilentNudge()` 撤回，模型开口即清零。提醒只在本回合 API 消息流，不写会话历史、不进正文、不累积膨胀（轨迹实测 `0,0,0,1,0,0,1`；开口后 `0,0,0,1,0,0,0`）
+- [x] **子代理提醒请求时临时附加**：`requestMessages = [...messages, nudge]` 只在本次 `modelRequest` 生效，不写回 `messages`，检查点/委派结果都不含它
+- [x] **占位降级**：`.tool-narrate` 标 `data-role="ui-status"` + aria 说明「不是模型的发言」，CSS 弱化（次要色/11px/opacity .8），模型一开口即让位淡出
+- [x] 新增 `sync-narration-probe.js` 23/23、`sync-child-check.js` 16/16；回归 autonomy 12/12、narrate-gap 5/5、narrate-live 11/11、tool-call-guard 15/15

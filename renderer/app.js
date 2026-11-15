@@ -1275,8 +1275,9 @@ function renderTasks(node, msg) {
   if (slot) slot.innerHTML = taskCard(msg.tasks);
 }
 
-/* ───────── 工具叙述行（UI 层保底，三段规则） ─────────
-   修复「工具调用中途不说话」：真实多步任务里模型经常在工具循环中途全程沉默，
+/* ───────── 工具叙述行（UI 层防空白占位，三段规则） ─────────
+   这不是「模型在说话」：进展同步由模型正文负责（见 buildApiMessages 的【边做边同步】
+   与工具循环里的连续静默提醒），本行只在模型完全没开口时防止界面长时间空白。
    旧规则（body 非空即永久退场）导致首句播报之后界面再无文字。新规则让「正在做什么 /
    在想什么」在回合全程可见：
      1) 工具执行中：显示「正在 <动词> <目标>…」；模型在该工具发起【后】说过话
@@ -1323,6 +1324,10 @@ function renderNarrate(node, msg) {
   const line = document.createElement('div');
   line.className = 'tool-narrate';
   line.dataset.sig = wantSig;
+  /* 降级为「界面状态」：只是防空白的占位，不算模型说了话，也不进正文/历史。
+     同步进展由模型正文负责；模型一开口，上面的判定会让这条立即让位淡出。 */
+  line.dataset.role = 'ui-status';
+  line.setAttribute('aria-label', '界面状态提示，不是模型的发言');
   line.innerHTML = wantSig === 'thinking'
     ? '模型正在思考下一步…'
     : `正在 ${esc(running.verb || running.name || '执行')} ${esc(running.target || '')}…`;
@@ -1963,9 +1968,11 @@ function buildApiMessages(session, currentText, draft, skipUser) {
       + '任务清单（todo_write）由你自行判断是否使用：任务复杂、步骤较多时可以建立清单并更新进度。'
       + '不要虚构工具调用、工具结果或文件产出。'
       + '工具调用只能通过 tool_calls 字段发起，禁止在正文里写 functions.xxx、工具调用 JSON 或调用草稿；不确定如何调用时直接给文字答复，不要反复重写调用计划。'
-      + '【说话节奏】什么时候开口由你自己判断，不要求每一步都播报：'
-      + '步骤目的不直观、前后有依赖、拿到关键结论、发现异常或需要用户拍板时，用一句短话说明「这一步做什么」或「结果意味着什么」；'
-      + '一串机械的只读步骤（读文件、列目录、跑命令）可以不出声，直接继续，不要为了报进度复述工具输出。'
+      + '【边做边同步】执行任务时在关键节点用一句短话同步进展：当前在做什么、刚完成什么、下一步准备做什么、有无阻塞或需确认事项。'
+      + '什么时候开口由你自己判断，说多少也由你判断，不机械绑定每次工具调用：'
+      + '步骤目的不直观、前后有依赖、拿到关键结论、发现异常或需要用户拍板时说一句；'
+      + '一串机械的只读步骤（读文件、列目录、跑命令）可以不出声，但不要长时间连续操作都不发言。'
+      + '同步保持精炼、不重复、不闲聊，始终围绕当前任务进展，不要复述工具输出。'
       + '开口时把话放在正文里（工具调用之前，或该步结束之后），绝不写进工具参数。'
       + '工具全部结束后只做一次总结，不要每完成一个工具就单独汇报一遍。'
       + '步骤之间自动连续执行，不要中途停下来等用户确认；只有要做破坏性操作、权限不足或信息不足以判断时才停下询问。'
@@ -3730,6 +3737,17 @@ function runApiTurn(ctx, opts) {
 
     const messages = opts.messages.slice();
     const toolSaver = createToolCallSaver(runToolCall); // 本回合内抑制重复只读调用与重复结果回灌
+    /* 「边做边同步」的防沉默兜底：不绑定每次工具调用，也不逐步插话；
+       只有模型连续若干步一个正文字都没给（真实长任务里很常见）时，
+       才补一条轻量提醒，且只保留最新一条、模型开口即撤。
+       提醒只在本回合的 API 消息流里，不写 session.messages、不进正文。 */
+    const SILENT_NUDGE_AT = 3;
+    let silentSteps = 0;
+    const dropSilentNudge = () => {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i] && messages[i].__silentNudge) { messages.splice(i, 1); break; }
+      }
+    };
     /* 循环熔断：模型偶尔会每轮返回同一批 tool_calls（工具结果没被消费时尤其常见），
        原先只靠「模型不再调用工具」退出，没有上限就会无限打转、持续烧 token。 */
     const MAX_TOOL_STEPS = 24;
@@ -3794,6 +3812,13 @@ function runApiTurn(ctx, opts) {
         body = body ? body + '\n\n' + r.text : r.text;
         schedulePaint();
       }
+      /* 提醒是「一次性」的：上一步注入的已经送达模型，请求返回后立刻撤掉，
+         不会持续留在消息流里反复催、也不会随步数膨胀。 */
+      dropSilentNudge();
+      /* 本步模型有没有开口，以正文字符为准：思考链不算，UI 占位叙述行也不算。
+         开口即清零；连续零正文才累计，阈值到了只补一次。 */
+      if (String(r.text || '').trim()) silentSteps = 0;
+      else silentSteps += 1;
       if (!r.toolCalls.length) break;
 
       const sig = r.toolCalls.map((c) => `${c?.function?.name || ''}:${c?.function?.arguments || ''}`).join('|');
@@ -3831,11 +3856,20 @@ function runApiTurn(ctx, opts) {
         if (ctl.stopRequested) draft.aborted = true;
         break;
       }
-      /* 是否出声由模型自己判断（用户要求「不是每次工具调用完都要说话」）：
-         以前这里每步注入一条「必须先说明再调用」的 system 提醒，等于强制播报；
-         现在改为在系统提示里给出判断标准，步骤之间不再插话。UI 层有叙述行兜底
-         （工具执行中显示「正在 …」、间隙显示「模型正在思考下一步…」），
-         所以模型选择沉默时界面也不会空白，只是不假装它在说话。 */
+      /* 是否出声由模型自己判断（用户要求「不是每次工具调用完都要说话」），
+         不逐步插话、不把同步机械绑定到每次调用。只有连续 SILENT_NUDGE_AT 步
+         一个正文字都没有时，才补一条轻量提醒，提醒它也「酌情」而非强制播报；
+         注入后重新计数，避免长任务里每轮都催。提醒只在本回合 API 消息流里，
+         不写会话历史、不进正文；模型一旦开口，下一步立即撤掉。 */
+      if (silentSteps >= SILENT_NUDGE_AT) {
+        dropSilentNudge(); // 只保留最新一条，不随步数累积膨胀
+        messages.push({
+          role: 'system',
+          __silentNudge: true,
+          content: '（进展同步提醒）已连续多个工具步骤没有文字说明。若到了关键节点（阶段完成、拿到结论、发现异常、需要确认），用一句短话同步「刚完成什么 / 下一步做什么」；仍是机械只读步骤就继续直接调用工具，不必勉强开口。',
+        });
+        silentSteps = 0;
+      }
     }
 
     finishApi(null);

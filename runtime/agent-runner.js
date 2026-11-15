@@ -21,6 +21,13 @@ const CHECKPOINT_KEEP_MESSAGES = 40;
 const APPROVAL_POLL_MS = 300;
 const MODEL_RETRY_DELAY_MS = 1200;
 
+/* 与主聊天【边做边同步】同源，压成一行省 token；两处语义必须保持一致。 */
+const SYNC_RULE = '执行时在关键节点用一句短话同步进展（当前在做什么/刚完成什么/下一步做什么/有无阻塞或需确认）；'
+  + '是否说、说多少由你判断，不机械绑定每次工具调用，也不要长时间连续操作都不发言；'
+  + '同步精炼不重复、不闲聊、不复述工具输出，话放在正文里；步骤自动连续，最后只总结一次。';
+const SILENT_NUDGE_AT = 3;
+const CHILD_SYNC_NUDGE = '（进展同步提醒）已连续多个工具步骤没有文字说明。若到了关键节点，用一句短话同步进展与下一步；仍是机械只读步骤就继续直接调用工具，不必勉强开口。';
+
 const SYSTEM_PROMPT = [
   '你是 DSH Desktop 中被父 Agent 委派的子 Agent。',
   '你只能看到本次委派的 objective、expectedOutput 与显式共享的 contextRefs，看不到父级完整对话。',
@@ -73,6 +80,7 @@ function buildMessages(delegation, targetVersion, workspacePath, permission) {
       `期望输出：${delegation.expectedOutput || '简洁总结完成情况与产物'}`,
       '工具调用会经过与主 Agent 相同的策略与审批流程；需要审批时等待用户决定。',
       '当任务完成或无法继续时，停止调用工具并给出最终总结。',
+      SYNC_RULE,
     ].join('\n'),
   });
   const shared = readContextRefs(delegation);
@@ -347,6 +355,9 @@ async function runAgentTask({ runtime, delegation, providerConfig }) {
   let finalText = '';
   let failure = null;
   let budgetExceeded = null;
+  /* 连续零正文步数：只有连续静默到阈值才补一条提醒，不绑定每次工具调用。
+     提醒「请求时临时附加」，不写回 messages —— 检查点/历史/委派结果都不含它。 */
+  let silentSteps = 0;
 
   /* 断点续跑：委派记录上有检查点（上次中断时保存的对话）就从那里继续，
      预算按已消耗量折算，不重头执行。 */
@@ -403,9 +414,13 @@ async function runAgentTask({ runtime, delegation, providerConfig }) {
         messages.length = 0;
         messages.push(...trimmed);
       }
+      const requestMessages = silentSteps >= SILENT_NUDGE_AT
+        ? [...messages, { role: 'system', content: CHILD_SYNC_NUDGE }]
+        : messages;
+      if (requestMessages !== messages) silentSteps = 0; // 注入后重新计数，长任务不反复催
       let reply;
       try {
-        reply = await requestModel(runtime, { providerConfig, delegation, messages, tools, deadline });
+        reply = await requestModel(runtime, { providerConfig, delegation, messages: requestMessages, tools, deadline });
       } catch (err) {
         if (modelCallId) runtime.modelFinish({
           modelCallId,
@@ -429,6 +444,8 @@ async function runAgentTask({ runtime, delegation, providerConfig }) {
 
       const toolCalls = Array.isArray(reply.toolCalls) ? reply.toolCalls : [];
       const text = String(reply.content || '');
+      /* 开口即清零；连续零正文才累计。子代理的同步文字同样只认模型正文。 */
+      if (text.trim()) silentSteps = 0; else silentSteps += 1;
       if (text) finalText = text;
       messages.push({ role: 'assistant', content: text, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) });
       // 每个模型回合后落检查点：中断后可从此处续跑
