@@ -523,8 +523,15 @@
           <div class="group-title">上下文</div>
           <div class="field">
             <label for="ctxLimitInput">会话上下文窗口（字符数） <span>（超过将自动压缩历史）</span></label>
-            <input id="ctxLimitInput" inputmode="numeric" placeholder="700000" spellcheck="false" />
-            <p class="fine">范围 50000–2000000，保存即时生效：状态条的上下文占用、自动压缩阈值与发给上游的请求预算同步更新。</p>
+            <div class="seg" id="ctxPresetSeg">
+              <button type="button" data-ctx="10000">1 万</button>
+              <button type="button" data-ctx="60000">6 万</button>
+              <button type="button" data-ctx="120000">12 万</button>
+              <button type="button" data-ctx="400000">40 万</button>
+              <button type="button" data-ctx="1000000">100 万</button>
+            </div>
+            <input id="ctxLimitInput" inputmode="numeric" placeholder="120000" spellcheck="false" />
+            <p class="fine">范围 4000–1000000 字符（中文约 1 字 ≈ 1 token）：调小更省 token、更早触发压缩；调大能带更多历史，但不要超过模型窗口。改完即时生效。</p>
           </div>
           <div class="settings-row">
             <div class="sp-row-main">

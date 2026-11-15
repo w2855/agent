@@ -209,9 +209,14 @@ async function executeToolCall(runtime, { call, delegation, stepId, providerConf
   });
   if (executed.ok === false) {
     finishStep('failed');
+    /* 失败时也要把 executor 产出的 content 带上：里面有 stderr 原文与
+       「Windows 没有 head/grep，改用 find_files」这类替代做法提示。
+       以前只回一句「命令退出码 255」，模型看不到原因，只会原样重试。 */
+    const detail = String(executed.content || '').trim();
     return {
       ok: false,
-      content: `工具 ${name} 失败：${executed.message || executed.code || '未知错误'}`,
+      content: `工具 ${name} 失败：${executed.message || executed.error || executed.code || '未知错误'}`
+        + (detail ? `\n${detail}` : ''),
       code: executed.code,
     };
   }

@@ -20,6 +20,27 @@ function sse(res, obj) {
   res.write(`data: ${JSON.stringify(obj)}\n\n`);
 }
 
+/* 原样推送工具调用分片：用来复现真实网关的畸形 arguments
+   （```json 围栏、同一份 JSON 重复推两遍、直接给对象、缺必填参数、根本不是 JSON）。 */
+function streamToolCallRaw(res, name, fragments) {
+  sse(res, {
+    choices: [{
+      index: 0,
+      delta: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ index: 0, id: 'call_mock_' + Date.now(), type: 'function', function: { name, arguments: '' } }],
+      },
+    }],
+  });
+  for (const frag of fragments) {
+    sse(res, { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: frag } }] } }] });
+  }
+  sse(res, { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] });
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
 function streamToolCall(res, name, args) {
   const argStr = JSON.stringify(args);
   const cut1 = Math.max(1, Math.floor(argStr.length / 3));
@@ -231,6 +252,15 @@ function handleChat(body, res) {
     return;
   }
 
+  /* [[nudgecount]] 自主播报场景：连跑两个工具后回显本轮请求里「流程提醒」system 条数。
+     用来证明工具循环不再强制每步开口（nudge=0），且回合自动连续跑完、无需用户再输入。 */
+  if (String(userText).includes('[[nudgecount]]')) {
+    if (!toolMsgs.length) return streamToolCall(res, 'list_dir', { path: '.' });
+    if (toolMsgs.length === 1) return streamToolCall(res, 'read_file', { path: 'dsh-tool-e2e.txt' });
+    finishStream(`nudge=${nudges}; toolmsgs=${toolMsgs.length}`);
+    return;
+  }
+
   if (toolMsgs.length) {
     // [[loop]] 故障上游：无论收到多少工具结果，都重复同一批 tool_calls。
     // 没有熔断时工具循环会永远打转；有熔断后应在连续重复时自动终止。
@@ -382,6 +412,28 @@ function handleChat(body, res) {
 
   if (String(userText).includes('[[arch')) {
     return streamToolCall(res, 'project_architecture', ARCH_ARGS);
+  }
+
+  /* 畸形 arguments 场景：验证「找文件（无参数）/ 参数错误」这类卡片不再无解 */
+  if (String(userText).includes('[[argsfence]]')) {
+    return streamToolCallRaw(res, 'list_dir', ['```json\n{"path":"."}\n```']);
+  }
+  if (String(userText).includes('[[argsdup]]')) {
+    const full = JSON.stringify({ path: '.' });
+    return streamToolCallRaw(res, 'list_dir', [full, full]); // 网关把同一份 JSON 推了两遍
+  }
+  if (String(userText).includes('[[argsobj]]')) {
+    return streamToolCallRaw(res, 'list_dir', [{ path: '.' }]); // arguments 直接给对象
+  }
+  if (String(userText).includes('[[argsnone]]')) {
+    return streamToolCall(res, 'find_files', {}); // 缺必填 pattern
+  }
+  if (String(userText).includes('[[argsjunk]]')) {
+    return streamToolCallRaw(res, 'list_dir', ['这不是 JSON']);
+  }
+  // 「把 bash 命令搬到 Windows」：本机没有的命令 + head 管道，结果里必须带替代做法提示
+  if (String(userText).includes('[[winbash]]')) {
+    return streamToolCall(res, 'run_command', { command: 'nonexistentcmd /b . | head -20' });
   }
 
   let name = 'list_dir';

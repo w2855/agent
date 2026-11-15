@@ -127,7 +127,14 @@ const MAX_REASON_CHARS = 40000;
 /* SSE 行缓冲上限（R15/A8）：MAX_OUTPUT_CHARS 只保护「已解析的正文」，
    保护不到尚未出现空行分隔的 buf——异常网关持续发送不含 \n\n 的数据会让它无限增长。 */
 const SSE_BUFFER_LIMIT = 4 * 1024 * 1024;
-const MAX_INPUT_CHARS = 200000;
+/* 输入字符上限 = 渲染层上下文窗口最大值（1,000,000）+ 系统提示/工具定义/本轮输入余量。
+   两处必须一起改，否则设置里允许 100 万、主进程却按旧上限拒收。 */
+const MAX_INPUT_CHARS = 1100000;
+/* 消息条数的唯一用途是挡住异常输入（渲染层失控时不会把主进程拖死），
+   不能当业务限制用：多步工具回合里一条工具结果就是一条消息，真实长任务
+   很快超过 80，旧限制会在会话正当进行时把整轮打回「消息条数过多」。
+   真正的上下文控制是字符预算（渲染层 dsh.ctxLimit + 自动压缩）。 */
+const MAX_INPUT_MESSAGES = 2000;
 const MAX_MODELS = 500;
 
 /** @type {BrowserWindow | null} */
@@ -1455,7 +1462,7 @@ function validateChatArgs(payload) {
   if (invalid) return invalid;
   const msgs = payload.messages;
   if (!Array.isArray(msgs) || !msgs.length) return '消息列表为空';
-  if (msgs.length > 80) return `消息条数过多（${msgs.length} > 80）`;
+  if (msgs.length > MAX_INPUT_MESSAGES) return `消息条数异常（${msgs.length} > ${MAX_INPUT_MESSAGES}），已拒绝本次请求`;
   let total = 0;
   let hasUser = false;
   for (const [i, m] of msgs.entries()) {
@@ -1506,7 +1513,7 @@ function validateChatArgs(payload) {
 
 /** 只向上游传协议允许的字段，避免渲染层混入任意属性。 */
 function sanitizeMessages(msgs) {
-  return msgs.slice(-80).map((m) => {
+  return msgs.slice(-MAX_INPUT_MESSAGES).map((m) => {
     const role = String(m.role);
     if (role === 'tool') {
       return { role: 'tool', tool_call_id: String(m.tool_call_id), content: String(m.content ?? '') };
@@ -1541,6 +1548,39 @@ function sanitizeTools(list) {
   }));
 }
 
+
+/** 取第一个「括号配平」的 JSON 对象子串：网关把同一个完整 JSON 重复推两遍时，
+    拼接结果 `{...}{...}` 不是合法 JSON，取第一块即可还原模型本意。 */
+function firstJsonObject(text) {
+  const s = String(text || '');
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '{') continue;
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < s.length; j++) {
+      const ch = s[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') { depth--; if (depth === 0) return s.slice(i, j + 1); }
+    }
+  }
+  return '';
+}
+
+/** 工具参数串修复：能直接 parse 就原样下发；否则尝试截取第一个完整对象。 */
+function normalizeToolArgs(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return '{}';
+  try { JSON.parse(s); return s; } catch { /* 继续修复 */ }
+  const block = firstJsonObject(s);
+  if (block) { try { JSON.parse(block); return block; } catch { /* 落回原文 */ } }
+  return s;
+}
 
 /** SSE 事件块解析：按空行分块，块内多行 data 拼接，兼容 CRLF / 心跳 / [DONE] / tool_calls */
 /* 用量归一化：各家对「提示缓存命中」的字段叫法不同——
@@ -1796,8 +1836,12 @@ ipcMain.on('model:chat', (event, rawPayload) => {
     activeChats.delete(id);
     /* 最后一道保险：只要不是用户主动中断，且整轮一个正文字符都没产出，
        主进程自己发一段 chunk。渲染层的 body 因此必然非空，气泡不会是空的，
-       也不会停在「思考中」——用户花了 token 就必须看到字。 */
-    if (!session.aborted && produced === 0 && !session.outputGuard) {
+       也不会停在「思考中」——用户花了 token 就必须看到字。
+       但「本步只发起了工具调用」不算零产出：工具循环还在进行，后面一步会说；
+       以前这里不区分，模型选择沉默的每一步都会被塞一段「本轮没有取得模型正文」，
+       多步任务里同一句兜底重复叠加、把真正的结论挤到最下面。 */
+    const stepHasToolCalls = Array.isArray(session.toolCalls) && session.toolCalls.length > 0;
+    if (!session.aborted && produced === 0 && !session.outputGuard && !stepHasToolCalls) {
       const fallback = scrubSecret(
         fallbackAnswerText(reasonText, extra.code, session.finishReason), cfg?.key);
       /* 出错的回合里，这段兜底只会跟渲染层的错误块抢位置、把状态码重复一遍。
@@ -1852,7 +1896,12 @@ ipcMain.on('model:chat', (event, rawPayload) => {
       if (typeof call.id === 'string' && call.id) slot.id = call.id;
       const fn = call.function || {};
       if (typeof fn.name === 'string' && fn.name && !slot.name) slot.name = fn.name;
+      /* 有的网关把 arguments 直接给成对象而不是字符串；早期只认字符串，
+         这类调用会变成 {} 下发，工具报「缺少 pattern 参数」，看起来像找文件坏了。 */
       if (typeof fn.arguments === 'string') slot.arguments += fn.arguments;
+      else if (fn.arguments && typeof fn.arguments === 'object') {
+        slot.arguments = JSON.stringify(fn.arguments);
+      }
     };
     const collectToolCalls = () => {
       const out = [];
@@ -1861,7 +1910,7 @@ ipcMain.on('model:chat', (event, rawPayload) => {
         out.push({
           id: slot.id || `call_${index}_${Math.random().toString(36).slice(2, 8)}`,
           type: 'function',
-          function: { name: slot.name, arguments: slot.arguments || '{}' },
+          function: { name: slot.name, arguments: normalizeToolArgs(slot.arguments) },
         });
       }
       return out;

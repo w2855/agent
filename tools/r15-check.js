@@ -151,8 +151,21 @@ function makeRuntime(root) {
     const appSrc = read('renderer/app.js');
     add('A5 默认上下文 120000 字符（旧 700000 已移除）',
       /CTX_LIMIT_DEFAULT = 120000/.test(appSrc) && !/CTX_LIMIT_DEFAULT = 700000/.test(appSrc));
-    add('A5 上限收敛到 400000 且旧超大值回落默认',
-      /CTX_LIMIT_MAX = 400000/.test(appSrc) && /n > CTX_LIMIT_MAX\) return CTX_LIMIT_DEFAULT/.test(appSrc));
+    add('A5 上限可设到 100 万字符且旧超大值回落默认',
+      /CTX_LIMIT_MAX = 1000000/.test(appSrc) && /n > CTX_LIMIT_MAX\) return CTX_LIMIT_DEFAULT/.test(appSrc));
+    /* 两处上限必须配套：曾经设置里放宽、主进程仍按旧字符上限拒收，用户看到「上下文过长」。 */
+    add('A5 主进程输入上限覆盖渲染层上限',
+      (() => {
+        const m = read('main.js').match(/MAX_INPUT_CHARS = (\d+)/);
+        return m && Number(m[1]) > 1000000;
+      })());
+    /* 消息条数只能当异常输入保护：多步工具回合一条工具结果就是一条消息，
+       旧值 80 会在会话正当进行时把整轮打回「消息条数过多（82 > 80）」。 */
+    add('A5 消息条数上限不作业务限制',
+      (() => {
+        const m = read('main.js').match(/MAX_INPUT_MESSAGES = (\d+)/);
+        return m && Number(m[1]) >= 500;
+      })());
     add('A5 自动压缩阈值 75%（不再 90%）',
       /maxContextChars \* 0\.75/.test(appSrc) && !/maxContextChars \* 0\.9/.test(appSrc));
   }

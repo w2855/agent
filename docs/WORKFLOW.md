@@ -118,7 +118,7 @@ npx electron . --user-data-dir="E:/dsh-desktop/.e2e-userdata" --script=tools/too
 基线数字（2026-11-15 实测，全绿）：
 foundation 62 / orchestrator 58 / delegation 83 / project 43 / queue 29 / graph 24 / audit 17 / validation 23 / **governance 36** = **375/375**
 lessons-check = **109/109**
-最终门禁 = **31 项 30✓ 0✗ 1 跳**（2026-11-15；新增 upstream-error-probe.js 覆盖「上游报错指向正确」14/14：网关自身没账号时不得让用户反复改 key、401 要提示「地址与 key 同源」、403 不得张冠李戴、正常回合不出现错误块；tool-call-guard-probe.js 覆盖「工具调用文本直出 / 死循环」15/15、no-reason-probe.js 覆盖「不支持/未开启/未返回思考链」18/18；goal-effort-probe.js 覆盖思考强度点击链路与 /goal 子命令 32/32；cache-token-probe.js 覆盖缓存口径/省 token 21/21；runtime-ipc-check.js 需 Electron `--script` 通道，node 直跑报 `window is not defined` 属预期，计为跳过。本轮 `run-all --quick` 实测 31 项 19✓ 0✗ 12 跳全绿，12 跳均为 Electron 探针；另手工全跑 8 个 Electron 探针 133/133）
+最终门禁 = **36 项 35✓ 0✗ 1 跳**（2026-11-15；清单新增 ctx-budget-probe.js 8/8、tool-args-probe.js 16/16、autonomy-probe.js 12/12；upstream-error-probe.js 覆盖「上游报错指向正确」14/14：网关自身没账号时不得让用户反复改 key、401 要提示「地址与 key 同源」、403 不得张冠李戴、正常回合不出现错误块；tool-call-guard-probe.js 覆盖「工具调用文本直出 / 死循环」15/15、no-reason-probe.js 覆盖「不支持/未开启/未返回思考链」18/18；goal-effort-probe.js 覆盖思考强度点击链路与 /goal 子命令 32/32；cache-token-probe.js 覆盖缓存口径/省 token 21/21；narrate-live-probe.js 11/11 含「分段不串话」精确断言；runtime-ipc-check.js 需 Electron `--script` 通道，node 直跑报 `window is not defined` 属预期，计为跳过）。本轮 `run-all --quick` 实测 **36 项 19✓ 0✗ 17 跳全绿**（17 跳均为 Electron 探针）；另手工全跑 4 组 Electron 探针：ctx-budget 8/8、tool-args 16/16、autonomy 12/12、narrate-live 11/11。r15-check 因上限放宽同步改为 52/52。
 （并发代理扩容会改变各脚本计数，以聚合器当场实测为准；lib 自检另含 mcp 26 / skills 14 / ipc-mcp 18 / secret-mask 37 / h3 31 / lessons 109）
 
 > 聚合器环境注意：宿主 IDE/agent 可能设置 `ELECTRON_RUN_AS_NODE=1`，会让 electron.exe
@@ -242,3 +242,14 @@ lessons-check = **109/109**
 - [x] **容量与调度**：persist-store 整库 64MB / 4000 键上限；队列按 priority + 老化排序；Autopilot 进度落盘可恢复；经验库关联检索排除污染记录
 - [x] **审批一致性**：审批凭证绑定 toolCallId + runId + actionHash + TTL，过期就地清扫
 - [x] 新增 `tools/runtime-governance-check.js`（36 断言）+ `docs/security/policy-model.md`
+
+### R16 · 2026-11-15 · 上限放宽 + 工具调用健壮性 + 说话自主化
+> 用户报障三条：「消息条数过多（82 > 80）」、「上下文最大应该能设置一百万」、「找文件也有问题（卡片显示参数错误）」。
+- [x] **消息条数上限不是业务逻辑**：`main.js` `MAX_INPUT_MESSAGES` 80→2000，只挡异常输入；真正的上下文控制是字符预算（渲染层 `dsh.ctxLimit` + 自动压缩）。旧值会在多步工具回合进行到一半时把整轮打回（一条工具结果就是一条消息）
+- [x] **上下文上限 100 万**：`CTX_LIMIT_MAX` 400000→1000000、设置页加「100 万」预设；`MAX_INPUT_CHARS` 450000→1100000 同步放宽（两处不一致会出现「设置里允许、发请求被拒收」）；`clampCompacted` 改为按预算动态计算摘要池上限；`r15-check` 加配套断言防止回退
+- [x] **工具参数健壮性**：`firstJsonObject()` 从带 ```json 围栏 / 重复 JSON / 数组等非标准 arguments 中提取首个合法对象；缺必填参数与参数非法时给出「按 {"pattern":"…"} 重新调用 find_files」这类可操作提示，而不是一句「参数错误」
+- [x] **Windows shell 报错可读**：`run_command` 输出改用 Buffer 按 UTF-8 收集（修中文 stderr 乱码）；失败结果附上 stderr 原文 + 「没有 head/grep/find/ls，找文件用 find_files」替代做法提示；`runtime/agent-runner` 与渲染层失败分支都保留这份 content，模型不再只看到「命令退出码 255」而原地重试
+- [x] **分段串段修复**：收尾不再把整段正文写进第一个 `.prose`（此前第一段变成全文且因签名缓存跳过重绘，可见重复）；`narrate-live-probe` 加「逐段与数据全等 / 段间不串话」精确断言 11/11
+- [x] **说话由模型自主判断**：删除每步注入的 system「流程提醒」（省 token），系统提示改给判断标准；只返回 `tool_calls` 的中间步骤不再被当成「整轮零正文」补发兜底文案
+- [x] 新增 `tools/with-mock.js`：自动起停 mock 网关跑单探针，跑完即退，不留后台进程
+- [x] 探针：ctx-budget 8/8、tool-args 16/16、autonomy 12/12；`run-all --quick` 36 项 19✓ 0✗ 17 跳全绿

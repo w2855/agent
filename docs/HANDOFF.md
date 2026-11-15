@@ -15,7 +15,7 @@
 - git 身份：仓库级 user.name=dsh-workflow / user.email=workflow@local（之前丢过一次，丢失时按此重设）
 
 ## 三、R15 已交付（第三轮审计整改 A1–A13，本轮核心）
-> 审计报告：`docs/security/audit-r15.md`（含证据、影响、修法）；回归断言：`tools/r15-check.js` 48 项。
+> 审计报告：`docs/security/audit-r15.md`（含证据、影响、修法）；回归断言：`tools/r15-check.js` 52 项。
 > 审计方向：Context Engine / Model Adapter / Delegation 深层 / Renderer XSS-IPC / Backup。
 
 1. **A1 档位权威收归主进程**（P0）：新增 `lib/permission-authority.js`（纯函数裁定）。
@@ -32,6 +32,7 @@
    单条 120→400 字符；摘要池 24000 上限（头 30% + 尾）；保留工具名与目标锚点。
 5. **A5 预算口径修正**：默认 700000→120000 字符（≈12 万 token，对 128k 窗口安全）、
    上限 2000000→400000、旧超大值回落默认；自动压缩阈值 90%→75%。
+   （R16 再放宽：上限 400000→1000000；旧数值保留作为当时轮次记录。）
 6. **A6 子代理上下文预算**：`trimChildMessages`（120000 字符）+ `repairToolPairs`
    （裁剪后修 tool_calls/tool 配对，避免上游 400）+ 检查点只存最近 40 条（消除 O(n²) 写盘）；
    无 `usage` 时用字符估算兜底计入 `maxTokens`（兼容网关不返回 usage 时预算才真正生效）。
@@ -82,7 +83,7 @@
 
 ### R15 行为变化（交付说明）
 - 切到「完全权限」会弹一次主进程原生确认框；无头模式提权一律被拒（v2-check 已按新语义断言）。
-- 上下文窗口默认 120000 字符；存过 700000 的老用户会回落新默认（避免继续撞上限）。
+- 上下文窗口默认 120000 字符，可设 4000–1000000（设置页有 1 万/6 万/12 万/40 万/100 万预设）；存过超大旧值的用户会回落新默认（避免继续撞上限）。主进程 `MAX_INPUT_CHARS` 同步抬到 1100000，否则设置里允许 100 万、发请求时仍被旧上限拒收。
 - 备份体积变大（多备会话存储/任务状态/审计目录/3 天事件），保留仍 7 份。
 - 子代理需要审批时会出现时间线卡片（既有实现，本轮未改）。
 - 探针规范：需要「更严档位」时只改渲染层请求值（`requestPerm`），不要再动主进程权威值——
@@ -111,7 +112,7 @@
 2. TDZ 重大修复（`msgStore/msgSeq/registerMsg` 前移到 `loadSavedSessions` 之前）
 3. 架构会话隔离（ensure 带 sessionId + 缓存键加会话维度）
 4. 工具卡片分段渲染（说明段→卡片→说明段，bodySegments 快照）
-5. 每步开口 nudge（工具结果回传后注入 system nudge，`__nudge` 防累积）
+5. 叙述行三段规则（工具执行中「正在 …」/ 间隙「模型正在思考下一步…」/ 出声即让位），是否开口由模型自主判断，不再逐步注入 nudge
 6. 模型思考强度（reasoning_effort，主聊天 + 子代理双注入，off 不发）
 7. README.md
 
@@ -119,7 +120,9 @@
 - 新增 governance 36/36（治理/取消/对账/分页/容量/Autopilot/SSRF/环境变量/队列）
 - 新增 tools-check 36/36（工具清单/元信息/edit_file/find_files/后台任务全链路）
 - f1 17/17、g5 29/29、g3 44/44、dyn 36/36（两相位：arch 14 + todo 22）、tool-e2e 75/75、effort-probe 3/3
-- arch-iso 7/7、narrate-live 4/4、narrate-gap 5/5、persist-write/read、storage-check 8/8、storage-probe 20/20、abort-check 11/11
+- arch-iso 7/7、narrate-live 11/11、narrate-gap 5/5、persist-write/read、storage-check 8/8、storage-probe 20/20、abort-check 11/11
+- R16 新增：autonomy 12/12（说话自主判断 / 无 nudge / 多步自动连跑）、ctx-budget 8/8（100 万上限 / 96 条消息不再报「82 > 80」/ 预算裁历史）、tool-args 16/16（工具参数带 fences/dup/对象、缺参可重试、Windows 无 head 时改用 find_files 提示）、upstream-error 14/14
+- R16 新增 `tools/with-mock.js`：自动起停 mock 网关跑单个探针，跑完即退，不留后台进程
 
 ## 七、当前待办（按优先级）
 1. **用户实测复验**：①架构会话隔离 ②工具卡片上面说话 ③思考强度 ④聊天记录保留（R14 已重新打包后复验）⑤**新增：ask 档工具现在弹主进程原生确认框**（降级通道），主路径仍在应用内卡片
@@ -149,13 +152,15 @@
 
 ## 十、验收命令速查
 ```bash
-node tools/run-all.js                    # 全量门禁（31 项：30✓ + runtime-ipc 跳过；含 tool-call-guard / no-reason / upstream-error 探针）
+node tools/run-all.js                    # 全量门禁（含 tool-call-guard / no-reason / upstream-error / narrate / autonomy / ctx-budget / tool-args 探针）
+node tools/run-all.js --quick            # 快速门禁（跳过 Electron 探针）
+node tools/with-mock.js --shot --user-data-dir=.verify-x --script=tools/xxx-probe.js   # 自动起停 mock 网关跑单个探针，跑完即退
 env -u ELECTRON_RUN_AS_NODE ./node_modules/electron/dist/electron.exe tools/key-diag.js   # 凭据诊断：解密 profiles.bin + 逐档案打真实网关（401 排查第一步）
 node tools/runtime-governance-check.js   # 只跑治理/一致性 36 断言
-node tools/r15-check.js                  # 只跑 R15 整改 50 断言
+node tools/r15-check.js                  # 只跑 R15 整改 52 断言
 node tools/tools-check.js                # 只跑工具集 36 断言（含真实后台进程）
 node tools/release.js                    # 打包+字节校验（先关应用）
 env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron . --user-data-dir=.s-x --shot --script=tools/xxx-probe.js
-node tools/mock-gateway.js               # mock 网关 127.0.0.1:57321（[[slow]] [[narrslow]] [[narr]] [[many]] [[write]] [[read]] [[arch]] [[force]] [[tamper]] [[noaccounts]] [[badkey]] [[http403]]）
+node tools/mock-gateway.js               # mock 网关 127.0.0.1:57321（[[slow]] [[narrslow]] [[narr]] [[many]] [[write]] [[read]] [[arch]] [[force]] [[tamper]] [[noaccounts]] [[badkey]] [[http403]] [[nudgecount]] [[argsfence]] [[argsdup]] [[argsobj]] [[argsnone]] [[argsjunk]] [[winbash]]）
 git -c http.proxy= -c https.proxy= push origin main   # 推送（直连；7877 代理已不可用）
 ```

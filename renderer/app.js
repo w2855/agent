@@ -136,10 +136,12 @@ function writeStorageQuiet(key, value) {
    中文 1 字 ≈ 1 token，700000 字符实际约 46 万 token，是主流 200k 窗口的 2.3 倍，
    结果是历史裁剪与自动压缩几乎永不触发，长会话直接撞上游 400。
    新默认 120000 字符（≈12 万 token）对 128k 窗口安全，对 200k 窗口留足输出余量。
-   范围 50000–400000；旧值超过新上限时视作历史默认值，回落新默认而不是硬 clamp。 */
+   范围 4000–1000000 字符：1 万级小窗口也能设（省钱 / 给低窗口模型留余量），
+   上限 100 万字符（≈100 万 token，给 1M 窗口模型用）。
+   旧值超过新上限时视作历史默认值，回落新默认而不是硬 clamp。 */
 const CTX_LIMIT_DEFAULT = 120000;
-const CTX_LIMIT_MIN = 50000;
-const CTX_LIMIT_MAX = 400000;
+const CTX_LIMIT_MIN = 4000;
+const CTX_LIMIT_MAX = 1000000;
 function readCtxLimit() {
   const raw = readStorage('dsh.ctxLimit', '');
   const n = Number(raw);
@@ -1961,9 +1963,12 @@ function buildApiMessages(session, currentText, draft, skipUser) {
       + '任务清单（todo_write）由你自行判断是否使用：任务复杂、步骤较多时可以建立清单并更新进度。'
       + '不要虚构工具调用、工具结果或文件产出。'
       + '工具调用只能通过 tool_calls 字段发起，禁止在正文里写 functions.xxx、工具调用 JSON 或调用草稿；不确定如何调用时直接给文字答复，不要反复重写调用计划。'
-      + '【硬性要求】每次调用工具前先用一句短句说明这一步要做什么（不超过 15 字，例如：先看一下目录结构。）；'
-      + '多步工具循环中每一步都先说明再调用，不要逐句复述同样的措辞；工具全部结束后只报告一次最终结果，'
-      + '不要每完成一个工具就单独汇报一遍结果。'
+      + '【说话节奏】什么时候开口由你自己判断，不要求每一步都播报：'
+      + '步骤目的不直观、前后有依赖、拿到关键结论、发现异常或需要用户拍板时，用一句短话说明「这一步做什么」或「结果意味着什么」；'
+      + '一串机械的只读步骤（读文件、列目录、跑命令）可以不出声，直接继续，不要为了报进度复述工具输出。'
+      + '开口时把话放在正文里（工具调用之前，或该步结束之后），绝不写进工具参数。'
+      + '工具全部结束后只做一次总结，不要每完成一个工具就单独汇报一遍。'
+      + '步骤之间自动连续执行，不要中途停下来等用户确认；只有要做破坏性操作、权限不足或信息不足以判断时才停下询问。'
       + '同一文件/命令的结果已在上文时直接引用，不要重复调用相同参数的只读工具；需要新结果时才改参数重读。',
   }, {
     role: 'system',
@@ -2015,14 +2020,23 @@ function buildApiMessages(session, currentText, draft, skipUser) {
         + 'objective 必须写清背景、输入与目标，expectedOutput 写清验收标准，contextRefs 只放确实需要共享的工作区文件。',
     });
   }
-  const compacted = state.compacted.get(session.id);
-  if (compacted) out.push({ role: 'system', content: `以下是此前对话的压缩摘要，供你延续上下文：\n${compacted}` });
   /* 历史消息按字符预算从最新往回取，再按原顺序发出。
      只裁最旧端保证每次请求的前缀（system→旧消息）与上一轮尽可能一致，
      这是上游 prompt 缓存能命中的关键；命中率高则便宜且快。 */
   const budget = LIMITS.maxContextChars;
   const picked = [];
   let used = 0;
+  /* 压缩摘要同样占预算：小窗口（如 1 万字符）下摘要本身就可能超过预算，
+     以前它不计数、也不截断，压缩完照样撑爆窗口。这里按预算的一半封顶。 */
+  const compacted = state.compacted.get(session.id);
+  if (compacted) {
+    const maxSummary = Math.max(800, Math.floor(budget * 0.5));
+    const summary = String(compacted).length > maxSummary
+      ? String(compacted).slice(0, maxSummary) + '\n…（摘要过长，已按当前上下文窗口截断）'
+      : String(compacted);
+    out.push({ role: 'system', content: `以下是此前对话的压缩摘要，供你延续上下文：\n${summary}` });
+    used += summary.length;
+  }
   const all = session.messages;
   for (let i = all.length - 1; i >= 0; i--) {
     const m = all[i];
@@ -2075,7 +2089,9 @@ function formatStatusline() {
     ?? ((u.prompt_tokens ?? u.inputTokens ?? 0) + (u.completion_tokens ?? u.outputTokens ?? 0));
   const durMs = msg?.startedAt && msg?.finishedAt ? Math.max(0, msg.finishedAt - msg.startedAt) : 0;
   const usedChars = s ? sessionContextChars(s) : 0;
-  const ctxText = `上下文 ${ctxPct}%（${Math.round(usedChars / 1000)}k/${Math.round(LIMITS.maxContextChars / 1000)}k）`;
+  /* 小窗口（1 万字符级）下 0.4k 这类占用也要看得出来，整数 k 会全变成 0k */
+  const k = (n) => (n >= 10000 ? Math.round(n / 1000) + 'k' : (Math.round(n / 100) / 10) + 'k');
+  const ctxText = `上下文 ${ctxPct}%（${k(usedChars)}/${k(LIMITS.maxContextChars)}）`;
   const turnCache = msg ? cacheHitText(u).replace(' · 缓存 ', '') : '';
   const avg = sessionCacheStats(s);
   /* 两个百分比口径不同，必须各带标签，不能挤在同一个「缓存」括号里：
@@ -2972,13 +2988,76 @@ function ensureFinalProse(node, draft) {
   if (box && !(draft.tools || []).length) box.classList.remove('hidden');
   const visible = $$('.prose', node).map((p) => p.textContent || '').join('').trim();
   if (visible || !String(draft.body || '').trim()) return;
+  /* 段内确实没字：清掉增量签名后强制按段重投影一次（照旧不整段覆盖第一段，
+     否则多段消息会重复）。仍为空才把整段正文落在最后一段。 */
+  $$('.prose', node).forEach((p) => { delete p.dataset.segHtml; });
+  renderTools(node, draft);
+  const after = $$('.prose', node).map((p) => p.textContent || '').join('').trim();
+  if (after) return;
   const proses = $$('.prose', node);
   const target = proses[proses.length - 1] || $('.prose', node);
   if (target) target.innerHTML = markdown(draft.body);
 }
 
+/* ───────── 工具参数解析（宽容 + 可操作报错） ─────────
+   真实网关会给出几种「非法但常见」的 arguments：
+     ① 包了 ```json 围栏或前后带解释文字；② 同一个完整 JSON 重复推了两遍（{...}{...}）；
+     ③ 直接给对象而不是字符串（JSON.parse 会抛 Unexpected token o）。
+   以前一律落进「参数错误」，卡片只剩一行 JSON，模型也拿不到「该怎么改」，
+   于是重试同样的调用、连着几张「找文件（无参数）」。 */
+function firstJsonObject(text) {
+  const s = String(text || '');
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '{') continue;
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < s.length; j++) {
+      const ch = s[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') { depth--; if (depth === 0) return s.slice(i, j + 1); }
+    }
+  }
+  return '';
+}
+
+function parseToolArgs(raw) {
+  if (raw == null || raw === '') return { args: {} };
+  if (typeof raw === 'object') {
+    return Array.isArray(raw) ? { args: {}, error: '参数必须是 JSON 对象' } : { args: raw };
+  }
+  const attempt = (t) => {
+    try {
+      const v = JSON.parse(t);
+      return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+    } catch { return null; }
+  };
+  const text = String(raw).trim();
+  let args = attempt(text);
+  if (args) return { args };
+  const unfenced = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  args = attempt(unfenced);
+  if (args) return { args };
+  const block = firstJsonObject(unfenced);
+  args = block ? attempt(block) : null;
+  if (args) return { args };
+  return { args: {}, error: '参数不是合法 JSON 对象' };
+}
+
+/** 必填参数缺失：提前拦下并告诉模型缺什么、按什么形状重发，而不是让它盲试。 */
+function missingRequiredArgs(name, args) {
+  const spec = (state.toolSpecs || []).find((t) => t?.function?.name === name);
+  const req = spec?.function?.parameters?.required || [];
+  return req.filter((k) => args?.[k] === undefined || args?.[k] === null);
+}
+
 function runApiTurn(ctx, opts) {
-  const { draft, node, prose, s, ctl } = ctx;
+  const { draft, node, s, ctl } = ctx;
   let body = '';
   let lastFinishReason = '';   // 末步的 finish_reason：length 表示被输出上限截断
   let raf = 0;
@@ -3179,8 +3258,10 @@ function runApiTurn(ctx, opts) {
       draft.body = body;
     }
 
-    const finalProse = $('.prose', finalNode) || prose;
-    if (finalProse) finalProse.innerHTML = markdown(draft.body);
+    /* 收尾不再往「第一个 .prose」里塞整段正文：分段渲染下第一段只是首句说明，
+       整段覆盖会把后几段的话复制到第一段（可见重复），且签名早已写好、后续按段投影
+       会误判「已最新」而跳过，错误就一直留在屏幕上。正文一律交给 renderTools 按
+       bodySegments 投影；万一段落全空，由 ensureFinalProse 兜底。 */
     finish(draft, finalNode, s, err ? false : aborted, err ? '调用失败' : undefined);
     renderThink(finalNode, draft);   // 失败时思考内容照样可查：它往往就是失败原因
     renderTools(finalNode, draft);   // 分段定稿：写完再按 draft.body 投影一次
@@ -3439,7 +3520,13 @@ function runApiTurn(ctx, opts) {
       if (!executed?.ok) {
         tool.status = 'error';
         tool.meta = '执行失败';
-        tool.result = executed?.error?.message || '工具执行失败';
+        /* 以前只取外层 error.message（例如「命令退出码 255」），把 runtime 已经算好的
+           content（stderr、Windows 替代做法提示）丢掉——模型只看到退出码，只会原样重试。 */
+        const d = executed?.data || {};
+        const msg = executed?.error?.message || d.content || d.result?.content || '工具执行失败';
+        const extra = (d.content || d.result?.content) && (d.content || d.result?.content) !== msg
+          ? `\n${d.content || d.result?.content}` : '';
+        tool.result = msg + extra;
         renderTools(node, draft);
         finishToolStep(stepId, 'failed');
         return `工具执行失败（${name}）：${tool.result}`;
@@ -3463,7 +3550,7 @@ function runApiTurn(ctx, opts) {
       }
       tool.status = 'error';
       tool.meta = r.status === 'unknown' ? '结果未知' : (r.code === 'DENIED' ? '被拒绝' : '失败');
-      tool.result = String(r.error || r.content || '工具执行失败');
+      tool.result = String(r.content || r.error || '工具执行失败');
       renderTools(node, draft);
       scrollToBottom();
       finishToolStep(stepId, 'failed');
@@ -3479,14 +3566,9 @@ function runApiTurn(ctx, opts) {
   const runToolCall = async (call) => {
     const name = String(call?.function?.name || '');
     const meta = toolMetaFor(name);
-    let args = {};
-    let parseError = '';
-    try {
-      args = call?.function?.arguments ? JSON.parse(call.function.arguments) : {};
-      if (!args || typeof args !== 'object' || Array.isArray(args)) { parseError = '参数必须是 JSON 对象'; args = {}; }
-    } catch (err) {
-      parseError = err?.message || String(err);
-    }
+    const parsedArgs = parseToolArgs(call?.function?.arguments);
+    const args = parsedArgs.args;
+    const parseError = parsedArgs.error || '';
 
     const tool = {
       id: String(call?.id || 'tool-' + Date.now() + '-' + draft.tools.length),
@@ -3519,7 +3601,19 @@ function runApiTurn(ctx, opts) {
     if (parseError) {
       tool.status = 'error';
       tool.meta = '参数错误';
-      tool.result = `工具参数解析失败：${parseError}`;
+      tool.result = `工具参数解析失败：${parseError}。请重新调用 ${name}，arguments 必须是合法的 JSON 对象。`;
+      renderTools(node, draft);
+      return tool.result;
+    }
+
+    /* 参数能 parse 但缺必填项（常见：模型把参数写成对象、或在正文里写死却没进 arguments）：
+       直接把缺的字段名与最小示例回给模型，避免它对着「无参数」的卡片反复重试。 */
+    const missing = missingRequiredArgs(name, args);
+    if (missing.length) {
+      tool.status = 'error';
+      tool.meta = '缺少参数';
+      tool.result = `缺少必填参数：${missing.join('、')}。请按 {"${missing[0]}":"…"} 的形状重新调用 ${name}；`
+        + `可用参数见工具定义。`;
       renderTools(node, draft);
       return tool.result;
     }
@@ -3737,18 +3831,11 @@ function runApiTurn(ctx, opts) {
         if (ctl.stopRequested) draft.aborted = true;
         break;
       }
-      /* 「边干边说」结构性保证（用户要求模型像人一样每步开口，不能依赖模型自觉）：
-         工具结果回传后、下一步请求前，动态注入一条流程提醒——每一步都重新施加，
-         模型不说明就继续调用会被这条消息拦着。仅进 API 消息流，不落会话历史与正文。
-         先移除上一步的提醒再注入新的：只保留最新一条，长任务不随步数累积膨胀。 */
-      for (let ni = messages.length - 1; ni >= 0; ni--) {
-        if (messages[ni] && messages[ni].__nudge) { messages.splice(ni, 1); break; }
-      }
-      messages.push({
-        role: 'system',
-        __nudge: true, // 防累积标记：每步发起前移除上一步提醒，只保留最新一条
-        content: '（流程提醒）工具结果已返回。请先用一句短句说明结果要点与下一步动作（不超过 20 字），然后再调用下一个工具或给出最终结果；不要跳过说明直接发起下一批工具调用。',
-      });
+      /* 是否出声由模型自己判断（用户要求「不是每次工具调用完都要说话」）：
+         以前这里每步注入一条「必须先说明再调用」的 system 提醒，等于强制播报；
+         现在改为在系统提示里给出判断标准，步骤之间不再插话。UI 层有叙述行兜底
+         （工具执行中显示「正在 …」、间隙显示「模型正在思考下一步…」），
+         所以模型选择沉默时界面也不会空白，只是不假装它在说话。 */
     }
 
     finishApi(null);
@@ -4385,11 +4472,16 @@ function compactAnchors(m) {
   return parts.length ? `（${parts.join(' · ')}）` : '';
 }
 
-/** 摘要池总量钳制：保留最早 30% 与最近一段，中间省略——最早的内容是任务起点，最近的是当前进度。 */
+/** 摘要池总量钳制：保留最早 30% 与最近一段，中间省略——最早的内容是任务起点，最近的是当前进度。
+    cap 默认 24000 字符；小上下文窗口下按预算收紧，避免「摘要本身比窗口还大」。 */
+function compactCap() {
+  return Math.min(COMPACT_MAX_CHARS, Math.max(1200, Math.floor(LIMITS.maxContextChars * 0.5)));
+}
 function clampCompacted(text) {
-  if (text.length <= COMPACT_MAX_CHARS) return text;
-  const head = Math.floor(COMPACT_MAX_CHARS * 0.3);
-  const tail = COMPACT_MAX_CHARS - head - 48;
+  const cap = compactCap();
+  if (text.length <= cap) return text;
+  const head = Math.floor(cap * 0.3);
+  const tail = cap - head - 48;
   const omitted = text.length - head - tail;
   return `${text.slice(0, head)}\n…（中间 ${omitted} 字符已省略）…\n${text.slice(-tail)}`;
 }
@@ -7763,25 +7855,42 @@ function bind() {
   /* 上下文窗口（对话 pane）：改 LIMITS.maxContextChars 并持久化 dsh.ctxLimit，即时生效
      （statusline / 自动压缩 / buildApiMessages 都是函数式读取 LIMITS，无需重启）。 */
   const ctxInput = $('#ctxLimitInput');
+  const ctxPreset = $('#ctxPresetSeg');
+  const markCtxPreset = () => {
+    if (!ctxPreset) return;
+    $$('button[data-ctx]', ctxPreset).forEach((b) => {
+      b.classList.toggle('is-active', Number(b.dataset.ctx) === LIMITS.maxContextChars);
+    });
+  };
+  const applyCtxLimit = (n) => {
+    if (!Number.isInteger(n) || n < CTX_LIMIT_MIN || n > CTX_LIMIT_MAX) {
+      ctxInput?.classList.add('is-invalid'); // 非法输入红框，输入新内容或改对后清除
+      toast(`上下文窗口需为 ${CTX_LIMIT_MIN}–${CTX_LIMIT_MAX} 的整数`);
+      return false;
+    }
+    ctxInput?.classList.remove('is-invalid');
+    LIMITS.maxContextChars = n;
+    writeStorage('dsh.ctxLimit', String(n));
+    updateStatusline();
+    markCtxPreset();
+    toast(`上下文窗口已设为 ${n.toLocaleString('en-US')} 字符，立即生效`);
+    return true;
+  };
   if (ctxInput) {
     ctxInput.value = String(LIMITS.maxContextChars);
+    markCtxPreset();
     ctxInput.addEventListener('input', () => ctxInput.classList.remove('is-invalid'));
     ctxInput.addEventListener('change', () => {
       const raw = ctxInput.value.trim();
-      const n = Number(raw);
-      if (!/^\d+$/.test(raw) || !Number.isFinite(n) || n < CTX_LIMIT_MIN || n > CTX_LIMIT_MAX) {
-        ctxInput.classList.add('is-invalid'); // 非法输入红框，输入新内容或改对后清除
-        toast(`上下文窗口需为 ${CTX_LIMIT_MIN}–${CTX_LIMIT_MAX} 的整数`);
-        return;
-      }
-      ctxInput.classList.remove('is-invalid');
-      LIMITS.maxContextChars = Math.round(n);
-      writeStorage('dsh.ctxLimit', String(LIMITS.maxContextChars));
-      ctxInput.value = String(LIMITS.maxContextChars);
-      updateStatusline();
-      toast('上下文窗口已更新，立即生效');
+      if (!/^\d+$/.test(raw)) { applyCtxLimit(NaN); return; }
+      if (applyCtxLimit(Number(raw))) ctxInput.value = String(LIMITS.maxContextChars);
     });
   }
+  ctxPreset?.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-ctx]');
+    if (!b) return;
+    if (applyCtxLimit(Number(b.dataset.ctx)) && ctxInput) ctxInput.value = String(LIMITS.maxContextChars);
+  });
 
   /* MCP pane：行内按钮随 innerHTML 重建，全部走事件委托 */
   $('#mcpServerList').addEventListener('click', (e) => {
